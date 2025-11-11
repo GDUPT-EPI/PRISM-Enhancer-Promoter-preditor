@@ -128,7 +128,7 @@ def load_all_test_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
     return test_data
 
 
-def load_train_data(cell_line: str = "HUVEC") -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_train_data(cell_line: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     加载指定细胞系的训练数据
     
