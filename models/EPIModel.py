@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import math
 from config import EMBEDDING_MATRIX_PATH, LEARNING_RATE
+from layers.skipnet import StochasticDepth
 
 NUMBER_WORDS = 4097
 EMBEDDING_DIM = 768
@@ -16,8 +17,8 @@ embedding_matrix_full = torch.tensor(np.load(EMBEDDING_MATRIX_PATH), dtype=torch
 embedding_matrix = embedding_matrix_full[:NUMBER_WORDS, :]
 
 
+# 位置编码
 class FixedPositionalEncoding(nn.Module):
-    """正弦位置编码 - Transformer标准做法"""
     def __init__(self, d_model, max_len=1000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -34,11 +35,15 @@ class FixedPositionalEncoding(nn.Module):
         seq_len = x.size(0)
         return x + self.pe[:seq_len, :, :]
 
-
+# Backbone
 class EPIModel(nn.Module):
     def __init__(self):
         super(EPIModel, self).__init__()
         
+        # Stochastic Depth 配置
+        self.num_transformer_layers = 2  # 每个transformer的层数
+        self.stochastic_depth_rate = 0.2  # 最大drop概率
+
         # Embedding layers
         self.embedding_en = nn.Embedding(4097, 768)
         self.embedding_pr = nn.Embedding(4097, 768)
@@ -66,18 +71,47 @@ class EPIModel(nn.Module):
         # 固定的位置编码
         self.pos_encoder = FixedPositionalEncoding(d_model=64, max_len=1000)
         
-        # Transformer编码器
-        encoder_layer_1 = nn.TransformerEncoderLayer(
-            d_model=64, nhead=8, dim_feedforward=256, 
-            dropout=0.1, batch_first=False
-        )
-        self.enhancer_transformer = nn.TransformerEncoder(encoder_layer_1, num_layers=2)
+        # # Transformer编码器
+        # encoder_layer_1 = nn.TransformerEncoderLayer(
+        #     d_model=64, nhead=8, dim_feedforward=256, 
+        #     dropout=0.1, batch_first=False
+        # )
+        # self.enhancer_transformer = nn.TransformerEncoder(encoder_layer_1, num_layers=2)
         
-        encoder_layer_2 = nn.TransformerEncoderLayer(
-            d_model=64, nhead=8, dim_feedforward=256,
-            dropout=0.1, batch_first=False
-        )
-        self.promoter_transformer = nn.TransformerEncoder(encoder_layer_2, num_layers=2)
+        # encoder_layer_2 = nn.TransformerEncoderLayer(
+        #     d_model=64, nhead=8, dim_feedforward=256,
+        #     dropout=0.1, batch_first=False
+        # )
+        # self.promoter_transformer = nn.TransformerEncoder(encoder_layer_2, num_layers=2)
+        # Transformer编码器 - 使用独立层以支持Stochastic Depth
+        # 计算线性递增的drop概率
+        total_layers = self.num_transformer_layers * 2  # enhancer + promoter
+        drop_probs = [i / (total_layers - 1) * self.stochastic_depth_rate 
+                    for i in range(total_layers)]
+
+        # Enhancer Transformer layers
+        self.enhancer_transformer_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=64, nhead=8, dim_feedforward=256, 
+                dropout=0.1, batch_first=False
+            ) for _ in range(self.num_transformer_layers)
+        ])
+        self.enhancer_stochastic_depth = nn.ModuleList([
+            StochasticDepth(drop_probs[i]) 
+            for i in range(self.num_transformer_layers)
+        ])
+
+        # Promoter Transformer layers
+        self.promoter_transformer_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=64, nhead=8, dim_feedforward=256,
+                dropout=0.1, batch_first=False
+            ) for _ in range(self.num_transformer_layers)
+        ])
+        self.promoter_stochastic_depth = nn.ModuleList([
+            StochasticDepth(drop_probs[self.num_transformer_layers + i]) 
+            for i in range(self.num_transformer_layers)
+        ])
         
         # 交叉注意力机制
         self.cross_attention = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=False)
@@ -131,8 +165,18 @@ class EPIModel(nn.Module):
         promoters_output = self.pos_encoder(promoters_output)
         
         # Transformer编码
-        enhancers_output = self.enhancer_transformer(enhancers_output)
-        promoters_output = self.promoter_transformer(promoters_output)
+        # enhancers_output = self.enhancer_transformer(enhancers_output)
+        # promoters_output = self.promoter_transformer(promoters_output)
+        # Transformer编码 - 带Stochastic Depth
+        for layer, sd in zip(self.enhancer_transformer_layers, self.enhancer_stochastic_depth):
+            residual = enhancers_output
+            enhancers_output = layer(enhancers_output)
+            enhancers_output = residual + sd(enhancers_output - residual)
+
+        for layer, sd in zip(self.promoter_transformer_layers, self.promoter_stochastic_depth):
+            residual = promoters_output
+            promoters_output = layer(promoters_output)
+            promoters_output = residual + sd(promoters_output - residual)
         
         # 交叉注意力: 让增强子关注启动子
         enhancers_attended, _ = self.cross_attention(
