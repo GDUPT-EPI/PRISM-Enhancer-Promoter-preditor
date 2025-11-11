@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
-SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model")
+SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/test6")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
@@ -60,7 +60,7 @@ EMBEDDING_MATRIX_PATH = os.path.join(PROJECT_ROOT, "dnabert{}_matrix.npy".format
 PRETRAINED_MODEL_PATH = os.path.join(PROJECT_ROOT, "premodel_DNABERT{}_model_pgd_gene_new_19.pt".format(DNABERT_VERSION))
 
 # 细胞系配置
-TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
+TRAIN_CELL_LINE = "IMR90"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
 
 # 可视化配置

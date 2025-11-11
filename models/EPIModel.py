@@ -2,16 +2,17 @@ from torch import nn
 import torch
 import numpy as np
 import math
+from config import EMBEDDING_MATRIX_PATH, LEARNING_RATE
 
 NUMBER_WORDS = 4097
 EMBEDDING_DIM = 768
 CNN_KERNEL_SIZE = 40
 POOL_KERNEL_SIZE = 20
 OUT_CHANNELS = 64
-LEARNING_RATE = 1e-3
+# LEARNING_RATE = 1e-3
 
 # Load embedding matrix
-embedding_matrix_full = torch.tensor(np.load('dnabert1_matrix.npy'), dtype=torch.float32)
+embedding_matrix_full = torch.tensor(np.load(EMBEDDING_MATRIX_PATH), dtype=torch.float32)
 embedding_matrix = embedding_matrix_full[:NUMBER_WORDS, :]
 
 
