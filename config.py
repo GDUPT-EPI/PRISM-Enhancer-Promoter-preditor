@@ -60,7 +60,7 @@ EMBEDDING_MATRIX_PATH = os.path.join(PROJECT_ROOT, "dnabert{}_matrix.npy".format
 PRETRAINED_MODEL_PATH = os.path.join(PROJECT_ROOT, "premodel_DNABERT{}_model_pgd_gene_new_19.pt".format(DNABERT_VERSION))
 
 # 细胞系配置
-TRAIN_CELL_LINE = "IMR90"  # 选择单一细胞系或全选
+TRAIN_CELL_LINE = "HUVEC"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
 
 # 可视化配置
