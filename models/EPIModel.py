@@ -58,14 +58,14 @@ class EPIModel(nn.Module):
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
             nn.BatchNorm1d(64),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.2)
         )
         self.promoter_sequential = nn.Sequential(
             nn.Conv1d(in_channels=768, out_channels=64, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
             nn.BatchNorm1d(64),
-            nn.Dropout(p=0.5)
+            nn.Dropout(p=0.2)
         )
         
         # 固定的位置编码
@@ -127,7 +127,7 @@ class EPIModel(nn.Module):
             nn.Linear(64 * 2, 128),  # 增强子+启动子各64维
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
+            nn.Dropout(p=0.33),
             nn.Linear(128, 1)
         )
         

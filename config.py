@@ -9,10 +9,10 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # 数据路径配置
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
-SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/test6")
+SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/test-skip")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
