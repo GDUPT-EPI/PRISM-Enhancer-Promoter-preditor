@@ -31,8 +31,9 @@ def convert_pytorch_to_custom_format(input_path, output_path):
 
 if __name__ == "__main__":
     # 输入和输出路径
-    input_model_path = "./bert/pytorch_model.bin"
-    output_model_path = "premodel_DNABERT1_model_pgd_gene_new_19.pt"
+    version = "6"  # 版本号
+    input_model_path = "./bert/DNABERT{}.bin".format(version)
+    output_model_path = "premodel_DNABERT{}_model_pgd_gene_new_19.pt".format(version)
     
     # 执行转换
     state_dict = convert_pytorch_to_custom_format(input_model_path, output_model_path)

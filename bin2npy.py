@@ -32,8 +32,9 @@ def convert_pytorch_to_dnabert1_matrix(pytorch_model_path, output_path):
 
 if __name__ == "__main__":
     # 输入和输出路径
-    input_model_path = "./bert/pytorch_model.bin"
-    output_matrix_path = "dnabert1_matrix.npy"
+    version = "6"  # 版本号
+    input_model_path = "./bert/DNABERT{}.bin".format(version)
+    output_matrix_path = "dnabert{}_matrix.npy".format(version)
     
     # 执行转换
     embedding_matrix = convert_pytorch_to_dnabert1_matrix(input_model_path, output_matrix_path)
