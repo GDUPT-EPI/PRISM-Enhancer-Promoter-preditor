@@ -22,7 +22,9 @@ from config import (
     ENHANCER_FEATURE_DIM,
     PROMOTER_FEATURE_DIM,
     PROJECT_ROOT,
-    CACHE_DIR
+    CACHE_DIR,
+    KMER_SIZE,
+    KMER_OVERLAP
 )
 
 # 全局tokenizer缓存
@@ -61,7 +63,7 @@ def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
     # 创建新的tokenizer
     print("创建tokenizer字典...")
     bases = ['A', 'C', 'G', 'T']
-    k = 6  # 6-mer
+    k = KMER_SIZE  # 从config.py导入的6-mer配置
     
     # 使用itertools.product生成所有可能的6-mer组合
     products = itertools.product(bases, repeat=k)
@@ -84,13 +86,14 @@ def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
     return _TOKENIZER_CACHE
 
 
-def sequence_to_tokens_fast(sequence: str, k: int = 6) -> List[str]:
+def sequence_to_tokens_fast(sequence: str, k: int = KMER_SIZE) -> List[str]:
     """
     高效地将DNA序列转换为k-mer tokens
+    使用overlapping方式，每次滑动1个碱基(k-1)
     
     Args:
         sequence: DNA序列字符串
-        k: k-mer长度
+        k: k-mer长度，默认使用config.py中的KMER_SIZE
         
     Returns:
         k-mer tokens列表
@@ -100,7 +103,7 @@ def sequence_to_tokens_fast(sequence: str, k: int = 6) -> List[str]:
     if seq_len < k:
         return ['null']
     
-    # 使用列表推导式生成k-mers，比循环更高效
+    # 使用列表推导式生成overlapping k-mers，每次滑动1个碱基(k-1=KMER_OVERLAP)
     tokens = [sequence[i:i+k] for i in range(seq_len - k + 1)]
     
     # 检查每个token是否包含'N'，如果有则替换为'null'

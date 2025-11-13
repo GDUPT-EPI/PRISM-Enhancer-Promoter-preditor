@@ -6,6 +6,7 @@ import torch
 import itertools
 import numpy as np
 from torch.utils.data import DataLoader
+from config import KMER_SIZE, KMER_OVERLAP
 
 
 class MyDataset(Dataset):
@@ -20,22 +21,8 @@ class MyDataset(Dataset):
         self.label_count = len(labels)
         
     def __getitem__(self, idx):
-        #enhancer_sequence = linecache.getline(self.enhancers_file, idx + 1).strip()
-        
-        #promoter_sequence = linecache.getline(self.promoters_file, idx + 1).strip()
-        #label = int(linecache.getline(self.labels_file, idx + 1).strip())
-        
-        '''
-        enhancer_sequence_encoded = self.one_hot_encoding(enhancer_sequence)
-        promoter_sequence_encoded = self.one_hot_encoding(promoter_sequence)
-        '''
-        '''
-        enhancer_sequence_encoded = self.get_token_ids(enhancer_sequence)
-        promoter_sequence_encoded = self.get_token_ids(promoter_sequence)
-        '''
         enhancer_sequence = str(self.enhancers[idx])
         promoter_sequence = str(self.promoters[idx])
-        
         
         label = int(self.labels[idx])
         return enhancer_sequence, promoter_sequence, label
@@ -90,19 +77,6 @@ class MaskDataSet(Dataset):
 
         
     def __getitem__(self, idx):
-        #enhancer_sequence = linecache.getline(self.enhancers_file, idx + 1).strip()
-        
-        #promoter_sequence = linecache.getline(self.promoters_file, idx + 1).strip()
-        #label = int(linecache.getline(self.labels_file, idx + 1).strip())
-        
-        '''
-        enhancer_sequence_encoded = self.one_hot_encoding(enhancer_sequence)
-        promoter_sequence_encoded = self.one_hot_encoding(promoter_sequence)
-        '''
-        '''
-        enhancer_sequence_encoded = self.get_token_ids(enhancer_sequence)
-        promoter_sequence_encoded = self.get_token_ids(promoter_sequence)
-        '''
         enhancer_sequence = str(self.enhancers[idx])
         promoter_sequence = str(self.promoters[idx])
 
@@ -124,14 +98,6 @@ class MaskDataSet(Dataset):
         
         return line_count
     
-    
-    
-    
-
-    
-    
-
-   
 class IDSDataset(Dataset):
     def __init__(self, dataset):
         self.dataset = dataset
@@ -140,60 +106,66 @@ class IDSDataset(Dataset):
     def __getitem__(self, idx):
         enhancer_sequence, promoter_sequence, label = self.dataset[idx]
         
-        
-        enhancer_sequence_encoded = self.get_token_ids(enhancer_sequence)
-        promoter_sequence_encoded = self.get_token_ids(promoter_sequence)
-        
-
-        '''
-        enhancer_sequence_encoded = self.one_hot_encoding(enhancer_sequence)
-        promoter_sequence_encoded = self.one_hot_encoding(promoter_sequence)
-        '''
+        # 使用6-mer overlapping tokenization (k-1 overlapping)
+        enhancer_sequence_encoded = self.get_overlapping_token_ids(enhancer_sequence)
+        promoter_sequence_encoded = self.get_overlapping_token_ids(promoter_sequence)
 
         return enhancer_sequence_encoded.squeeze(), promoter_sequence_encoded.squeeze(), label
         
-        #return torch.unsqueeze(enhancer_sequence_encoded, 0), torch.unsqueeze(promoter_sequence_encoded, 0), label
-        #return enhancer_sequence_encoded, promoter_sequence_encoded, label
-        
-    
     def __len__(self):
         return len(self.dataset)
     
-    
-    def get_token_ids(self, sequence):
+    def get_overlapping_token_ids(self, sequence):
+        """
+        使用6-mer overlapping tokenization方法处理序列
+        overlapping指k-1，即每次滑动1个碱基
+        
+        Args:
+            sequence: DNA序列字符串
+            
+        Returns:
+            token ID张量
+        """
         token_dict = self.get_tokenizer()
         
-        k = 6
-        token_6mers = [sequence[i:i+k] for i in range(len(sequence) - k + 1)]
-        token_6mers = ["null" if 'N' in mer else mer for mer in token_6mers]
-        #token_6mers.append('null')
-        token_ids = [token_dict[mer] for mer in token_6mers]
-             
+        k = KMER_SIZE  # 从config.py导入的6-mer配置
+        seq_len = len(sequence)
         
-        #二维卷积需要有通道维度
-        #return torch.tensor(token_ids).reshape(-1, len(token_ids))
+        # 如果序列长度小于k，返回null token
+        if seq_len < k:
+            return torch.tensor([0])
+        
+        # 生成overlapping 6-mers，每次滑动1个碱基(k-1=KMER_OVERLAP)
+        token_6mers = [sequence[i:i+k] for i in range(seq_len - k + 1)]
+        
+        # 替换包含N的mer为null
+        token_6mers = ["null" if 'N' in mer else mer for mer in token_6mers]
+        
+        # 转换为token IDs
+        token_ids = [token_dict.get(mer, 0) for mer in token_6mers]
         
         return torch.tensor(token_ids)
             
     def get_tokenizer(self):
-        f= ['A','C','G','T']
-        c = itertools.product(f,f,f,f,f,f)
-        res=[]
-        for i in c:
-            temp=i[0] + i[1] + i[2] + i[3] + i[4] + i[5]
-            res.append(temp)
-            token_dict = {word: index + 1 for index, word in enumerate(res)}
-            
-            token_dict['null'] = 0
+        """
+        获取6-mer tokenizer字典
+        
+        Returns:
+            token到索引的映射字典
+        """
+        # 生成所有可能的6-mer组合
+        bases = ['A', 'C', 'G', 'T']
+        k = KMER_SIZE  # 从config.py导入的6-mer配置
+        
+        # 使用itertools.product生成所有可能的6-mer组合
+        products = itertools.product(bases, repeat=k)
+        tokens = [''.join(p) for p in products]
+        
+        # 创建token到索引的映射字典
+        token_dict = {token: idx + 1 for idx, token in enumerate(tokens)}  # 从1开始索引
+        token_dict['null'] = 0  # null token的索引为0
+        
         return token_dict
-    
-    def one_hot_encoding(self, sequence):
-        encoding = torch.zeros(len(sequence), 4)
-        base_to_index = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
-        for i, base in enumerate(sequence):
-            if base == 'N': continue
-            encoding[i][base_to_index[base]] = 1
-        return encoding
     
     
 class BalancedDataset(Dataset):

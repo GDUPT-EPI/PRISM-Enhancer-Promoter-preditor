@@ -89,6 +89,9 @@ DEVICE = "cuda"  # 优先使用GPU
 DEBUG_MODE = False
 SAVE_ATTENTION_OUTPUTS = False
 
+# K-mer配置
+KMER_SIZE = 6  # 6-mer tokenization
+KMER_OVERLAP = 5  # overlapping k-mer (k-1)
 
 # 预处理优化配置
 PREPROCESS_NUM_WORKERS = max(1, os.cpu_count() - 1)  # 使用所有核心-1

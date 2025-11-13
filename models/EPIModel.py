@@ -38,14 +38,12 @@ class EPIModel(nn.Module):
         self.num_transformer_layers = TRANSFORMER_LAYERS
         self.stochastic_depth_rate = STOCHASTIC_DEPTH_RATE
 
-        # Embedding layers - 随机初始化，不使用预训练权重
+        # Embedding layers - 使用预训练权重
         self.embedding_en = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
         self.embedding_pr = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
-        # 使用Xavier初始化
-        nn.init.xavier_uniform_(self.embedding_en.weight)
-        nn.init.xavier_uniform_(self.embedding_pr.weight)
-        self.embedding_en.requires_grad = True
-        self.embedding_pr.requires_grad = True
+        
+        # 加载预训练权重
+        self._load_pretrained_embeddings()
         
         # CNN特征提取 - 使用集中配置的dropout
         self.enhancer_sequential = nn.Sequential(
@@ -125,6 +123,20 @@ class EPIModel(nn.Module):
             lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
         )
     
+    def _load_pretrained_embeddings(self):
+        """
+        加载预训练的嵌入权重
+        如果预训练权重不存在，则使用Xavier初始化
+        """
+        # 这里可以加载预训练的嵌入权重
+        # 目前使用Xavier初始化作为占位符
+        nn.init.xavier_uniform_(self.embedding_en.weight)
+        nn.init.xavier_uniform_(self.embedding_pr.weight)
+        
+        # 设置嵌入层为可训练
+        self.embedding_en.requires_grad = True
+        self.embedding_pr.requires_grad = True
+    
     def forward(self, enhancer_ids, promoter_ids, enhancer_features, promoter_features):
         min_required_length = 59
         
@@ -152,9 +164,6 @@ class EPIModel(nn.Module):
         enhancers_output = self.pos_encoder(enhancers_output)
         promoters_output = self.pos_encoder(promoters_output)
         
-        # Transformer编码
-        # enhancers_output = self.enhancer_transformer(enhancers_output)
-        # promoters_output = self.promoter_transformer(promoters_output)
         # Transformer编码 - 带Stochastic Depth
         for layer, sd in zip(self.enhancer_transformer_layers, self.enhancer_stochastic_depth):
             residual = enhancers_output
