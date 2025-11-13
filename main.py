@@ -2,6 +2,8 @@
 
 # 导入配置文件
 from config import *
+# 导入新的数据加载模块
+from data_loader import load_train_data, load_all_test_data
 
 # 导入日志模块
 import logging
@@ -410,9 +412,6 @@ def val_forwrd(model, dataloader, cell_name=""):
 
 #得到的是序列数据
 #dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
-
-# 导入新的数据加载模块
-from data_loader import load_train_data, load_all_test_data
 
 # 加载训练数据 (使用配置文件中指定的细胞系)
 enhancers_train, promoters_train, Labels_train = load_train_data(TRAIN_CELL_LINE)
