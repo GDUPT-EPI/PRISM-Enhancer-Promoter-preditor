@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 
 from torch.utils.data import DataLoader
-from models.pleat.embedding import MyDataset
+from data_loader import MyDataset
 
 # 导入优化的数据预处理模块
 from models.pleat.optimized_pre import (

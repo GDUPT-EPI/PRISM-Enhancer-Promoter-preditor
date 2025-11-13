@@ -8,33 +8,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 from config import KMER_SIZE, KMER_OVERLAP
 
-
-class MyDataset(Dataset):
-    
-    def __init__(self, enhancers, promoters, labels):
-        self.enhancers = enhancers
-        self.promoters = promoters
-        self.labels = labels
-        
-        self.enhancer_count = len(enhancers)
-        self.promoter_count = len(promoters)
-        self.label_count = len(labels)
-        
-    def __getitem__(self, idx):
-        enhancer_sequence = str(self.enhancers[idx])
-        promoter_sequence = str(self.promoters[idx])
-        
-        label = int(self.labels[idx])
-        return enhancer_sequence, promoter_sequence, label
-    
-    def __len__(self):
-        return self.label_count
-    
-    def count_lines_in_txt(self, file_path):
-        with open(file_path, "r") as file:
-            line_count = len(file.readlines())
-        
-        return line_count
     
 def match_motif(pwm_matrix, sequence, threshold):
         motif_length = len(pwm_matrix)

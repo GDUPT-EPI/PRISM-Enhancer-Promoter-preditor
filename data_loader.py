@@ -139,3 +139,31 @@ def load_train_data(cell_line: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
         增强子序列数组、启动子序列数组、标签数组的元组
     """
     return prepare_cell_data(cell_line, "train")
+
+# 从embedding.py中复制的MyDataset类
+class MyDataset():
+    
+    def __init__(self, enhancers, promoters, labels):
+        self.enhancers = enhancers
+        self.promoters = promoters
+        self.labels = labels
+        
+        self.enhancer_count = len(enhancers)
+        self.promoter_count = len(promoters)
+        self.label_count = len(labels)
+        
+    def __getitem__(self, idx):
+        enhancer_sequence = str(self.enhancers[idx])
+        promoter_sequence = str(self.promoters[idx])
+        
+        label = int(self.labels[idx])
+        return enhancer_sequence, promoter_sequence, label
+    
+    def __len__(self):
+        return self.label_count
+    
+    def count_lines_in_txt(self, file_path):
+        with open(file_path, "r") as file:
+            line_count = len(file.readlines())
+        
+        return line_count
