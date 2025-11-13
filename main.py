@@ -8,8 +8,8 @@ import logging
 from datetime import datetime
 
 from torch.utils.data import DataLoader
-from dataset_embedding import MyDataset
-from dataset_embedding import IDSDataset
+from models.pleat.dataset_embedding import MyDataset
+from models.pleat.dataset_embedding import IDSDataset
 
 # 导入优化的数据预处理模块
 from models.pleat.optimized_pre import (
