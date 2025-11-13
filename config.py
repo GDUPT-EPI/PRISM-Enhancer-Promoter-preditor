@@ -39,6 +39,26 @@ CNN_KERNEL_SIZE = 40
 POOL_KERNEL_SIZE = 20
 OUT_CHANNELS = 64
 
+# Transformer相关参数 - 集中管理避免冲突
+TRANSFORMER_LAYERS = 2  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_HEADS = 8   # 多头注意力头数
+TRANSFORMER_FF_DIM = 256  # 前馈网络维度
+TRANSFORMER_DROPOUT = 0.1  # Transformer层间dropout
+
+# Stochastic Depth配置
+STOCHASTIC_DEPTH_RATE = 0.2  # 最大drop概率
+
+# CNN和分类头参数 - 集中管理避免冲突
+CNN_DROPOUT = 0.2      # CNN层dropout率
+CLASSIFIER_HIDDEN_SIZE = 128  # 分类头中间层大小
+CLASSIFIER_DROPOUT = 0.33     # 分类头dropout率
+
+# 位置编码配置
+POS_ENCODING_MAX_LEN = 1000
+
+# 优化器配置
+WEIGHT_DECAY = 0.001
+
 # 序列长度配置
 MAX_ENHANCER_LENGTH = 1000  # 固定增强子序列长度
 MAX_PROMOTER_LENGTH = 4000  # 固定启动子序列长度
