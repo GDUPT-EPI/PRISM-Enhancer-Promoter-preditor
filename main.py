@@ -12,7 +12,7 @@ from dataset_embedding import MyDataset
 from dataset_embedding import IDSDataset
 
 # 导入优化的数据预处理模块
-from optimized_data_preprocessing import (
+from models.pleat.optimized_pre import (
     create_optimized_dataset,
     get_tokenizer,
     warmup_cache,
@@ -175,14 +175,6 @@ def simple_collate_fn(batch):
     
     return padded_enhancer_sequences, padded_promoter_sequences, padded_enhancer_features, padded_promoter_features, labels
 
-
-# 导入优化的数据预处理模块
-from optimized_data_preprocessing import (
-    create_optimized_dataset,
-    get_tokenizer,
-    warmup_cache,
-    clear_tokenizer_cache
-)
 
 # 原有的数据集类保留作为备用
 class OptimizedCombinedDataset(Dataset):

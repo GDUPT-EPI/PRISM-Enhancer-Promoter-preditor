@@ -8,7 +8,7 @@ from config import (
     STOCHASTIC_DEPTH_RATE, CNN_DROPOUT, CLASSIFIER_HIDDEN_SIZE, CLASSIFIER_DROPOUT,
     POS_ENCODING_MAX_LEN, WEIGHT_DECAY
 )
-from layers.skipnet import StochasticDepth
+from models.pleat.skipnet import StochasticDepth
 
 
 # 位置编码
