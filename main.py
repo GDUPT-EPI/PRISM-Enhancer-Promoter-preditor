@@ -434,18 +434,14 @@ enhancers_test_HUVEC, promoters_test_HUVEC, Labels_test_HUVEC = test_data["HUVEC
 enhancers_test_K562, promoters_test_K562, Labels_test_K562 = test_data["K562"]
 enhancers_test_NHEK, promoters_test_NHEK, Labels_test_NHEK = test_data["NHEK"]
 
-# 加载预训练模型
-model_state_dict = torch.load(PRETRAINED_MODEL_PATH)
-print(f"加载预训练模型: {PRETRAINED_MODEL_PATH}")
-
 # 检查模型保存路径是否存在
 if not os.path.exists(SAVE_MODEL_DIR):
     os.makedirs(SAVE_MODEL_DIR)
 
-# 创建模型实例并加载参数
+# 创建新的模型实例（不使用预训练权重）
 epimodel = EPIModel()
-epimodel.load_state_dict(model_state_dict, strict=False)
 epimodel = epimodel.to(device)
+print("创建新的模型实例（不使用预训练权重）")
 
 # 创建优化器
 optimizer = torch.optim.Adam(epimodel.parameters(), lr=LEARNING_RATE)

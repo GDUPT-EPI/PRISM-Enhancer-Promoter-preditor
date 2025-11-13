@@ -54,11 +54,6 @@ FGM_EPSILON = 1.0
 ENABLE_ADVERSARIAL_TRAINING = True  # 是否启用对抗训练
 K = 3  # PGD攻击迭代次数
 
-# 文件路径配置
-DNABERT_VERSION = "6"  # 版本号
-EMBEDDING_MATRIX_PATH = os.path.join(PROJECT_ROOT, "dnabert{}_matrix.npy".format(DNABERT_VERSION))
-PRETRAINED_MODEL_PATH = os.path.join(PROJECT_ROOT, "premodel_DNABERT{}_model_pgd_gene_new_19.pt".format(DNABERT_VERSION))
-
 # 细胞系配置
 TRAIN_CELL_LINE = "HUVEC"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]

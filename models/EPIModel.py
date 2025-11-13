@@ -2,19 +2,8 @@ from torch import nn
 import torch
 import numpy as np
 import math
-from config import EMBEDDING_MATRIX_PATH, LEARNING_RATE
+from config import LEARNING_RATE, NUMBER_WORDS, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS
 from layers.skipnet import StochasticDepth
-
-NUMBER_WORDS = 4097
-EMBEDDING_DIM = 768
-CNN_KERNEL_SIZE = 40
-POOL_KERNEL_SIZE = 20
-OUT_CHANNELS = 64
-# LEARNING_RATE = 1e-3
-
-# Load embedding matrix
-embedding_matrix_full = torch.tensor(np.load(EMBEDDING_MATRIX_PATH), dtype=torch.float32)
-embedding_matrix = embedding_matrix_full[:NUMBER_WORDS, :]
 
 
 # 位置编码
@@ -44,45 +33,34 @@ class EPIModel(nn.Module):
         self.num_transformer_layers = 2  # 每个transformer的层数
         self.stochastic_depth_rate = 0.2  # 最大drop概率
 
-        # Embedding layers
-        self.embedding_en = nn.Embedding(4097, 768)
-        self.embedding_pr = nn.Embedding(4097, 768)
-        self.embedding_en.weight = nn.Parameter(embedding_matrix)
-        self.embedding_pr.weight = nn.Parameter(embedding_matrix)
+        # Embedding layers - 随机初始化，不使用预训练权重
+        self.embedding_en = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
+        self.embedding_pr = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
+        # 使用Xavier初始化
+        nn.init.xavier_uniform_(self.embedding_en.weight)
+        nn.init.xavier_uniform_(self.embedding_pr.weight)
         self.embedding_en.requires_grad = True
         self.embedding_pr.requires_grad = True
         
         # CNN特征提取
         self.enhancer_sequential = nn.Sequential(
-            nn.Conv1d(in_channels=768, out_channels=64, kernel_size=CNN_KERNEL_SIZE),
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(OUT_CHANNELS),
             nn.Dropout(p=0.2)
         )
         self.promoter_sequential = nn.Sequential(
-            nn.Conv1d(in_channels=768, out_channels=64, kernel_size=CNN_KERNEL_SIZE),
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(64),
+            nn.BatchNorm1d(OUT_CHANNELS),
             nn.Dropout(p=0.2)
         )
         
         # 固定的位置编码
-        self.pos_encoder = FixedPositionalEncoding(d_model=64, max_len=1000)
+        self.pos_encoder = FixedPositionalEncoding(d_model=OUT_CHANNELS, max_len=1000)
         
-        # # Transformer编码器
-        # encoder_layer_1 = nn.TransformerEncoderLayer(
-        #     d_model=64, nhead=8, dim_feedforward=256, 
-        #     dropout=0.1, batch_first=False
-        # )
-        # self.enhancer_transformer = nn.TransformerEncoder(encoder_layer_1, num_layers=2)
-        
-        # encoder_layer_2 = nn.TransformerEncoderLayer(
-        #     d_model=64, nhead=8, dim_feedforward=256,
-        #     dropout=0.1, batch_first=False
-        # )
-        # self.promoter_transformer = nn.TransformerEncoder(encoder_layer_2, num_layers=2)
         # Transformer编码器 - 使用独立层以支持Stochastic Depth
         # 计算线性递增的drop概率
         total_layers = self.num_transformer_layers * 2  # enhancer + promoter
@@ -92,7 +70,7 @@ class EPIModel(nn.Module):
         # Enhancer Transformer layers
         self.enhancer_transformer_layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
-                d_model=64, nhead=8, dim_feedforward=256, 
+                d_model=OUT_CHANNELS, nhead=8, dim_feedforward=256, 
                 dropout=0.1, batch_first=False
             ) for _ in range(self.num_transformer_layers)
         ])
@@ -104,7 +82,7 @@ class EPIModel(nn.Module):
         # Promoter Transformer layers
         self.promoter_transformer_layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
-                d_model=64, nhead=8, dim_feedforward=256,
+                d_model=OUT_CHANNELS, nhead=8, dim_feedforward=256,
                 dropout=0.1, batch_first=False
             ) for _ in range(self.num_transformer_layers)
         ])
@@ -114,17 +92,17 @@ class EPIModel(nn.Module):
         ])
         
         # 交叉注意力机制
-        self.cross_attention = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=False)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=OUT_CHANNELS, num_heads=8, batch_first=False)
         
         # 自注意力
-        self.self_attention = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=False)
+        self.self_attention = nn.MultiheadAttention(embed_dim=OUT_CHANNELS, num_heads=8, batch_first=False)
         
         # Pooling层 - 将序列降维为固定长度
         self.adaptive_pool = nn.AdaptiveAvgPool1d(1)  # 全局平均池化
         
         # 固定大小的分类头
         self.fc = nn.Sequential(
-            nn.Linear(64 * 2, 128),  # 增强子+启动子各64维
+            nn.Linear(OUT_CHANNELS * 2, 128),  # 增强子+启动子各OUT_CHANNELS维
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Dropout(p=0.33),
