@@ -6,9 +6,11 @@ from config import (
     LEARNING_RATE, NUMBER_WORDS, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS,
     TRANSFORMER_LAYERS, TRANSFORMER_HEADS, TRANSFORMER_FF_DIM, TRANSFORMER_DROPOUT,
     STOCHASTIC_DEPTH_RATE, CNN_DROPOUT, CLASSIFIER_HIDDEN_SIZE, CLASSIFIER_DROPOUT,
-    POS_ENCODING_MAX_LEN, WEIGHT_DECAY
+    POS_ENCODING_MAX_LEN, WEIGHT_DECAY, DNA_EMBEDDING_VOCAB_SIZE, DNA_EMBEDDING_DIM,
+    DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.skipnet import StochasticDepth
+from models.pleat.embedding import create_dna_embedding_layer
 
 
 # 位置编码
@@ -38,12 +40,19 @@ class EPIModel(nn.Module):
         self.num_transformer_layers = TRANSFORMER_LAYERS
         self.stochastic_depth_rate = STOCHASTIC_DEPTH_RATE
 
-        # Embedding layers - 使用预训练权重
-        self.embedding_en = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
-        self.embedding_pr = nn.Embedding(NUMBER_WORDS, EMBEDDING_DIM)
-        
-        # 加载预训练权重
-        self._load_pretrained_embeddings()
+        # DNA嵌入层 - 使用6-mer overlapping tokenization
+        self.embedding_en = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.embedding_pr = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
         
         # CNN特征提取 - 使用集中配置的dropout
         self.enhancer_sequential = nn.Sequential(
@@ -123,20 +132,6 @@ class EPIModel(nn.Module):
             lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
         )
     
-    def _load_pretrained_embeddings(self):
-        """
-        加载预训练的嵌入权重
-        如果预训练权重不存在，则使用Xavier初始化
-        """
-        # 这里可以加载预训练的嵌入权重
-        # 目前使用Xavier初始化作为占位符
-        nn.init.xavier_uniform_(self.embedding_en.weight)
-        nn.init.xavier_uniform_(self.embedding_pr.weight)
-        
-        # 设置嵌入层为可训练
-        self.embedding_en.requires_grad = True
-        self.embedding_pr.requires_grad = True
-    
     def forward(self, enhancer_ids, promoter_ids, enhancer_features, promoter_features):
         min_required_length = 59
         
@@ -148,7 +143,7 @@ class EPIModel(nn.Module):
             padding_size = min_required_length - promoter_ids.size(1)
             promoter_ids = torch.nn.functional.pad(promoter_ids, (0, padding_size), value=0)
         
-        # Embedding
+        # DNA嵌入 - 使用6-mer overlapping tokenization
         enhancer_embedding = self.embedding_en(enhancer_ids)
         promoter_embedding = self.embedding_pr(promoter_ids)
         

@@ -1,186 +1,261 @@
-from torch.utils.data import Dataset
-from torchvision import transforms
-import linecache
-import os
+#!/usr/bin/env python3
+"""
+6-mer重叠嵌入层模块
+实现基于DNA序列的6-mer tokenization和嵌入向量生成
+"""
+
 import torch
+import torch.nn as nn
 import itertools
+from typing import Dict, List, Tuple
 import numpy as np
-from torch.utils.data import DataLoader
-from config import KMER_SIZE, KMER_OVERLAP
 
+# 导入配置参数
+from config import KMER_SIZE, KMER_OVERLAP, EMBEDDING_DIM, NUMBER_WORDS
+
+
+class KMerTokenizer:
+    """
+    6-mer分词器类，用于将DNA序列转换为k-mer tokens
     
-def match_motif(pwm_matrix, sequence, threshold):
-        motif_length = len(pwm_matrix)
-        matches = []
-        for i in range(len(sequence) - motif_length + 1):
-            subsequence = sequence[i:i+motif_length]
-            score = 1.0
-            for j in range(motif_length):
-                nucleotide = subsequence[j]
-                if score < 0: break
-                if nucleotide == 'A':
-                    score *= pwm_matrix[j][0]
-                elif nucleotide == 'C':
-                    score *= pwm_matrix[j][1]
-                elif nucleotide == 'G':
-                    score *= pwm_matrix[j][2]
-                elif nucleotide == 'T':
-                    score *= pwm_matrix[j][3]
-            if score >= threshold:  # 设置一个阈值来决定匹配与否
-                matches.append(i)
-        return matches
-
-def replace_motif_with_N(sequence, matches, motif_length):
-        modified_sequence = list(sequence)
-        for match in matches:
-            modified_sequence[match:match+motif_length] = 'N' * motif_length
-        return ''.join(modified_sequence)
-
-class MaskDataSet(Dataset):
-
-    def __init__(self, enhancers, promoters, labels, pwm_matrix):
-        self.enhancers = enhancers
-        self.promoters = promoters
-        self.labels = labels
-        self.pwm_matrix = pwm_matrix
-        
-        self.enhancer_count = len(enhancers)
-        self.promoter_count = len(promoters)
-        self.label_count = len(labels)
-
-        
-    def __getitem__(self, idx):
-        enhancer_sequence = str(self.enhancers[idx])
-        promoter_sequence = str(self.promoters[idx])
-
-        matches = match_motif(self.pwm_matrix, enhancer_sequence, 0)
-        enhancer_sequence = replace_motif_with_N(enhancer_sequence, matches, len(self.pwm_matrix))
-
-        matches = match_motif(self.pwm_matrix, promoter_sequence, 0)
-        promoter_sequence = replace_motif_with_N(promoter_sequence, matches, len(self.pwm_matrix))
-
-        label = int(self.labels[idx])
-        return enhancer_sequence, promoter_sequence, label
+    Attributes:
+        token_to_idx (Dict[str, int]): token到索引的映射字典
+        idx_to_token (Dict[int, str]): 索引到token的映射字典
+        vocab_size (int): 词汇表大小
+    """
     
-    def __len__(self):
-        return self.label_count
-    
-    def count_lines_in_txt(self, file_path):
-        with open(file_path, "r") as file:
-            line_count = len(file.readlines())
-        
-        return line_count
-    
-class IDSDataset(Dataset):
-    def __init__(self, dataset):
-        self.dataset = dataset
-        
-        
-    def __getitem__(self, idx):
-        enhancer_sequence, promoter_sequence, label = self.dataset[idx]
-        
-        # 使用6-mer overlapping tokenization (k-1 overlapping)
-        enhancer_sequence_encoded = self.get_overlapping_token_ids(enhancer_sequence)
-        promoter_sequence_encoded = self.get_overlapping_token_ids(promoter_sequence)
-
-        return enhancer_sequence_encoded.squeeze(), promoter_sequence_encoded.squeeze(), label
-        
-    def __len__(self):
-        return len(self.dataset)
-    
-    def get_overlapping_token_ids(self, sequence):
+    def __init__(self, k: int = KMER_SIZE):
         """
-        使用6-mer overlapping tokenization方法处理序列
-        overlapping指k-1，即每次滑动1个碱基
+        初始化k-mer分词器
+        
+        Args:
+            k: k-mer长度，默认使用配置文件中的KMER_SIZE
+        """
+        self.k = k
+        self.token_to_idx = {}
+        self.idx_to_token = {}
+        self.vocab_size = 0
+        self._build_vocab()
+    
+    def _build_vocab(self) -> None:
+        """
+        构建k-mer词汇表
+        包含所有可能的k-mer组合以及null token
+        """
+        # DNA碱基
+        bases = ['A', 'C', 'G', 'T']
+        
+        # 生成所有可能的k-mer组合
+        products = itertools.product(bases, repeat=self.k)
+        tokens = [''.join(p) for p in products]
+        
+        # 添加null token用于填充和未知碱基
+        tokens.insert(0, 'null')
+        
+        # 创建token到索引的映射字典
+        self.token_to_idx = {token: idx for idx, token in enumerate(tokens)}
+        self.idx_to_token = {idx: token for token, idx in self.token_to_idx.items()}
+        self.vocab_size = len(tokens)
+        
+        print(f"构建了{self.vocab_size}大小的{self.k}-mer词汇表")
+    
+    def tokenize(self, sequence: str) -> List[str]:
+        """
+        将DNA序列转换为k-mer tokens列表
+        使用overlapping方式，每次滑动k-1个碱基
         
         Args:
             sequence: DNA序列字符串
             
         Returns:
-            token ID张量
+            k-mer tokens列表
         """
-        token_dict = self.get_tokenizer()
+        # 检查序列长度
+        if len(sequence) < self.k:
+            return ['null']
         
-        k = KMER_SIZE  # 从config.py导入的6-mer配置
-        seq_len = len(sequence)
+        # 使用overlapping方式生成k-mers，每次滑动k-1个碱基
+        tokens = []
+        for i in range(len(sequence) - self.k + 1):
+            kmer = sequence[i:i+self.k]
+            # 检查是否包含未知碱基N
+            if 'N' in kmer:
+                tokens.append('null')
+            else:
+                tokens.append(kmer)
         
-        # 如果序列长度小于k，返回null token
-        if seq_len < k:
-            return torch.tensor([0])
+        return tokens
+    
+    def encode(self, sequence: str) -> torch.Tensor:
+        """
+        将DNA序列编码为token索引张量
         
-        # 生成overlapping 6-mers，每次滑动1个碱基(k-1=KMER_OVERLAP)
-        token_6mers = [sequence[i:i+k] for i in range(seq_len - k + 1)]
-        
-        # 替换包含N的mer为null
-        token_6mers = ["null" if 'N' in mer else mer for mer in token_6mers]
-        
-        # 转换为token IDs
-        token_ids = [token_dict.get(mer, 0) for mer in token_6mers]
-        
-        return torch.tensor(token_ids)
+        Args:
+            sequence: DNA序列字符串
             
-    def get_tokenizer(self):
-        """
-        获取6-mer tokenizer字典
-        
         Returns:
-            token到索引的映射字典
+            token索引张量
         """
-        # 生成所有可能的6-mer组合
-        bases = ['A', 'C', 'G', 'T']
-        k = KMER_SIZE  # 从config.py导入的6-mer配置
-        
-        # 使用itertools.product生成所有可能的6-mer组合
-        products = itertools.product(bases, repeat=k)
-        tokens = [''.join(p) for p in products]
-        
-        # 创建token到索引的映射字典
-        token_dict = {token: idx + 1 for idx, token in enumerate(tokens)}  # 从1开始索引
-        token_dict['null'] = 0  # null token的索引为0
-        
-        return token_dict
+        tokens = self.tokenize(sequence)
+        indices = [self.token_to_idx.get(token, 0) for token in tokens]  # 默认为null的索引
+        return torch.tensor(indices, dtype=torch.long)
     
-    
-class BalancedDataset(Dataset):
-    def __init__(self, dataset):
-        self.dataset = dataset
-        self.positive_indices = self._get_positive_indices()
-        self.negative_indices = self._get_negative_indices()
-
-    def __getitem__(self, index):
-        # 根据索引获取样本
-        if index < len(self.negative_indices):
-            return self.dataset[self.negative_indices[index]]
-        elif index >= len(self.negative_indices) and index < len(self.dataset):
-            positive_index = self.positive_indices[index - len(self.negative_indices)]
-            return self.dataset[positive_index]
-        else:
-            positive_index = self.positive_indices[(index - len(self.negative_indices)) % len(self.positive_indices)]
-            time = (index - len(self.negative_indices)) // len(self.positive_indices)
-            k = time * 20
-            enhaner, promoter, label = self.dataset[positive_index]
-            enhaner = enhaner[k:] + enhaner[:k]
-            promoter = promoter[k:] + promoter[:k]
-            return enhaner, promoter, label
+    def decode(self, indices: torch.Tensor) -> List[str]:
+        """
+        将token索引张量解码为k-mer tokens列表
+        
+        Args:
+            indices: token索引张量
             
+        Returns:
+            k-mer tokens列表
+        """
+        return [self.idx_to_token.get(idx.item(), 'null') for idx in indices]
 
-    def __len__(self):
-        return 2 * len(self.negative_indices)
 
-    def _get_positive_indices(self):
-        # 获取正样本的索引
-        positive_indices = []
-        for i in range(len(self.dataset)):
-            _, _, label = self.dataset[i]
-            if label == 1:  # 假设正样本的标签为1
-                positive_indices.append(i)
-        return positive_indices
+class DNAEmbedding(nn.Module):
+    """
+    DNA序列嵌入层
+    将DNA序列转换为密集向量表示
+    
+    Attributes:
+        tokenizer (KMerTokenizer): k-mer分词器
+        embedding (nn.Embedding): PyTorch嵌入层
+    """
+    
+    def __init__(self, vocab_size: int = None, embed_dim: int = EMBEDDING_DIM, k: int = KMER_SIZE, 
+                 padding_idx: int = 0, init_std: float = 0.1):
+        """
+        初始化DNA嵌入层
+        
+        Args:
+            vocab_size: 词汇表大小，如果为None则使用k-mer生成的词汇表大小
+            embed_dim: 嵌入维度，默认使用配置文件中的EMBEDDING_DIM
+            k: k-mer长度，默认使用配置文件中的KMER_SIZE
+            padding_idx: padding token的索引
+            init_std: 嵌入权重初始化标准差
+        """
+        super(DNAEmbedding, self).__init__()
+        
+        # 创建k-mer分词器
+        self.tokenizer = KMerTokenizer(k=k)
+        
+        # 如果未指定词汇表大小，使用分词器的词汇表大小
+        if vocab_size is None:
+            vocab_size = self.tokenizer.vocab_size
+        
+        # 创建嵌入层
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=padding_idx)  # null token作为padding
+        
+        # 初始化嵌入权重
+        self._init_weights(init_std)
+    
+    def _init_weights(self, init_std: float = 0.1) -> None:
+        """
+        初始化嵌入权重
+        使用正态分布初始化，均值为0，标准差为init_std
+        
+        Args:
+            init_std: 嵌入权重初始化标准差
+        """
+        nn.init.normal_(self.embedding.weight, mean=0, std=init_std)
+        # 保持padding token的权重为0
+        with torch.no_grad():
+            self.embedding.weight[0].fill_(0)
+    
+    def forward(self, sequences) -> torch.Tensor:
+        """
+        前向传播
+        
+        Args:
+            sequences: 可以是DNA序列字符串列表或token索引张量
+            
+        Returns:
+            嵌入向量张量，形状为(batch_size, seq_len, embed_dim)
+        """
+        # 检查输入类型
+        if isinstance(sequences, list) and all(isinstance(seq, str) for seq in sequences):
+            # 如果输入是字符串列表，先进行tokenize
+            batch_indices = []
+            max_len = 0
+            
+            # 编码所有序列并找到最大长度
+            for seq in sequences:
+                indices = self.tokenizer.encode(seq)
+                batch_indices.append(indices)
+                max_len = max(max_len, len(indices))
+            
+            # 填充序列到相同长度
+            padded_indices = []
+            for indices in batch_indices:
+                # 计算需要填充的长度
+                pad_len = max_len - len(indices)
+                # 创建填充张量
+                if pad_len > 0:
+                    padding = torch.zeros(pad_len, dtype=torch.long)
+                    padded = torch.cat([indices, padding])
+                else:
+                    padded = indices
+                padded_indices.append(padded)
+            
+            # 堆叠为批次张量
+            batch_tensor = torch.stack(padded_indices)
+        else:
+            # 如果输入已经是张量（token索引），直接使用
+            batch_tensor = sequences
+        
+        # 通过嵌入层
+        embedded = self.embedding(batch_tensor)
+        
+        return embedded
 
-    def _get_negative_indices(self):
-        # 获取负样本的索引
-        negative_indices = []
-        for i in range(len(self.dataset)):
-            _, _, label = self.dataset[i]
-            if label == 0:  # 假设负样本的标签为0
-                negative_indices.append(i)
-        return negative_indices
+
+def create_dna_embedding_layer(vocab_size: int = None, embed_dim: int = EMBEDDING_DIM, 
+                               padding_idx: int = 0, init_std: float = 0.1) -> DNAEmbedding:
+    """
+    创建DNA嵌入层的工厂函数
+    
+    Args:
+        vocab_size: 词汇表大小
+        embed_dim: 嵌入维度
+        padding_idx: padding token的索引
+        init_std: 嵌入权重初始化标准差
+        
+    Returns:
+        DNA嵌入层实例
+    """
+    return DNAEmbedding(vocab_size=vocab_size, embed_dim=embed_dim, padding_idx=padding_idx, init_std=init_std)
+
+
+# 测试代码
+if __name__ == "__main__":
+    # 创建DNA嵌入层
+    dna_embedding = create_dna_embedding_layer()
+    
+    # 测试序列
+    test_sequences = [
+        "ACGTACGTACGT",
+        "NNNNNNNNNNNN",
+        "ATCGATCGATCG",
+        "GGGGGGGGGGGG"
+    ]
+    
+    # 前向传播
+    embedded_vectors = dna_embedding(test_sequences)
+    
+    # 输出结果
+    print(f"输入序列数量: {len(test_sequences)}")
+    print(f"输出向量形状: {embedded_vectors.shape}")
+    print(f"嵌入维度: {embedded_vectors.size(-1)}")
+    
+    # 测试分词器
+    tokenizer = dna_embedding.tokenizer
+    for seq in test_sequences[:2]:
+        tokens = tokenizer.tokenize(seq)
+        indices = tokenizer.encode(seq)
+        decoded = tokenizer.decode(indices)
+        print(f"序列: {seq}")
+        print(f"Tokens: {tokens[:5]}...")  # 只显示前5个tokens
+        print(f"索引: {indices[:5].tolist()}...")  # 只显示前5个索引
+        print(f"解码: {decoded[:5]}...")  # 只显示前5个解码结果
+        print("---")

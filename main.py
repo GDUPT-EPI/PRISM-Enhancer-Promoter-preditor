@@ -210,7 +210,7 @@ class PGD():
         self.emb_backup = {}
         self.grad_backup = {}
 
-    def attack(self, epsilon=1., alpha=0.3, emb_name1='embedding_en.', emb_name2='embedding_pr', is_first_attack=False):
+    def attack(self, epsilon=1., alpha=0.3, emb_name1='embedding_en.embedding', emb_name2='embedding_pr.embedding', is_first_attack=False):
         """
         执行PGD对抗攻击
         
@@ -232,7 +232,7 @@ class PGD():
                     param.data.add_(r_at)
                     param.data = self.project(name, param.data, epsilon)
 
-    def restore(self, emb_name1='embedding_en', emb_name2='embedding_pr'):
+    def restore(self, emb_name1='embedding_en.embedding', emb_name2='embedding_pr.embedding'):
         """
         恢复嵌入层的参数
         
@@ -287,7 +287,7 @@ class FGM():
         self.model = model
         self.backup = {}
 
-    def attack(self, epsilon=1., emb_name1='embedding_en', emb_name2='embedding_pr'):
+    def attack(self, epsilon=1., emb_name1='embedding_en.embedding', emb_name2='embedding_pr.embedding'):
         """
         执行FGM对抗攻击
         
@@ -304,7 +304,7 @@ class FGM():
                     r_at = epsilon * param.grad / norm
                     param.data.add_(r_at)
 
-    def restore(self, emb_name1='embedding_en', emb_name2='embedding_pr'):
+    def restore(self, emb_name1='embedding_en.embedding', emb_name2='embedding_pr.embedding'):
         """
         恢复嵌入层的参数
         

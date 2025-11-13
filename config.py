@@ -93,6 +93,12 @@ SAVE_ATTENTION_OUTPUTS = False
 KMER_SIZE = 6  # 6-mer tokenization
 KMER_OVERLAP = 5  # overlapping k-mer (k-1)
 
+# DNA嵌入层配置
+DNA_EMBEDDING_VOCAB_SIZE = 4097  # 6-mer词汇表大小 (4^6 + 1 null token)
+DNA_EMBEDDING_DIM = 768  # DNA嵌入维度，与EMBEDDING_DIM保持一致
+DNA_EMBEDDING_PADDING_IDX = 0  # padding token的索引
+DNA_EMBEDDING_INIT_STD = 0.1  # 嵌入权重初始化标准差
+
 # 预处理优化配置
 PREPROCESS_NUM_WORKERS = max(1, os.cpu_count() - 1)  # 使用所有核心-1
 PREPROCESS_BATCH_SIZE = 2000  # 批处理大小，根据内存调整

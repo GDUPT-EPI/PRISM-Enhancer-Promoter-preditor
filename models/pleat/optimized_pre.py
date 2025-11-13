@@ -34,6 +34,7 @@ _TOKENIZER_CACHE_PATH = os.path.join(CACHE_DIR, "tokenizer_cache.pkl")
 def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
     """
     获取全局tokenizer字典，使用缓存避免重复计算
+    与embedding.py中的KMerTokenizer保持一致
     
     Args:
         force_recreate: 是否强制重新创建tokenizer
@@ -60,7 +61,7 @@ def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
         except Exception as e:
             print(f"加载tokenizer缓存失败: {e}，将重新创建")
     
-    # 创建新的tokenizer
+    # 创建新的tokenizer，与embedding.py中的KMerTokenizer保持一致
     print("创建tokenizer字典...")
     bases = ['A', 'C', 'G', 'T']
     k = KMER_SIZE  # 从config.py导入的6-mer配置
@@ -69,9 +70,11 @@ def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
     products = itertools.product(bases, repeat=k)
     tokens = [''.join(p) for p in products]
     
+    # 添加null token
+    tokens.append('null')
+    
     # 创建token到索引的映射字典
-    token_dict = {token: idx + 1 for idx, token in enumerate(tokens)}  # 从1开始索引
-    token_dict['null'] = 0  # null token的索引为0
+    token_dict = {token: idx for idx, token in enumerate(tokens)}  # null token的索引为4096
     
     _TOKENIZER_CACHE = token_dict
     
@@ -89,7 +92,7 @@ def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
 def sequence_to_tokens_fast(sequence: str, k: int = KMER_SIZE) -> List[str]:
     """
     高效地将DNA序列转换为k-mer tokens
-    使用overlapping方式，每次滑动1个碱基(k-1)
+    使用overlapping方式，每次滑动k-1个碱基
     
     Args:
         sequence: DNA序列字符串
@@ -103,11 +106,17 @@ def sequence_to_tokens_fast(sequence: str, k: int = KMER_SIZE) -> List[str]:
     if seq_len < k:
         return ['null']
     
-    # 使用列表推导式生成overlapping k-mers，每次滑动1个碱基(k-1=KMER_OVERLAP)
-    tokens = [sequence[i:i+k] for i in range(seq_len - k + 1)]
+    # 使用overlapping方式生成k-mers，每次滑动k-1个碱基
+    tokens = []
+    for i in range(seq_len - k + 1):
+        kmer = sequence[i:i+k]
+        # 检查是否包含未知碱基N
+        if 'N' in kmer:
+            tokens.append('null')
+        else:
+            tokens.append(kmer)
     
-    # 检查每个token是否包含'N'，如果有则替换为'null'
-    return [token if 'N' not in token else 'null' for token in tokens]
+    return tokens
 
 
 def tokens_to_ids_fast(tokens: List[str], tokenizer: Dict[str, int]) -> torch.Tensor:
