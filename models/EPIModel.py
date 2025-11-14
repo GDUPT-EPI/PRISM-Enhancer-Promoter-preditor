@@ -5,11 +5,10 @@ import math
 from config import (
     LEARNING_RATE, NUMBER_WORDS, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS,
     TRANSFORMER_LAYERS, TRANSFORMER_HEADS, TRANSFORMER_FF_DIM, TRANSFORMER_DROPOUT,
-    STOCHASTIC_DEPTH_RATE, CNN_DROPOUT, CLASSIFIER_HIDDEN_SIZE, CLASSIFIER_DROPOUT,
+    CNN_DROPOUT, CLASSIFIER_HIDDEN_SIZE, CLASSIFIER_DROPOUT,
     POS_ENCODING_MAX_LEN, WEIGHT_DECAY, DNA_EMBEDDING_VOCAB_SIZE, DNA_EMBEDDING_DIM,
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
-from models.pleat.skipnet import StochasticDepth
 from models.pleat.embedding import create_dna_embedding_layer
 
 
@@ -36,9 +35,8 @@ class EPIModel(nn.Module):
     def __init__(self):
         super(EPIModel, self).__init__()
         
-        # Stochastic Depth 配置 - 使用集中配置
+        # Transformer配置
         self.num_transformer_layers = TRANSFORMER_LAYERS
-        self.stochastic_depth_rate = STOCHASTIC_DEPTH_RATE
 
         # DNA嵌入层 - 使用6-mer overlapping tokenization
         self.embedding_en = create_dna_embedding_layer(
@@ -74,10 +72,6 @@ class EPIModel(nn.Module):
         self.pos_encoder = FixedPositionalEncoding(d_model=OUT_CHANNELS)
         
         # Transformer编码器 - 使用集中配置参数
-        # 计算线性递增的drop概率
-        total_layers = self.num_transformer_layers * 2  # enhancer + promoter
-        drop_probs = [i / (total_layers - 1) * self.stochastic_depth_rate 
-                    for i in range(total_layers)]
 
         # Enhancer Transformer layers
         self.enhancer_transformer_layers = nn.ModuleList([
@@ -86,10 +80,6 @@ class EPIModel(nn.Module):
                 dropout=TRANSFORMER_DROPOUT, batch_first=False
             ) for _ in range(self.num_transformer_layers)
         ])
-        self.enhancer_stochastic_depth = nn.ModuleList([
-            StochasticDepth(drop_probs[i]) 
-            for i in range(self.num_transformer_layers)
-        ])
 
         # Promoter Transformer layers
         self.promoter_transformer_layers = nn.ModuleList([
@@ -97,10 +87,6 @@ class EPIModel(nn.Module):
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, dim_feedforward=TRANSFORMER_FF_DIM,
                 dropout=TRANSFORMER_DROPOUT, batch_first=False
             ) for _ in range(self.num_transformer_layers)
-        ])
-        self.promoter_stochastic_depth = nn.ModuleList([
-            StochasticDepth(drop_probs[self.num_transformer_layers + i]) 
-            for i in range(self.num_transformer_layers)
         ])
         
         # 交叉注意力机制 - 使用集中配置
@@ -159,16 +145,16 @@ class EPIModel(nn.Module):
         enhancers_output = self.pos_encoder(enhancers_output)
         promoters_output = self.pos_encoder(promoters_output)
         
-        # Transformer编码 - 带Stochastic Depth
-        for layer, sd in zip(self.enhancer_transformer_layers, self.enhancer_stochastic_depth):
+        # Transformer编码 - 简单残差连接
+        for layer in self.enhancer_transformer_layers:
             residual = enhancers_output
             enhancers_output = layer(enhancers_output)
-            enhancers_output = residual + sd(enhancers_output - residual)
+            enhancers_output = residual + enhancers_output
 
-        for layer, sd in zip(self.promoter_transformer_layers, self.promoter_stochastic_depth):
+        for layer in self.promoter_transformer_layers:
             residual = promoters_output
             promoters_output = layer(promoters_output)
-            promoters_output = residual + sd(promoters_output - residual)
+            promoters_output = residual + promoters_output
         
         # 交叉注意力: 让增强子关注启动子
         enhancers_attended, _ = self.cross_attention(
