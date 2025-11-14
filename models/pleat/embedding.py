@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 # 导入配置参数
-from config import KMER_SIZE, KMER_OVERLAP, EMBEDDING_DIM, NUMBER_WORDS
+from config import KMER_SIZE, EMBEDDING_DIM
 
 
 class KMerTokenizer:
@@ -227,35 +227,16 @@ def create_dna_embedding_layer(vocab_size: int = None, embed_dim: int = EMBEDDIN
     return DNAEmbedding(vocab_size=vocab_size, embed_dim=embed_dim, padding_idx=padding_idx, init_std=init_std)
 
 
-# 测试代码
-if __name__ == "__main__":
-    # 创建DNA嵌入层
-    dna_embedding = create_dna_embedding_layer()
+# # 测试代码
+# if __name__ == "__main__":
+#     # 计时开始
+#     import time
+#     start_time = time.time()
     
-    # 测试序列
-    test_sequences = [
-        "ACGTACGTACGT",
-        "NNNNNNNNNNNN",
-        "ATCGATCGATCG",
-        "GGGGGGGGGGGG"
-    ]
+#     # 构建词汇表
+#     tokenizer = KMerTokenizer()
+#     tokenizer._build_vocab()
     
-    # 前向传播
-    embedded_vectors = dna_embedding(test_sequences)
-    
-    # 输出结果
-    print(f"输入序列数量: {len(test_sequences)}")
-    print(f"输出向量形状: {embedded_vectors.shape}")
-    print(f"嵌入维度: {embedded_vectors.size(-1)}")
-    
-    # 测试分词器
-    tokenizer = dna_embedding.tokenizer
-    for seq in test_sequences[:2]:
-        tokens = tokenizer.tokenize(seq)
-        indices = tokenizer.encode(seq)
-        decoded = tokenizer.decode(indices)
-        print(f"序列: {seq}")
-        print(f"Tokens: {tokens[:5]}...")  # 只显示前5个tokens
-        print(f"索引: {indices[:5].tolist()}...")  # 只显示前5个索引
-        print(f"解码: {decoded[:5]}...")  # 只显示前5个解码结果
-        print("---")
+#     # 计时结束
+#     end_time = time.time()
+#     print(f"词汇表构建时间: {end_time - start_time:.4f} 秒")
