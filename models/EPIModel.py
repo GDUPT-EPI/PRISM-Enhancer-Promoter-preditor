@@ -10,7 +10,7 @@ from config import (
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.embedding import create_dna_embedding_layer
-from models.pleat.RoPE import RoPEAttention, RoPEConfig
+from models.pleat.RoPE import RoPEAttention, RoPE_AdaptAttention, RoPEConfig
 
 
 class RoPETransformerEncoderLayer(nn.Module):
@@ -18,16 +18,26 @@ class RoPETransformerEncoderLayer(nn.Module):
     集成RoPE的Transformer编码器层
     替换标准的多头自注意力为RoPE注意力
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, use_adaptive=False):
         super(RoPETransformerEncoderLayer, self).__init__()
         
-        # 使用RoPE注意力替代标准多头注意力
-        self.self_attn = RoPEAttention(
-            d_model=d_model,
-            num_heads=nhead,
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-            dropout=dropout
-        )
+        # 根据use_adaptive参数选择使用RoPEAttention或RoPE_AdaptAttention
+        if use_adaptive:
+            self.self_attn = RoPE_AdaptAttention(
+                d_model=d_model,
+                num_heads=nhead,
+                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+                dropout=dropout
+            )
+        else:
+            self.self_attn = RoPEAttention(
+                d_model=d_model,
+                num_heads=nhead,
+                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+                dropout=dropout
+            )
+        
+        self.use_adaptive = use_adaptive
         
         # 前馈网络
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -55,7 +65,9 @@ class RoPETransformerEncoderLayer(nn.Module):
             src_key_padding_mask: key填充掩码
             
         Returns:
-            输出张量，形状 (seq_len, batch, d_model)
+            如果use_adaptive=True: (输出张量, adaptive_loss)
+            否则: 输出张量
+            输出张量形状 (seq_len, batch, d_model)
         """
         # 保存原始输入用于残差连接
         residual = x
@@ -63,7 +75,15 @@ class RoPETransformerEncoderLayer(nn.Module):
         # 自注意力计算 (使用RoPE)
         # 转换维度以适配RoPEAttention: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
         x_transposed = x.permute(1, 0, 2)
-        attn_output = self.self_attn(x_transposed, attention_mask=src_mask)
+        
+        if self.use_adaptive:
+            # RoPE_AdaptAttention返回(output, adaptive_loss)
+            attn_output, adaptive_loss = self.self_attn(x_transposed, attention_mask=src_mask, return_loss=True)
+        else:
+            # RoPEAttention只返回output
+            attn_output = self.self_attn(x_transposed, attention_mask=src_mask)
+            adaptive_loss = None
+            
         # 转回原始维度: (batch, seq_len, d_model) -> (seq_len, batch, d_model)
         attn_output = attn_output.permute(1, 0, 2)
         
@@ -81,16 +101,19 @@ class RoPETransformerEncoderLayer(nn.Module):
         x = residual + self.dropout2(ff_output)
         x = self.norm2(x)
         
+        if self.use_adaptive:
+            return x, adaptive_loss
         return x
 
 
 # Backbone
 class EPIModel(nn.Module):
-    def __init__(self):
+    def __init__(self, use_adaptive_attention=False):
         super(EPIModel, self).__init__()
         
         # Transformer配置
         self.num_transformer_layers = TRANSFORMER_LAYERS
+        self.use_adaptive_attention = use_adaptive_attention
 
         # DNA嵌入层 - 使用6-mer overlapping tokenization
         self.embedding_en = create_dna_embedding_layer(
@@ -128,7 +151,8 @@ class EPIModel(nn.Module):
         self.enhancer_transformer_layers = nn.ModuleList([
             RoPETransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, 
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                use_adaptive=self.use_adaptive_attention
             ) for _ in range(self.num_transformer_layers)
         ])
 
@@ -136,7 +160,8 @@ class EPIModel(nn.Module):
         self.promoter_transformer_layers = nn.ModuleList([
             RoPETransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                use_adaptive=self.use_adaptive_attention
             ) for _ in range(self.num_transformer_layers)
         ])
         
@@ -192,13 +217,24 @@ class EPIModel(nn.Module):
         enhancers_output = enhancers_output.permute(2, 0, 1)
         promoters_output = promoters_output.permute(2, 0, 1)
         
+        # 初始化adaptive_loss累积
+        total_adaptive_loss = 0.0
+        
         # Transformer编码 - 使用RoPE位置编码 (不再需要外部位置编码)
         # RoPE注意力层内部会自动处理位置编码
         for layer in self.enhancer_transformer_layers:
-            enhancers_output = layer(enhancers_output)
+            if self.use_adaptive_attention:
+                enhancers_output, layer_adaptive_loss = layer(enhancers_output)
+                total_adaptive_loss += layer_adaptive_loss
+            else:
+                enhancers_output = layer(enhancers_output)
 
         for layer in self.promoter_transformer_layers:
-            promoters_output = layer(promoters_output)
+            if self.use_adaptive_attention:
+                promoters_output, layer_adaptive_loss = layer(promoters_output)
+                total_adaptive_loss += layer_adaptive_loss
+            else:
+                promoters_output = layer(promoters_output)
         
         # 交叉注意力: 让增强子关注启动子
         enhancers_attended, _ = self.cross_attention(
@@ -223,4 +259,7 @@ class EPIModel(nn.Module):
         # 分类
         result = self.fc(combined)
         
-        return torch.sigmoid(result), combined
+        if self.use_adaptive_attention:
+            return torch.sigmoid(result), combined, total_adaptive_loss
+        else:
+            return torch.sigmoid(result), combined

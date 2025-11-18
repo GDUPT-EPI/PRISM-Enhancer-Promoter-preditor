@@ -389,7 +389,7 @@ def val_forwrd(model, dataloader, cell_name=""):
             promoter_features = promoter_features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
                 
-            outputs, _ = model(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
+            outputs, _, _ = model(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
             labels = labels.unsqueeze(1).float()
             test_epoch_target = torch.cat((test_epoch_target, labels.view(-1)))
 
@@ -429,9 +429,9 @@ if not os.path.exists(SAVE_MODEL_DIR):
     os.makedirs(SAVE_MODEL_DIR)
 
 # 创建新的模型实例（不使用预训练权重）
-epimodel = EPIModel()
+epimodel = EPIModel(use_adaptive_attention=True)
 epimodel = epimodel.to(device)
-print("创建新的模型实例（不使用预训练权重）")
+print("创建新的模型实例（不使用预训练权重，启用自适应注意力）")
 
 # 创建优化器
 optimizer = torch.optim.Adam(epimodel.parameters(), lr=LEARNING_RATE)
@@ -640,7 +640,7 @@ for i in range(EPOCH):
         promoter_features = promoter_features.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         
-        outputs, emd = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
+        outputs, emd, total_adaptive_loss = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
         
         labels = labels.unsqueeze(1).float()
         
@@ -650,7 +650,15 @@ for i in range(EPOCH):
         if labels.shape == torch.Size([1, 1]):
             labels = torch.reshape(labels, (1,))
 
-        loss = epimodel.criterion(outputs, labels)
+        # 计算主损失
+        main_loss = epimodel.criterion(outputs, labels)
+        
+        # 组合损失：主损失 + 自适应损失
+        if total_adaptive_loss is not None:
+            loss = main_loss + total_adaptive_loss
+        else:
+            loss = main_loss
+            
         train_epoch_loss += loss.item()
         train_epoch_correct += get_num_correct(outputs, labels)
 
@@ -666,7 +674,7 @@ for i in range(EPOCH):
                 else:
                     pgd.restore_grad()
                 
-                outputs_adv, _ = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
+                outputs_adv, _, _ = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
                 loss_adv = epimodel.criterion(outputs_adv, labels)
                 loss_adv.backward()
             
