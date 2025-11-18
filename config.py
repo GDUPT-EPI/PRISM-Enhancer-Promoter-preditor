@@ -43,7 +43,6 @@ OUT_CHANNELS = 64
 TRANSFORMER_LAYERS = 2  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 256  # 前馈网络维度
-TRANSFORMER_DROPOUT = 0.1  # Transformer层间dropout
 
 # Stochastic Depth配置
 STOCHASTIC_DEPTH_RATE = 0.2  # 最大drop概率

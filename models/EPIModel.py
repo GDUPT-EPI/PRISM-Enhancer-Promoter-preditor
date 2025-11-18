@@ -123,7 +123,7 @@ class EPIModel(nn.Module):
         )
         
         # Transformer编码器 - 使用RoPE位置编码 (不再需要单独的SinPE)
-
+        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT  # 获取dropout
         # Enhancer RoPE Transformer layers
         self.enhancer_transformer_layers = nn.ModuleList([
             RoPETransformerEncoderLayer(
