@@ -10,7 +10,78 @@ from config import (
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.embedding import create_dna_embedding_layer
-from models.pleat.SinPE import SinPE
+from models.pleat.RoPE import RoPEAttention
+
+
+class RoPETransformerEncoderLayer(nn.Module):
+    """
+    集成RoPE的Transformer编码器层
+    替换标准的多头自注意力为RoPE注意力
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super(RoPETransformerEncoderLayer, self).__init__()
+        
+        # 使用RoPE注意力替代标准多头注意力
+        self.self_attn = RoPEAttention(
+            d_model=d_model,
+            num_heads=nhead,
+            max_seq_len=POS_ENCODING_MAX_LEN,
+            dropout=dropout
+        )
+        
+        # 前馈网络
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        # 层归一化
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # 激活函数
+        self.activation = nn.ReLU()
+    
+    def forward(self, x, src_mask=None, src_key_padding_mask=None):
+        """
+        前向传播
+        
+        Args:
+            x: 输入张量，形状 (seq_len, batch, d_model)
+            src_mask: 注意力掩码
+            src_key_padding_mask: key填充掩码
+            
+        Returns:
+            输出张量，形状 (seq_len, batch, d_model)
+        """
+        # 保存原始输入用于残差连接
+        residual = x
+        
+        # 自注意力计算 (使用RoPE)
+        # 转换维度以适配RoPEAttention: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
+        x_transposed = x.permute(1, 0, 2)
+        attn_output = self.self_attn(x_transposed, attention_mask=src_mask)
+        # 转回原始维度: (batch, seq_len, d_model) -> (seq_len, batch, d_model)
+        attn_output = attn_output.permute(1, 0, 2)
+        
+        # 残差连接和层归一化
+        x = residual + self.dropout1(attn_output)
+        x = self.norm1(x)
+        
+        # 保存用于第二个残差连接
+        residual = x
+        
+        # 前馈网络
+        ff_output = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        
+        # 残差连接和层归一化
+        x = residual + self.dropout2(ff_output)
+        x = self.norm2(x)
+        
+        return x
 
 
 # Backbone
@@ -51,24 +122,21 @@ class EPIModel(nn.Module):
             nn.Dropout(p=CNN_DROPOUT)
         )
         
-        # 固定的位置编码
-        self.pos_encoder = SinPE(d_model=OUT_CHANNELS)
-        
-        # Transformer编码器 - 使用集中配置参数
+        # Transformer编码器 - 使用RoPE位置编码 (不再需要单独的SinPE)
 
-        # Enhancer Transformer layers
+        # Enhancer RoPE Transformer layers
         self.enhancer_transformer_layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, dim_feedforward=TRANSFORMER_FF_DIM, 
-                dropout=TRANSFORMER_DROPOUT, batch_first=False
+            RoPETransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, 
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT
             ) for _ in range(self.num_transformer_layers)
         ])
 
-        # Promoter Transformer layers
+        # Promoter RoPE Transformer layers
         self.promoter_transformer_layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, dim_feedforward=TRANSFORMER_FF_DIM,
-                dropout=TRANSFORMER_DROPOUT, batch_first=False
+            RoPETransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT
             ) for _ in range(self.num_transformer_layers)
         ])
         
@@ -124,20 +192,13 @@ class EPIModel(nn.Module):
         enhancers_output = enhancers_output.permute(2, 0, 1)
         promoters_output = promoters_output.permute(2, 0, 1)
         
-        # 添加固定位置编码
-        enhancers_output = self.pos_encoder(enhancers_output)
-        promoters_output = self.pos_encoder(promoters_output)
-        
-        # Transformer编码 - 简单残差连接
+        # Transformer编码 - 使用RoPE位置编码 (不再需要外部位置编码)
+        # RoPE注意力层内部会自动处理位置编码
         for layer in self.enhancer_transformer_layers:
-            residual = enhancers_output
             enhancers_output = layer(enhancers_output)
-            enhancers_output = residual + enhancers_output
 
         for layer in self.promoter_transformer_layers:
-            residual = promoters_output
             promoters_output = layer(promoters_output)
-            promoters_output = residual + promoters_output
         
         # 交叉注意力: 让增强子关注启动子
         enhancers_attended, _ = self.cross_attention(
