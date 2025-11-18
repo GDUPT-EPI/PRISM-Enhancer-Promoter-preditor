@@ -3,14 +3,14 @@ import torch
 import numpy as np
 import math
 from config import (
-    LEARNING_RATE, NUMBER_WORDS, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS,
-    TRANSFORMER_LAYERS, TRANSFORMER_HEADS, TRANSFORMER_FF_DIM, TRANSFORMER_DROPOUT,
+    LEARNING_RATE, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS,
+    TRANSFORMER_LAYERS, TRANSFORMER_HEADS, TRANSFORMER_FF_DIM,
     CNN_DROPOUT, CLASSIFIER_HIDDEN_SIZE, CLASSIFIER_DROPOUT,
-    POS_ENCODING_MAX_LEN, WEIGHT_DECAY, DNA_EMBEDDING_VOCAB_SIZE, DNA_EMBEDDING_DIM,
+    WEIGHT_DECAY, DNA_EMBEDDING_VOCAB_SIZE, DNA_EMBEDDING_DIM,
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.embedding import create_dna_embedding_layer
-from models.pleat.RoPE import RoPEAttention
+from models.pleat.RoPE import RoPEAttention, RoPEConfig
 
 
 class RoPETransformerEncoderLayer(nn.Module):
@@ -25,7 +25,7 @@ class RoPETransformerEncoderLayer(nn.Module):
         self.self_attn = RoPEAttention(
             d_model=d_model,
             num_heads=nhead,
-            max_seq_len=POS_ENCODING_MAX_LEN,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
             dropout=dropout
         )
         

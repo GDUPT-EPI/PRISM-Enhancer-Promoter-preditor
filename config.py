@@ -53,9 +53,6 @@ CNN_DROPOUT = 0.2      # CNN层dropout率
 CLASSIFIER_HIDDEN_SIZE = 128  # 分类头中间层大小
 CLASSIFIER_DROPOUT = 0.33     # 分类头dropout率
 
-# 位置编码配置
-POS_ENCODING_MAX_LEN = 1000
-
 # 优化器配置
 WEIGHT_DECAY = 0.001
 

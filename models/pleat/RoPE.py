@@ -1,20 +1,108 @@
-#!/usr/bin/env python3
-"""
-数值稳定版 RoPE (Rotary Position Embedding) - 2024 最佳实践实现
-已修复原始实现的长序列精度崩坏问题（>16k 完全失效）
-
-核心改进：
-1. 线性频率缩放（Linear Scaling / NTK-by-length）：最简单、效果最好
-2. 所有三角函数计算强制使用 float32，避免大角度精度丢失
-3. 动态缓存 + 只在必要时重建
-4. 完全兼容你原来的调用方式，无需改任何外部代码
-"""
-
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+from functools import wraps
+
+class RoPEConfig:
+    # 基础配置 - 使用配置文件中的参数
+    # 位置编码配置
+    POS_ENCODING_MAX_LEN = 1000
+    ROPE_MAX_SEQ_LEN = POS_ENCODING_MAX_LEN  # 使用相同的位置编码最大长度
+    ROPE_BASE = 10000.0  # RoPE基础频率
+    ROPE_SCALING_TYPE = "linear"  # 线性缩放类型
+    ROPE_TRAINING_LENGTH = 4096  # 模型预训练时的上下文长度
+    ROPE_DROPOUT = 0.1  # RoPE注意力层的dropout率
+    
+    @classmethod
+    def get_rope_params(cls):
+        """获取RoPE类的默认参数字典"""
+        return {
+            'max_seq_len': cls.ROPE_MAX_SEQ_LEN,
+            'rope_base': cls.ROPE_BASE,
+            'rope_scaling_type': cls.ROPE_SCALING_TYPE,
+            'rope_training_length': cls.ROPE_TRAINING_LENGTH,
+        }
+    
+    @classmethod
+    def get_attention_params(cls):
+        """获取RoPEAttention类的默认参数字典"""
+        return {
+            'max_seq_len': cls.ROPE_MAX_SEQ_LEN,
+            'dropout': cls.ROPE_DROPOUT,
+            'rope_base': cls.ROPE_BASE,
+            'rope_scaling_type': cls.ROPE_SCALING_TYPE,
+            'rope_training_length': cls.ROPE_TRAINING_LENGTH,
+        }
+    
+    @classmethod
+    def update_from_config(cls, **kwargs):
+        """从外部配置更新默认参数"""
+        for key, value in kwargs.items():
+            if hasattr(cls, f'ROPE_{key.upper()}'):
+                setattr(cls, f'ROPE_{key.upper()}', value)
+    
+    @classmethod
+    def init_from_main_config(cls):
+        """从主配置文件初始化RoPE配置（可选）"""
+        # 这个方法现在只是占位符，避免外部依赖
+        # 所有配置参数已经在类定义中集中管理
+        return True
+
+def rope_config_decorator(config_class):
+    """
+    RoPE配置装饰器
+    自动注入RoPEConfig中的默认参数（适用于RoPE类）
+    """
+    def decorator(cls):
+        original_init = cls.__init__
+        
+        @wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            # 获取RoPE类的默认配置
+            default_params = config_class.get_rope_params()
+            
+            # 用默认参数填充未提供的参数
+            for key, value in default_params.items():
+                if key not in kwargs:
+                    kwargs[key] = value
+            
+            # 调用原始初始化
+            original_init(self, *args, **kwargs)
+        
+        cls.__init__ = new_init
+        return cls
+    
+    return decorator
+
+def rope_attention_config_decorator(config_class):
+    """
+    RoPEAttention配置装饰器
+    自动注入RoPEConfig中的默认参数（适用于RoPEAttention类）
+    """
+    def decorator(cls):
+        original_init = cls.__init__
+        
+        @wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            # 获取RoPEAttention类的默认配置
+            default_params = config_class.get_attention_params()
+            
+            # 用默认参数填充未提供的参数
+            for key, value in default_params.items():
+                if key not in kwargs:
+                    kwargs[key] = value
+            
+            # 调用原始初始化
+            original_init(self, *args, **kwargs)
+        
+        cls.__init__ = new_init
+        return cls
+    
+    return decorator
 
 
+
+@rope_config_decorator(RoPEConfig)
 class RoPE(nn.Module):
     """
     数值稳定版旋转位置编码 (RoPE)
@@ -24,22 +112,23 @@ class RoPE(nn.Module):
     def __init__(
         self,
         dim: int,
-        max_seq_len: int = 2048,
-        base: float = 10000.0,
-        scaling_type: str = "linear",        # "linear" 或 None
-        training_length: int = 4096,         # 模型预训练时的上下文长度（如 Llama3 是 8192）
+        max_seq_len: int = None,
+        rope_base: float = None,
+        rope_scaling_type: str = None,
+        rope_training_length: int = None,
     ):
         super().__init__()
         assert dim % 2 == 0, f"RoPE dim 必须为偶数，当前 {dim}"
         
         self.dim = dim
-        self.max_seq_len = max_seq_len
-        self.base = base
-        self.scaling_type = scaling_type.lower() if scaling_type else None
-        self.training_length = training_length
+        # 使用配置中的默认值，如果没有显式传入
+        self.max_seq_len = max_seq_len or RoPEConfig.ROPE_MAX_SEQ_LEN
+        self.base = rope_base or RoPEConfig.ROPE_BASE
+        self.scaling_type = (rope_scaling_type or RoPEConfig.ROPE_SCALING_TYPE).lower() if rope_scaling_type else None
+        self.training_length = rope_training_length or RoPEConfig.ROPE_TRAINING_LENGTH
         
         # 原始频率: [dim//2]
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         self.register_buffer("inv_freq_base", inv_freq, persistent=False)
         
         # 缓存（初始为空）
@@ -48,7 +137,7 @@ class RoPE(nn.Module):
         self.cached_seq_len = 0
         
         # 预热缓存
-        self._build_cache(max_seq_len)
+        self._build_cache(self.max_seq_len)
 
     @torch.no_grad()
     def _build_cache(self, seq_len: int):
@@ -142,16 +231,17 @@ def apply_rotary_pos_emb(
 # 完全兼容你原来使用的 RoPEAttention 类（无需任何修改调用代码）
 # ===============================================
 
+@rope_attention_config_decorator(RoPEConfig)
 class RoPEAttention(nn.Module):
     def __init__(
         self,
         d_model: int,
         num_heads: int,
-        max_seq_len: int = 8192,
-        dropout: float = 0.1,
-        rope_base: float = 10000.0,
-        rope_scaling_type: str = "linear",      # 新增参数
-        rope_training_length: int = 8192,       # 模型预训练长度（如 Llama3-8B 是 8192）
+        max_seq_len: int = None,
+        dropout: float = None,
+        rope_base: float = None,
+        rope_scaling_type: str = None,
+        rope_training_length: int = None,
     ):
         super().__init__()
         assert d_model % num_heads == 0
@@ -169,12 +259,12 @@ class RoPEAttention(nn.Module):
         self.rope = RoPE(
             dim=self.head_dim,
             max_seq_len=max_seq_len,
-            base=rope_base,
-            scaling_type=rope_scaling_type,
-            training_length=rope_training_length,
+            rope_base=rope_base,
+            rope_scaling_type=rope_scaling_type,
+            rope_training_length=rope_training_length,
         )
         
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout or RoPEConfig.ROPE_DROPOUT)
     
     def forward(
         self,
