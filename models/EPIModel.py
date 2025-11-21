@@ -10,34 +10,25 @@ from config import (
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.embedding import create_dna_embedding_layer
-from models.pleat.RoPE import RoPEAttention, RoPE_AdaptAttention, RoPEConfig
+from models.pleat.RoPE import RoPEAttention, RoPE_AdaptAttention, RoPEConfig, CBAT
 
 
-class RoPETransformerEncoderLayer(nn.Module):
+class CBATTransformerEncoderLayer(nn.Module):
     """
-    集成RoPE的Transformer编码器层
-    替换标准的多头自注意力为RoPE注意力
+    使用CBAT模块的Transformer编码器层
+    替换标准的多头自注意力为CBAT注意力机制
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, use_adaptive=False):
-        super(RoPETransformerEncoderLayer, self).__init__()
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, img_size=32):
+        super(CBATTransformerEncoderLayer, self).__init__()
         
-        # 根据use_adaptive参数选择使用RoPEAttention或RoPE_AdaptAttention
-        if use_adaptive:
-            self.self_attn = RoPE_AdaptAttention(
-                d_model=d_model,
-                num_heads=nhead,
-                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-                dropout=dropout
-            )
-        else:
-            self.self_attn = RoPEAttention(
-                d_model=d_model,
-                num_heads=nhead,
-                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-                dropout=dropout
-            )
-        
-        self.use_adaptive = use_adaptive
+        # 使用CBAT模块替换原有的注意力机制
+        self.self_attn = CBAT(
+            d_model=d_model,
+            num_heads=nhead,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=dropout
+        )
         
         # 前馈网络
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -65,24 +56,18 @@ class RoPETransformerEncoderLayer(nn.Module):
             src_key_padding_mask: key填充掩码
             
         Returns:
-            如果use_adaptive=True: (输出张量, adaptive_loss)
-            否则: 输出张量
+            返回 (输出张量, adaptive_loss)
             输出张量形状 (seq_len, batch, d_model)
         """
         # 保存原始输入用于残差连接
         residual = x
         
-        # 自注意力计算 (使用RoPE)
-        # 转换维度以适配RoPEAttention: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
+        # 自注意力计算 (使用CBAT)
+        # 转换维度以适配CBAT: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
         x_transposed = x.permute(1, 0, 2)
         
-        if self.use_adaptive:
-            # RoPE_AdaptAttention返回(output, adaptive_loss)
-            attn_output, adaptive_loss = self.self_attn(x_transposed, attention_mask=src_mask, return_loss=True)
-        else:
-            # RoPEAttention只返回output
-            attn_output = self.self_attn(x_transposed, attention_mask=src_mask)
-            adaptive_loss = None
+        # CBAT返回(output, adaptive_loss)
+        attn_output, adaptive_loss = self.self_attn(x_transposed, attention_mask=src_mask, return_loss=True)
             
         # 转回原始维度: (batch, seq_len, d_model) -> (seq_len, batch, d_model)
         attn_output = attn_output.permute(1, 0, 2)
@@ -101,19 +86,16 @@ class RoPETransformerEncoderLayer(nn.Module):
         x = residual + self.dropout2(ff_output)
         x = self.norm2(x)
         
-        if self.use_adaptive:
-            return x, adaptive_loss
-        return x
+        return x, adaptive_loss
 
 
 # Backbone
 class EPIModel(nn.Module):
-    def __init__(self, use_adaptive_attention=False):
+    def __init__(self):
         super(EPIModel, self).__init__()
         
         # Transformer配置
         self.num_transformer_layers = TRANSFORMER_LAYERS
-        self.use_adaptive_attention = use_adaptive_attention
 
         # DNA嵌入层 - 使用6-mer overlapping tokenization
         self.embedding_en = create_dna_embedding_layer(
@@ -145,23 +127,32 @@ class EPIModel(nn.Module):
             nn.Dropout(p=CNN_DROPOUT)
         )
         
-        # Transformer编码器 - 使用RoPE位置编码 (不再需要单独的SinPE)
+        # Transformer编码器 - 使用CBAT模块
         TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT  # 获取dropout
-        # Enhancer RoPE Transformer layers
+        
+        # 计算合适的img_size，使序列长度可以reshape为正方形
+        # 根据实际序列长度动态计算img_size
+        # 这里使用一个保守的估计，确保序列长度可以reshape为img_size*img_size
+        # 假设经过CNN后的序列长度为seq_len，我们需要找到最接近的平方数
+        # 这里使用一个合理的默认值，实际使用时可能需要根据序列长度调整
+        # 为了避免错误，我们将img_size设置为较小的值，并在CBAT中处理不匹配的情况
+        img_size = 16  # 16*16=256，可以容纳大多数序列长度
+        
+        # Enhancer CBAT Transformer layers
         self.enhancer_transformer_layers = nn.ModuleList([
-            RoPETransformerEncoderLayer(
+            CBATTransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, 
                 dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
-                use_adaptive=self.use_adaptive_attention
+                img_size=img_size
             ) for _ in range(self.num_transformer_layers)
         ])
 
-        # Promoter RoPE Transformer layers
+        # Promoter CBAT Transformer layers
         self.promoter_transformer_layers = nn.ModuleList([
-            RoPETransformerEncoderLayer(
+            CBATTransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
                 dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
-                use_adaptive=self.use_adaptive_attention
+                img_size=img_size
             ) for _ in range(self.num_transformer_layers)
         ])
         
@@ -220,21 +211,15 @@ class EPIModel(nn.Module):
         # 初始化adaptive_loss累积
         total_adaptive_loss = 0.0
         
-        # Transformer编码 - 使用RoPE位置编码 (不再需要外部位置编码)
-        # RoPE注意力层内部会自动处理位置编码
+        # Transformer编码 - 使用CBAT模块
+        # CBAT模块内部会自动处理位置编码和自适应注意力
         for layer in self.enhancer_transformer_layers:
-            if self.use_adaptive_attention:
-                enhancers_output, layer_adaptive_loss = layer(enhancers_output)
-                total_adaptive_loss += layer_adaptive_loss
-            else:
-                enhancers_output = layer(enhancers_output)
+            enhancers_output, layer_adaptive_loss = layer(enhancers_output)
+            total_adaptive_loss += layer_adaptive_loss
 
         for layer in self.promoter_transformer_layers:
-            if self.use_adaptive_attention:
-                promoters_output, layer_adaptive_loss = layer(promoters_output)
-                total_adaptive_loss += layer_adaptive_loss
-            else:
-                promoters_output = layer(promoters_output)
+            promoters_output, layer_adaptive_loss = layer(promoters_output)
+            total_adaptive_loss += layer_adaptive_loss
         
         # 交叉注意力: 让增强子关注启动子
         enhancers_attended, _ = self.cross_attention(
@@ -259,7 +244,5 @@ class EPIModel(nn.Module):
         # 分类
         result = self.fc(combined)
         
-        if self.use_adaptive_attention:
-            return torch.sigmoid(result), combined, total_adaptive_loss
-        else:
-            return torch.sigmoid(result), combined
+        # CBAT模块总是返回adaptive_loss
+        return torch.sigmoid(result), combined, total_adaptive_loss

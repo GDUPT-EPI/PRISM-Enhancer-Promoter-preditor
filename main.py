@@ -429,9 +429,9 @@ if not os.path.exists(SAVE_MODEL_DIR):
     os.makedirs(SAVE_MODEL_DIR)
 
 # 创建新的模型实例（不使用预训练权重）
-epimodel = EPIModel(use_adaptive_attention=True)
+epimodel = EPIModel()
 epimodel = epimodel.to(device)
-print("创建新的模型实例（不使用预训练权重，启用自适应注意力）")
+print("创建新的模型实例（不使用预训练权重，使用CBAT模块）")
 
 # 创建优化器
 optimizer = torch.optim.Adam(epimodel.parameters(), lr=LEARNING_RATE)
