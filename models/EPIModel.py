@@ -10,7 +10,8 @@ from config import (
     DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD
 )
 from models.pleat.embedding import create_dna_embedding_layer
-from models.pleat.RoPE import RoPEAttention, RoPE_AdaptAttention, RoPEConfig, CBAT
+from models.pleat.RoPE import RoPEConfig
+from models.layers.attn import *
 
 
 class CBATTransformerEncoderLayer(nn.Module):
