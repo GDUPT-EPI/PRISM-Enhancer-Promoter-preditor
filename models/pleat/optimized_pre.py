@@ -2,11 +2,11 @@
 """
 优化的数据预处理模块
 解决原有预处理流程中的性能瓶颈，提高数据处理效率
+使用统一的词表管理模块确保词表一致性
 """
 
 import torch
 import numpy as np
-import itertools
 from torch.utils.data import Dataset
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
@@ -22,71 +22,12 @@ from config import (
     ENHANCER_FEATURE_DIM,
     PROMOTER_FEATURE_DIM,
     PROJECT_ROOT,
-    CACHE_DIR,
     KMER_SIZE,
     KMER_OVERLAP
 )
 
-# 全局tokenizer缓存
-_TOKENIZER_CACHE = None
-_TOKENIZER_CACHE_PATH = os.path.join(CACHE_DIR, "tokenizer_cache.pkl")
-
-def get_tokenizer(force_recreate: bool = False) -> Dict[str, int]:
-    """
-    获取全局tokenizer字典，使用缓存避免重复计算
-    与embedding.py中的KMerTokenizer保持一致
-    
-    Args:
-        force_recreate: 是否强制重新创建tokenizer
-        
-    Returns:
-        token到索引的映射字典
-    """
-    global _TOKENIZER_CACHE
-    
-    # 如果缓存存在且不强制重新创建，直接返回
-    if _TOKENIZER_CACHE is not None and not force_recreate:
-        return _TOKENIZER_CACHE
-    
-    # 尝试从文件加载缓存
-    cache_dir = os.path.dirname(_TOKENIZER_CACHE_PATH)
-    os.makedirs(cache_dir, exist_ok=True)
-    
-    if os.path.exists(_TOKENIZER_CACHE_PATH) and not force_recreate:
-        try:
-            with open(_TOKENIZER_CACHE_PATH, 'rb') as f:
-                _TOKENIZER_CACHE = pickle.load(f)
-            print(f"从缓存加载tokenizer: {_TOKENIZER_CACHE_PATH}")
-            return _TOKENIZER_CACHE
-        except Exception as e:
-            print(f"加载tokenizer缓存失败: {e}，将重新创建")
-    
-    # 创建新的tokenizer，与embedding.py中的KMerTokenizer保持一致
-    print("创建tokenizer字典...")
-    bases = ['A', 'C', 'G', 'T']
-    k = KMER_SIZE  # 从config.py导入的6-mer配置
-    
-    # 使用itertools.product生成所有可能的6-mer组合
-    products = itertools.product(bases, repeat=k)
-    tokens = [''.join(p) for p in products]
-    
-    # 添加null token
-    tokens.append('null')
-    
-    # 创建token到索引的映射字典
-    token_dict = {token: idx for idx, token in enumerate(tokens)}  # null token的索引为4096
-    
-    _TOKENIZER_CACHE = token_dict
-    
-    # 保存到缓存文件
-    try:
-        with open(_TOKENIZER_CACHE_PATH, 'wb') as f:
-            pickle.dump(_TOKENIZER_CACHE, f)
-        print(f"保存tokenizer到缓存: {_TOKENIZER_CACHE_PATH}")
-    except Exception as e:
-        print(f"保存tokenizer缓存失败: {e}")
-    
-    return _TOKENIZER_CACHE
+# 导入词表管理模块
+from models.pleat.vocab_utils import get_token_to_idx
 
 
 def sequence_to_tokens_fast(sequence: str, k: int = KMER_SIZE) -> List[str]:
@@ -138,6 +79,7 @@ def tokens_to_ids_fast(tokens: List[str], tokenizer: Dict[str, int]) -> torch.Te
 class OptimizedSequenceDataset(Dataset):
     """
     优化的序列数据集类，采用延迟预处理和缓存策略
+    使用统一的词表管理模块确保词表一致性
     
     Args:
         enhancers: 增强子序列列表
@@ -167,8 +109,8 @@ class OptimizedSequenceDataset(Dataset):
         
         self.length = len(labels)
         
-        # 获取tokenizer
-        self.tokenizer = get_tokenizer()
+        # 从词表管理模块获取tokenizer
+        self.tokenizer = get_token_to_idx()
         
         # 创建缓存目录
         if self.use_cache and self.cache_dir:
@@ -302,45 +244,15 @@ def create_optimized_dataset(
         labels: 标签列表
         cache_dir: 缓存目录
         use_cache: 是否使用缓存
-        num_workers: 预处理工作进程数
+        num_workers: 并行工作进程数
         
     Returns:
-        优化后的数据集
+        优化的数据集实例
     """
-    # 如果没有指定缓存目录，创建默认缓存目录
-    if cache_dir is None and use_cache:
-        cache_dir = os.path.join(CACHE_DIR, "dataset_cache")
-    
-    # 创建数据集
-    dataset = OptimizedSequenceDataset(
+    return OptimizedSequenceDataset(
         enhancers=enhancers,
         promoters=promoters,
         labels=labels,
         cache_dir=cache_dir,
         use_cache=use_cache
     )
-    
-    return dataset
-
-
-def clear_tokenizer_cache():
-    """清除tokenizer缓存"""
-    global _TOKENIZER_CACHE
-    _TOKENIZER_CACHE = None
-    if os.path.exists(_TOKENIZER_CACHE_PATH):
-        os.remove(_TOKENIZER_CACHE_PATH)
-        print(f"已删除tokenizer缓存: {_TOKENIZER_CACHE_PATH}")
-
-
-def warmup_cache(dataset: OptimizedSequenceDataset, num_samples: int = 100):
-    """
-    预热缓存，提前处理一部分数据
-    
-    Args:
-        dataset: 数据集
-        num_samples: 预处理的样本数量
-    """
-    print(f"预热缓存，处理前{num_samples}个样本...")
-    for i in tqdm(range(min(num_samples, len(dataset))), desc="预热缓存"):
-        _ = dataset[i]
-    print("缓存预热完成")

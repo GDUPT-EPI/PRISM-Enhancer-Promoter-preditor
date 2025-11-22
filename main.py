@@ -14,10 +14,13 @@ from data_loader import MyDataset
 
 # 导入优化的数据预处理模块
 from models.pleat.optimized_pre import (
-    create_optimized_dataset,
-    get_tokenizer,
-    warmup_cache,
-    clear_tokenizer_cache
+    create_optimized_dataset
+)
+# 导入词表管理模块
+from models.pleat.vocab_utils import (
+    get_token_to_idx,
+    get_vocab_hash,
+    VocabManager
 )
 from models.EPIModel import EPIModel
 from sklearn.model_selection import KFold
@@ -468,9 +471,6 @@ train_fold = OptimizedCombinedDataset(
     cache_dir=os.path.join(CACHE_DIR, "train_cache"),
     use_cache=True
 )
-
-# 预热缓存
-warmup_cache(train_fold, num_samples=100)
 
 # 创建验证数据集
 def create_optimized_validation_dataset(enhancers, promoters, labels, cell_name):

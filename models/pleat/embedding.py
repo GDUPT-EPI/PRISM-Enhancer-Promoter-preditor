@@ -2,21 +2,25 @@
 """
 6-mer重叠嵌入层模块
 实现基于DNA序列的6-mer tokenization和嵌入向量生成
+使用统一的词表管理模块确保词表一致性
 """
 
 import torch
 import torch.nn as nn
-import itertools
 from typing import Dict, List, Tuple
 import numpy as np
 
 # 导入配置参数
-from config import KMER_SIZE, EMBEDDING_DIM
+from config import EMBEDDING_DIM
+
+# 导入词表管理模块
+from models.pleat.vocab_utils import get_vocab, get_token_to_idx, get_idx_to_token
 
 
 class KMerTokenizer:
     """
     6-mer分词器类，用于将DNA序列转换为k-mer tokens
+    使用统一的词表管理模块确保词表一致性
     
     Attributes:
         token_to_idx (Dict[str, int]): token到索引的映射字典
@@ -24,40 +28,16 @@ class KMerTokenizer:
         vocab_size (int): 词汇表大小
     """
     
-    def __init__(self, k: int = KMER_SIZE):
+    def __init__(self):
         """
         初始化k-mer分词器
-        
-        Args:
-            k: k-mer长度，默认使用配置文件中的KMER_SIZE
+        使用统一的词表管理模块获取词表
         """
-        self.k = k
-        self.token_to_idx = {}
-        self.idx_to_token = {}
-        self.vocab_size = 0
-        self._build_vocab()
-    
-    def _build_vocab(self) -> None:
-        """
-        构建k-mer词汇表
-        包含所有可能的k-mer组合以及null token
-        """
-        # DNA碱基
-        bases = ['A', 'C', 'G', 'T']
+        # 从词表管理模块获取词表
+        self.token_to_idx, self.idx_to_token = get_vocab()
+        self.vocab_size = len(self.token_to_idx)
         
-        # 生成所有可能的k-mer组合
-        products = itertools.product(bases, repeat=self.k)
-        tokens = [''.join(p) for p in products]
-        
-        # 添加null token用于填充和未知碱基
-        tokens.insert(0, 'null')
-        
-        # 创建token到索引的映射字典
-        self.token_to_idx = {token: idx for idx, token in enumerate(tokens)}
-        self.idx_to_token = {idx: token for token, idx in self.token_to_idx.items()}
-        self.vocab_size = len(tokens)
-        
-        print(f"构建了{self.vocab_size}大小的{self.k}-mer词汇表")
+        print(f"使用统一词表管理模块加载词表，大小: {self.vocab_size}")
     
     def tokenize(self, sequence: str) -> List[str]:
         """
@@ -70,14 +50,22 @@ class KMerTokenizer:
         Returns:
             k-mer tokens列表
         """
+        # 获取k-mer长度（从词表中推断）
+        if self.vocab_size > 1:
+            # 获取第一个非null token的长度
+            first_token = next((token for token in self.token_to_idx.keys() if token != 'null'), 'null')
+            k = len(first_token) if first_token != 'null' else 6
+        else:
+            k = 6  # 默认值
+        
         # 检查序列长度
-        if len(sequence) < self.k:
+        if len(sequence) < k:
             return ['null']
         
         # 使用overlapping方式生成k-mers，每次滑动k-1个碱基
         tokens = []
-        for i in range(len(sequence) - self.k + 1):
-            kmer = sequence[i:i+self.k]
+        for i in range(len(sequence) - k + 1):
+            kmer = sequence[i:i+k]
             # 检查是否包含未知碱基N
             if 'N' in kmer:
                 tokens.append('null')
@@ -117,28 +105,28 @@ class DNAEmbedding(nn.Module):
     """
     DNA序列嵌入层
     将DNA序列转换为密集向量表示
+    使用统一的词表管理模块确保词表一致性
     
     Attributes:
         tokenizer (KMerTokenizer): k-mer分词器
         embedding (nn.Embedding): PyTorch嵌入层
     """
     
-    def __init__(self, vocab_size: int = None, embed_dim: int = EMBEDDING_DIM, k: int = KMER_SIZE, 
+    def __init__(self, vocab_size: int = None, embed_dim: int = EMBEDDING_DIM, 
                  padding_idx: int = 0, init_std: float = 0.1):
         """
         初始化DNA嵌入层
         
         Args:
-            vocab_size: 词汇表大小，如果为None则使用k-mer生成的词汇表大小
+            vocab_size: 词汇表大小，如果为None则使用词表管理模块的词汇表大小
             embed_dim: 嵌入维度，默认使用配置文件中的EMBEDDING_DIM
-            k: k-mer长度，默认使用配置文件中的KMER_SIZE
             padding_idx: padding token的索引
             init_std: 嵌入权重初始化标准差
         """
         super(DNAEmbedding, self).__init__()
         
         # 创建k-mer分词器
-        self.tokenizer = KMerTokenizer(k=k)
+        self.tokenizer = KMerTokenizer()
         
         # 如果未指定词汇表大小，使用分词器的词汇表大小
         if vocab_size is None:
@@ -235,8 +223,7 @@ def create_dna_embedding_layer(vocab_size: int = None, embed_dim: int = EMBEDDIN
     
 #     # 构建词汇表
 #     tokenizer = KMerTokenizer()
-#     tokenizer._build_vocab()
     
 #     # 计时结束
 #     end_time = time.time()
-#     print(f"词汇表构建时间: {end_time - start_time:.4f} 秒")
+#     print(f"词汇表加载时间: {end_time - start_time:.4f} 秒")
