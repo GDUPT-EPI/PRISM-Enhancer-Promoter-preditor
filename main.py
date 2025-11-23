@@ -650,15 +650,15 @@ for i in range(EPOCH):
         if labels.shape == torch.Size([1, 1]):
             labels = torch.reshape(labels, (1,))
 
-        # 计算主损失
-        main_loss = epimodel.criterion(outputs, labels)
-        
-        # 组合损失：主损失 + 自适应损失
-        if total_adaptive_loss is not None:
-            loss = main_loss + total_adaptive_loss
+        # 确保adaptive_loss是一个标量
+        if isinstance(total_adaptive_loss, torch.Tensor) and total_adaptive_loss.numel() == 1:
+            adaptive_loss_val = total_adaptive_loss.item()
         else:
-            loss = main_loss
-            
+            adaptive_loss_val = total_adaptive_loss
+
+        # 使用新的损失计算方式
+        loss, loss_details = epimodel.compute_loss(outputs, labels, adaptive_loss_val, return_details=True)
+        
         train_epoch_loss += loss.item()
         train_epoch_correct += get_num_correct(outputs, labels)
 
@@ -674,8 +674,15 @@ for i in range(EPOCH):
                 else:
                     pgd.restore_grad()
                 
-                outputs_adv, _, _ = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
-                loss_adv = epimodel.criterion(outputs_adv, labels)
+                outputs_adv, _, total_adaptive_loss_adv = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
+                # 确保adaptive_loss是一个标量
+                if isinstance(total_adaptive_loss_adv, torch.Tensor) and total_adaptive_loss_adv.numel() == 1:
+                    adaptive_loss_val = total_adaptive_loss_adv.item()
+                else:
+                    adaptive_loss_val = total_adaptive_loss_adv
+                
+                # 计算对抗损失
+                loss_adv = epimodel.compute_loss(outputs_adv, labels, adaptive_loss_val, return_details=False)
                 loss_adv.backward()
             
             pgd.restore() # 恢复embedding参数
@@ -683,11 +690,21 @@ for i in range(EPOCH):
         epimodel.optimizer.step()
         epimodel.optimizer.zero_grad()
         
-        # 更新进度条显示当前损失
-        train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        # 更新进度条显示当前损失详情
+        train_pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'immax': f'{loss_details["immax_loss"]:.4f}',
+            'adaptive': f'{loss_details["adaptive_loss"]:.4f}',
+            'alpha': f'{loss_details["alpha"]:.3f}'
+        })
         
     scheduler.step()
     logger.info("learning_rate: {}".format(scheduler.get_last_lr()))
+    
+    # 记录当前epoch的损失详情和α值
+    current_alpha = epimodel.get_loss_alpha()
+    logger.info("Epoch {}: 训练完成，当前α值为: {:.4f}".format(i + 1, current_alpha))
+    
     train_epoch_aupr = average_precision_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
     train_epoch_auc = roc_auc_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
       

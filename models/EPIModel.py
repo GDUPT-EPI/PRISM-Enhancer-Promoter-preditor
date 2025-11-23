@@ -11,6 +11,7 @@ from config import (
 )
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
+from models.pleat.adaptive_immax import AdaptiveIMMAXLoss  
 from models.layers.attn import *
 
 
@@ -179,7 +180,14 @@ class EPIModel(nn.Module):
             nn.Linear(CLASSIFIER_HIDDEN_SIZE, 1)
         )
         
-        self.criterion = nn.BCELoss()
+        # 损失函数
+        self.criterion = AdaptiveIMMAXLoss(
+        alpha_init=0.5,           # 初始α=0.5，训练中会自动调整
+        alpha_momentum=0.9,       # 高动量保证α稳定更新
+        eps=1e-8,                 # 数值稳定性
+        margin_clip=10.0          # 防止极端margin值导致数值溢出
+        )
+
         # 优化器使用集中配置的weight_decay
         self.optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.parameters()),
@@ -247,3 +255,37 @@ class EPIModel(nn.Module):
         
         # CBAT模块总是返回adaptive_loss
         return torch.sigmoid(result), combined, total_adaptive_loss
+    
+    def get_loss_alpha(self):
+        """获取当前IMMAX损失的α值，用于监控训练"""
+        return self.criterion.get_alpha()
+    
+    def compute_loss(self, outputs, labels, adaptive_loss=0.0, return_details=False):
+        """
+        统一的损失计算接口
+        
+        Args:
+            outputs: 模型输出（已sigmoid），形状 (batch, 1) 或 (batch,)
+            labels: 真实标签，形状 (batch,)
+            adaptive_loss: CBAT模块返回的自适应损失
+            return_details: 是否返回详细信息
+            
+        Returns:
+            loss: 总损失
+            如果return_details=True，返回字典包含各项损失和α值
+        """
+        # 计算IMMAX损失
+        immax_loss, alpha = self.criterion(outputs, labels, return_alpha=True)
+        
+        # 总损失
+        total_loss = immax_loss + adaptive_loss
+        
+        if return_details:
+            return total_loss, {
+                'total_loss': total_loss.item(),
+                'immax_loss': immax_loss.item(),
+                'adaptive_loss': adaptive_loss if isinstance(adaptive_loss, float) else adaptive_loss.item(),
+                'alpha': alpha
+            }
+        
+        return total_loss
