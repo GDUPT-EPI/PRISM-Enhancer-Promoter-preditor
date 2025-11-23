@@ -202,7 +202,7 @@ class OptimizedSequenceDataset(Dataset):
             cache_path = self._get_cache_path(idx)
             if os.path.exists(cache_path):
                 try:
-                    return torch.load(cache_path)
+                    return torch.load(cache_path, weights_only=False)
                 except Exception as e:
                     print(f"加载缓存数据失败: {e}")
         
