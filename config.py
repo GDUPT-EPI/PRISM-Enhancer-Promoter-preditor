@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
-SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/test-skip")
+SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在

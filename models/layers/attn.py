@@ -762,6 +762,10 @@ class CBAT(nn.Module):
             position_ids=position_ids,
         )  # [B, L, D]
         
+        # 残差连接1: 7*7和CausalBlock之间
+        residual_7x7_1d = self._to_1d_with_length(residual_7x7, original_length)
+        x_attn = x_attn + residual_7x7_1d  # [B, L, D]
+        
         # 转2D
         x_2d = self._to_2d(x_attn)  # [B, D, H, W]
         
@@ -776,6 +780,9 @@ class CBAT(nn.Module):
         gate_input = torch.cat([x_main, residual_1], dim=-1)  # [B, L, 2D]
         gate_weight = self.gate_1(gate_input)  # [B, L, D]
         x_out_1 = gate_weight * x_main + (1 - gate_weight) * residual_1  # [B, L, D]
+        
+        # 残差连接2: CausalBlock和模块一门控之间
+        x_out_1 = x_out_1 + x_attn  # [B, L, D]
         
         # 全局残差连接 - 确保维度匹配
         if x_out_1.shape[1] != identity.shape[1]:
@@ -829,6 +836,9 @@ class CBAT(nn.Module):
         gate_input = torch.cat([x_ffn, residual_2], dim=-1)  # [B, L, 2D]
         gate_weight = self.gate_2(gate_input)  # [B, L, D]
         x_out_2 = gate_weight * x_ffn + (1 - gate_weight) * residual_2  # [B, L, D]
+        
+        # 残差连接3: 模块一门控和模块二门控之间
+        x_out_2 = x_out_2 + x_out_1  # [B, L, D]
         
         # 全局残差连接 - 确保维度匹配
         if x_out_2.shape[1] != x_out_1.shape[1]:
