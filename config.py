@@ -24,7 +24,7 @@ BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
 EPOCH = 20
 PRE_TRAIN_EPOCH = 10
 LEARNING_RATE = 2e-4
-VALIDATION_INTERVAL = 2  # 每隔多少个epoch进行一次验证
+VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
 
 # 数据加载器配置
 NUM_WORKERS = 4  # 从16减少到4，降低CPU上下文切换开销
@@ -71,7 +71,7 @@ ENABLE_ADVERSARIAL_TRAINING = True  # 是否启用对抗训练
 K = 3  # PGD攻击迭代次数
 
 # 细胞系配置
-TRAIN_CELL_LINE = "HUVEC"  # 选择单一细胞系或全选
+TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
 
 # 可视化配置
