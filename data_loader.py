@@ -9,13 +9,13 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import os
+from config import DATA_DIR as CONFIG_DATA_DIR, TEST_CELL_LINES
 
-# 集中配置路径管理
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "dataset"
+DATA_DIR = Path(CONFIG_DATA_DIR)
 
-# 细胞系列表
-CELL_LINES = ["GM12878", "HUVEC", "HeLa-S3", "IMR90", "K562", "NHEK"]
+# 细胞系列表来源于配置
+CELL_LINES = TEST_CELL_LINES
 
 # 数据集类型
 DATA_TYPES = ["train", "val", "test"]
@@ -124,8 +124,21 @@ def load_all_test_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
     for cell_line in CELL_LINES:
         if (DATA_DIR / "test" / cell_line).exists():
             test_data[cell_line] = prepare_cell_data(cell_line, "test")
-    
     return test_data
+
+
+def load_all_val_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    加载所有细胞系的验证数据
+    
+    Returns:
+        细胞系名称到验证数据(enhancers, promoters, labels)的映射字典
+    """
+    val_data = {}
+    for cell_line in CELL_LINES:
+        if (DATA_DIR / "val" / cell_line).exists():
+            val_data[cell_line] = prepare_cell_data(cell_line, "val")
+    return val_data
 
 
 def load_train_data(cell_line: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
