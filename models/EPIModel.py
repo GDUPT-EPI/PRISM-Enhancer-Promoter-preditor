@@ -13,6 +13,7 @@ from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss  
 from models.layers.attn import *
+from models.layers.FourierKAN import FourierKAN
 
 
 class CBATTransformerEncoderLayer(nn.Module):
@@ -171,13 +172,12 @@ class EPIModel(nn.Module):
         # Pooling层 - 将序列降维为固定长度
         self.adaptive_pool = nn.AdaptiveAvgPool1d(1)  # 全局平均池化
         
-        # 固定大小的分类头 - 使用集中配置的参数
-        self.fc = nn.Sequential(
-            nn.Linear(OUT_CHANNELS * 2, CLASSIFIER_HIDDEN_SIZE),  # 增强子+启动子各OUT_CHANNELS维
-            nn.BatchNorm1d(CLASSIFIER_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Dropout(p=CLASSIFIER_DROPOUT),
-            nn.Linear(CLASSIFIER_HIDDEN_SIZE, 1)
+        # 使用FourierKAN替代末端MLP作为分类器
+        self.classifier = FourierKAN(
+            in_features=OUT_CHANNELS * 2,
+            out_features=1,
+            grid_size=5,
+            width=2 * (OUT_CHANNELS * 2) + 1,
         )
         
         # 损失函数
@@ -250,8 +250,8 @@ class EPIModel(nn.Module):
         # 拼接增强子和启动子表示
         combined = torch.cat([enhancers_pooled, promoters_pooled], dim=1)  # (batch, 128)
         
-        # 分类
-        result = self.fc(combined)
+        # 分类（FourierKAN）
+        result = self.classifier(combined)
         
         # CBAT模块总是返回adaptive_loss
         return torch.sigmoid(result), combined, total_adaptive_loss

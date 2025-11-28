@@ -39,13 +39,12 @@ class AdaptiveIMMAXLoss(nn.Module):
             loss: 标量损失值
             如果return_alpha=True，则返回 (loss, alpha)
         """
-        # 确保维度一致
+        if pred.dim() > 2:
+            pred = pred.view(pred.size(0), -1)
         if pred.dim() == 2:
-            pred = pred.squeeze(1)  # (batch, 1) -> (batch,)
-        
-        # 确保target也是一维的
-        if target.dim() == 2:
-            target = target.squeeze(1)  # (batch, 1) -> (batch,)
+            pred = pred.squeeze(1)
+        if target.dim() > 1:
+            target = target.view(target.size(0))
         
         target = target.float()
         batch_size = pred.size(0)
