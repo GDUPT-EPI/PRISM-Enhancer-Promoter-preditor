@@ -10,6 +10,7 @@ import logging
 from datetime import datetime
 
 from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset
 from data_loader import MyDataset
 
 # 导入优化的数据预处理模块
@@ -289,6 +290,7 @@ print(f"数据加载器工作进程数：{NUM_WORKERS}")
 # 创建优化的数据集 - 使用新的预处理模块
 print("创建训练数据集加载器...")
 train_loaders = {}
+train_folds = []
 for cell, (enhancers_train, promoters_train, labels_train) in train_data.items():
     train_dataset = MyDataset(enhancers_train, promoters_train, labels_train)
     enh_train_raw = [train_dataset[i][0] for i in range(len(train_dataset))]
@@ -301,6 +303,7 @@ for cell, (enhancers_train, promoters_train, labels_train) in train_data.items()
         cache_dir=os.path.join(CACHE_DIR, f"train_cache_{cell}"),
         use_cache=True,
     )
+    train_folds.append(train_fold)
     train_loaders[cell] = DataLoader(
         dataset=train_fold,
         batch_size=BATCH_SIZE,
@@ -312,6 +315,18 @@ for cell, (enhancers_train, promoters_train, labels_train) in train_data.items()
         collate_fn=simple_collate_fn,
     )
 
+if len(train_folds) > 0:
+    all_train_dataset = ConcatDataset([tf.dataset for tf in train_folds])
+    train_loaders["ALL"] = DataLoader(
+        dataset=all_train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        prefetch_factor=PREFETCH_FACTOR,
+        persistent_workers=PERSISTENT_WORKERS,
+        collate_fn=simple_collate_fn,
+    )
 # 创建验证数据集
 def create_optimized_validation_dataset(enhancers, promoters, labels, cell_name):
     """创建优化的验证数据集"""
@@ -353,9 +368,8 @@ for i in range(EPOCH):
     train_epoch_preds = torch.tensor([]).to(device)
     train_epoch_target = torch.tensor([]).to(device)
     
-    # 使用tqdm显示训练进度
     train_pbar = tqdm(train_loaders[TRAIN_CELL_LINE], desc=f"Epoch {i+1}/{EPOCH} [Training]", 
-                     leave=True, dynamic_ncols=True)
+                      leave=True, dynamic_ncols=True)
     
     # 遍历训练数据
     for data in train_pbar:
@@ -421,3 +435,5 @@ for i in range(EPOCH):
                     cell, i + 1, val_loss, val_aupr, val_auc
                 )
             )
+        # 保存模型
+        torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_{cell}_{i+1}.pth"))
