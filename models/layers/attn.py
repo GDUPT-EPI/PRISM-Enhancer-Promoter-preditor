@@ -64,6 +64,7 @@ class RoPEAttention(nn.Module):
         out = out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.out_proj(out)
         
+        return out
 
 @rope_adaptive_attention_config_decorator(RoPEConfig)
 class RoPE_AdaptAttention(nn.Module):

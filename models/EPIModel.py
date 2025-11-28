@@ -159,14 +159,39 @@ class EPIModel(nn.Module):
             ) for _ in range(self.num_transformer_layers)
         ])
         
-        # 交叉注意力机制 - 使用集中配置
-        self.cross_attention = nn.MultiheadAttention(
+        # 早期自注意力机制 (Pre-CBAT) - 使用RoPE
+        self.pre_enhancer_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        self.pre_promoter_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        
+        # 交叉注意力机制 1 (CBAT后) - 使用集中配置
+        self.cross_attention_1 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )
         
-        # 自注意力 - 使用集中配置
-        self.self_attention = nn.MultiheadAttention(
+        # 交叉注意力机制 2 (原有的) - 使用集中配置
+        self.cross_attention_2 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        
+        # 晚期自注意力增强 (Post-CrossAttn) - 使用CBAT模块
+        # 这里的img_size可能需要根据合并后的序列长度调整，或者保持一致
+        self.post_enhancer_cbat = CBAT(
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            img_size=img_size, # 假设维度保持一致
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=TRANSFORMER_DROPOUT
+        )
+        self.post_promoter_cbat = CBAT(
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=TRANSFORMER_DROPOUT
         )
         
         # Pooling层 - 将序列降维为固定长度
@@ -217,6 +242,18 @@ class EPIModel(nn.Module):
         enhancers_output = enhancers_output.permute(2, 0, 1)
         promoters_output = promoters_output.permute(2, 0, 1)
         
+        # 早期自注意力 (Pre-CBAT) - 使用RoPEAttention
+        # RoPEAttention需要 (batch, seq_len, d_model) 格式
+        enhancers_output = enhancers_output.permute(1, 0, 2)
+        promoters_output = promoters_output.permute(1, 0, 2)
+        
+        enhancers_output = self.pre_enhancer_self_attn(enhancers_output)
+        promoters_output = self.pre_promoter_self_attn(promoters_output)
+        
+        # 转回 (seq_len, batch, features) 供后续模块使用
+        enhancers_output = enhancers_output.permute(1, 0, 2)
+        promoters_output = promoters_output.permute(1, 0, 2)
+        
         # 初始化adaptive_loss累积
         total_adaptive_loss = 0.0
         
@@ -230,18 +267,40 @@ class EPIModel(nn.Module):
             promoters_output, layer_adaptive_loss = layer(promoters_output)
             total_adaptive_loss += layer_adaptive_loss
         
-        # 交叉注意力: 让增强子关注启动子
-        enhancers_attended, _ = self.cross_attention(
+        # 交叉注意力 1: 增强子查询启动子 (新增)
+        # 注意: MultiheadAttention 默认 batch_first=False，即 (seq_len, batch, embed_dim)
+        # query=enhancers, key=promoters, value=promoters
+        enhancers_attended_1, _ = self.cross_attention_1(
             enhancers_output, promoters_output, promoters_output
         )
         
-        # 自注意力增强
-        enhancers_final, _ = self.self_attention(
-            enhancers_attended, enhancers_attended, enhancers_attended
+        # 残差连接 1
+        enhancers_output = enhancers_output + enhancers_attended_1
+        
+        # 交叉注意力 2: 增强子查询启动子 (原有)
+        enhancers_attended_2, _ = self.cross_attention_2(
+            enhancers_output, promoters_output, promoters_output
         )
-        promoters_final, _ = self.self_attention(
-            promoters_output, promoters_output, promoters_output
-        )
+        
+        # 残差连接 2 (原有代码没有显式残差，这里按照需求添加与新的交叉连接残差连接)
+        # 这里的需求理解为：将经过CBAT以后的交叉注意力(L233-236，即现在的cross_attention_1结果) 与 新的交叉连接(cross_attention_2) 残差连接
+        # cross_attention_1的结果已经加到了enhancers_output中
+        enhancers_final = enhancers_output + enhancers_attended_2
+        
+        # 晚期自注意力增强 -> 替换为CBAT模块
+        # CBAT需要 (batch, seq_len, d_model)
+        enhancers_final_transposed = enhancers_final.permute(1, 0, 2)
+        promoters_output_transposed = promoters_output.permute(1, 0, 2)
+        
+        enhancers_final_cbat, loss_e = self.post_enhancer_cbat(enhancers_final_transposed, return_loss=True)
+        promoters_final_cbat, loss_p = self.post_promoter_cbat(promoters_output_transposed, return_loss=True)
+        
+        total_adaptive_loss += loss_e
+        total_adaptive_loss += loss_p
+        
+        # 转回 (seq_len, batch, d_model)
+        enhancers_final = enhancers_final_cbat.permute(1, 0, 2)
+        promoters_final = promoters_final_cbat.permute(1, 0, 2)
         
         # 全局池化降维为固定大小 (seq_len, batch, 64) -> (batch, 64)
         enhancers_pooled = self.adaptive_pool(enhancers_final.permute(1, 2, 0)).squeeze(-1)
