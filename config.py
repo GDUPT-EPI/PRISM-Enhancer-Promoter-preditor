@@ -71,7 +71,7 @@ ENABLE_ADVERSARIAL_TRAINING = True  # 是否启用对抗训练
 K = 3  # PGD攻击迭代次数
 
 # 细胞系配置
-TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
+TRAIN_CELL_LINE = "HUVEC"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
 
 # 可视化配置

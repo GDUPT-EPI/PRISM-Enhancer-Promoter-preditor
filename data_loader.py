@@ -140,6 +140,13 @@ def load_all_val_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
             val_data[cell_line] = prepare_cell_data(cell_line, "val")
     return val_data
 
+def load_all_train_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    train_data = {}
+    for cell_line in CELL_LINES:
+        if (DATA_DIR / "train" / cell_line).exists():
+            train_data[cell_line] = prepare_cell_data(cell_line, "train")
+    return train_data
+
 
 def load_train_data(cell_line: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """

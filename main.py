@@ -3,7 +3,7 @@
 # 导入配置文件
 from config import *
 # 导入新的数据加载模块
-from data_loader import load_train_data, load_all_val_data
+from data_loader import load_all_val_data, load_all_train_data
 
 # 导入日志模块
 import logging
@@ -200,44 +200,6 @@ class OptimizedCombinedDataset(Dataset):
         return len(self.dataset)
 
 
-
-def visualize_with_tsne(self_attention_output, labels, file_path):
-    """
-    使用t-SNE可视化自注意力输出
-    
-    Args:
-        self_attention_output: 模型的自注意力输出
-        labels: 样本标签
-        file_path: 保存图片的路径
-    """
-    # 将 self_attention_output 转换为 NumPy 数组
-    self_attention_np = self_attention_output.cpu().detach().numpy()
-
-    # 将 labels 转换为 NumPy 数组，并将其调整为一维数组
-    labels_np = labels.view(-1).cpu().detach().numpy()
-
-    # 创建 t-SNE 模型
-    tsne = TSNE(n_components=2, perplexity=10, random_state=42)
-
-    # 使用 t-SNE 对 self_attention_output 进行降维
-    embedded_points = tsne.fit_transform(self_attention_np)
-
-    # 根据标签分割正样本和负样本的坐标
-    positive_points = embedded_points[labels_np == 1]
-    negative_points = embedded_points[labels_np == 0]
-
-    # 绘制散点图，使用不同颜色表示正样本和负样本
-    plt.scatter(positive_points[:, 0], positive_points[:, 1], c='red', label='Positive')
-    plt.scatter(negative_points[:, 0], negative_points[:, 1], c='blue', label='Negative')
-
-    # 添加图例和标题
-    plt.legend()
-    plt.title('t-SNE Visualization')
-    plt.savefig(file_path)
-    # 显示图形
-    plt.show()
-
-
 def val_forwrd(model, dataloader, cell_name=""):
     """
     模型验证函数，计算验证集上的损失和指标
@@ -295,16 +257,8 @@ def val_forwrd(model, dataloader, cell_name=""):
 #得到的是序列数据
 #dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
 
-# 加载训练数据 (使用配置文件中指定的细胞系)
-enhancers_train, promoters_train, Labels_train = load_train_data(TRAIN_CELL_LINE)
-
+train_data = load_all_train_data()
 val_data = load_all_val_data()
-enhancers_val_GM12878, promoters_val_GM12878, Labels_val_GM12878 = val_data["GM12878"]
-enhancers_val_IMR90, promoters_val_IMR90, Labels_val_IMR90 = val_data["IMR90"]
-enhancers_val_HeLa, promoters_val_HeLa, Labels_val_HeLa = val_data["HeLa-S3"]
-enhancers_val_HUVEC, promoters_val_HUVEC, Labels_val_HUVEC = val_data["HUVEC"]
-enhancers_val_K562, promoters_val_K562, Labels_val_K562 = val_data["K562"]
-enhancers_val_NHEK, promoters_val_NHEK, Labels_val_NHEK = val_data["NHEK"]
 
 # 检查模型保存路径是否存在
 if not os.path.exists(SAVE_MODEL_DIR):
@@ -326,28 +280,37 @@ scheduler = MultiStepLR(optimizer, milestones=[25], gamma=0.1)
 all_params_on_gpu = all(param.is_cuda for param in epimodel.parameters())
 print("GPU是否可用：", torch.cuda.is_available())
 print("模型是否在GPU上：", all_params_on_gpu)
-print(f"使用训练数据：{TRAIN_CELL_LINE}细胞系")
-print(f"使用验证数据：{', '.join(TEST_CELL_LINES)}细胞系")
+print(f"训练细胞系列表：{', '.join(sorted(train_data.keys()))}")
+print(f"验证细胞系列表：{', '.join(sorted(val_data.keys()))}")
 print(f"批量大小：{BATCH_SIZE}")
 print(f"数据加载器工作进程数：{NUM_WORKERS}")
     
 
 # 创建优化的数据集 - 使用新的预处理模块
-print("创建优化的数据集...")
-train_dataset = MyDataset(enhancers_train, promoters_train, Labels_train)
-# 提取原始序列数据
-enhancers_train_raw = [train_dataset[i][0] for i in range(len(train_dataset))]
-promoters_train_raw = [train_dataset[i][1] for i in range(len(train_dataset))]
-labels_train_raw = [train_dataset[i][2] for i in range(len(train_dataset))]
-
-# 创建优化的训练数据集
-train_fold = OptimizedCombinedDataset(
-    enhancers=enhancers_train_raw,
-    promoters=promoters_train_raw,
-    labels=labels_train_raw,
-    cache_dir=os.path.join(CACHE_DIR, "train_cache"),
-    use_cache=True
-)
+print("创建训练数据集加载器...")
+train_loaders = {}
+for cell, (enhancers_train, promoters_train, labels_train) in train_data.items():
+    train_dataset = MyDataset(enhancers_train, promoters_train, labels_train)
+    enh_train_raw = [train_dataset[i][0] for i in range(len(train_dataset))]
+    prom_train_raw = [train_dataset[i][1] for i in range(len(train_dataset))]
+    labels_train_raw = [train_dataset[i][2] for i in range(len(train_dataset))]
+    train_fold = OptimizedCombinedDataset(
+        enhancers=enh_train_raw,
+        promoters=prom_train_raw,
+        labels=labels_train_raw,
+        cache_dir=os.path.join(CACHE_DIR, f"train_cache_{cell}"),
+        use_cache=True,
+    )
+    train_loaders[cell] = DataLoader(
+        dataset=train_fold,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        prefetch_factor=PREFETCH_FACTOR,
+        persistent_workers=PERSISTENT_WORKERS,
+        collate_fn=simple_collate_fn,
+    )
 
 # 创建验证数据集
 def create_optimized_validation_dataset(enhancers, promoters, labels, cell_name):
@@ -361,9 +324,8 @@ def create_optimized_validation_dataset(enhancers, promoters, labels, cell_name)
     )
 
 val_loaders = {}
-for cell in TEST_CELL_LINES:
-    enhancers_cell, promoters_cell, labels_cell = val_data[cell]
-    val_dataset = MyDataset(enhancers_cell, promoters_cell, labels_cell)
+for cell, (enhancers_val, promoters_val, labels_val) in val_data.items():
+    val_dataset = MyDataset(enhancers_val, promoters_val, labels_val)
     enh_raw = [val_dataset[i][0] for i in range(len(val_dataset))]
     prom_raw = [val_dataset[i][1] for i in range(len(val_dataset))]
     labels_raw = [val_dataset[i][2] for i in range(len(val_dataset))]
@@ -379,16 +341,7 @@ for cell in TEST_CELL_LINES:
         collate_fn=simple_collate_fn,
     )
 
-train_loader = DataLoader(
-    dataset=train_fold,
-    batch_size=BATCH_SIZE,
-    shuffle=True,
-    num_workers=NUM_WORKERS,
-    pin_memory=True,
-    prefetch_factor=PREFETCH_FACTOR,
-    persistent_workers=PERSISTENT_WORKERS,
-    collate_fn=simple_collate_fn,
-)
+
 
 
 
@@ -401,7 +354,7 @@ for i in range(EPOCH):
     train_epoch_target = torch.tensor([]).to(device)
     
     # 使用tqdm显示训练进度
-    train_pbar = tqdm(train_loader, desc=f"Epoch {i+1}/{EPOCH} [Training]", 
+    train_pbar = tqdm(train_loaders[TRAIN_CELL_LINE], desc=f"Epoch {i+1}/{EPOCH} [Training]", 
                      leave=True, dynamic_ncols=True)
     
     # 遍历训练数据
