@@ -10,6 +10,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # 数据路径配置
 DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
+DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目录
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
@@ -17,11 +18,12 @@ PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/prism")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
-for dir_path in [DATA_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
+for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
 BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
+PRISM_BATCH_SIZE = 16  # PRISM特供batch size (会被分为8个同细胞系 + 8个不同细胞系)
 EPOCH = 20
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
@@ -71,7 +73,7 @@ ENABLE_ADVERSARIAL_TRAINING = True  # 是否启用对抗训练
 K = 3  # PGD攻击迭代次数
 
 # 细胞系配置
-TRAIN_CELL_LINE = "HUVEC"  # 选择单一细胞系或全选
+TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
 TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
 
 # 可视化配置
