@@ -13,16 +13,16 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/prism")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
-for dir_path in [DATA_DIR, CACHE_DIR, SAVE_MODEL_DIR, LOG_DIR]:
+for dir_path in [DATA_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
 BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
 EPOCH = 20
-PRE_TRAIN_EPOCH = 10
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
 
@@ -109,3 +109,26 @@ PREPROCESS_BATCH_SIZE = 2000
 ENABLE_FAST_PREPROCESSING = True
 
 # 预处理配置信息将通过日志系统输出（在main文件中初始化）
+
+# ============================================================================
+# BERT预训练配置
+# ============================================================================
+BERT_MASK_PROB = 0.15  # 15%的token被mask
+BERT_MASK_TOKEN_PROB = 0.8  # 80%替换为[MASK]
+BERT_RANDOM_TOKEN_PROB = 0.1  # 10%替换为随机token
+BERT_UNCHANGED_PROB = 0.1  # 10%保持不变
+
+# BERT特殊token - 注意vocab_size=4097，有效索引是0-4096
+BERT_MASK_TOKEN_ID = 4096  # [MASK] token ID (vocab最后一个位置)
+BERT_PAD_TOKEN_ID = 0  # [PAD] token ID
+BERT_CLS_TOKEN_ID = 4095  # [CLS] token ID (可选)
+BERT_SEP_TOKEN_ID = 4094  # [SEP] token ID (可选)
+
+# BERT训练参数
+BERT_LEARNING_RATE = 1e-4
+BERT_WARMUP_STEPS = 1000
+BERT_MAX_GRAD_NORM = 1.0
+
+# PRISM模型配置（简化版本）
+PRISM_USE_CROSS_ATTENTION = True  # 是否使用交叉注意力
+PRISM_POOLING_TYPE = "mean"  # 池化方式: "mean", "max", "cls"
