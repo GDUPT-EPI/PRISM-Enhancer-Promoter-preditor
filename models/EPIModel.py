@@ -167,6 +167,49 @@ class EPIModel(nn.Module):
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )
         
+        # ============================================================================
+        # LCWnet Footprint模块 (待集成)
+        # ============================================================================
+        # from models.layers.footprint import LCWnetFootprint
+        # 
+        # # 为Enhancer分支添加LCWnet时频特征提取
+        # self.enhancer_footprint = LCWnetFootprint(
+        #     d_model=OUT_CHANNELS,
+        #     scales=np.logspace(0, 2, 32).tolist(),  # 32个对数均匀分布的尺度
+        #     k_max=0.5,                               # 频率支撑上限
+        #     hidden_dim=64,                           # 母小波MLP隐藏维度
+        #     num_layers=3,                            # 母小波MLP层数
+        #     fusion_type='attention',                 # 多尺度融合方式
+        # )
+        # 
+        # 集成位置说明:
+        # - 输入1: self.pre_enhancer_self_attn的输出 (早期自注意力后的Enhancer特征)
+        # - 输入2: cross_attention_1的输出 (交叉注意力后的Enhancer特征)
+        # - 通过门控机制融合LCWnet时频特征与原始特征
+        # - 输出传递给后续的CBAT Transformer layers
+        # 
+        # 前向传播集成示例 (在forward方法中):
+        # ```python
+        # # 早期自注意力后，保存用于LCWnet
+        # enhancers_pre_attn = self.pre_enhancer_self_attn(enhancers_output)
+        # 
+        # # ... CBAT Transformer layers ...
+        # 
+        # # 交叉注意力后
+        # enhancers_attended_1, _ = self.cross_attention_1(...)
+        # 
+        # # LCWnet时频特征提取 (使用早期特征作为输入，交叉注意力特征作为残差)
+        # enhancers_footprint = self.enhancer_footprint(
+        #     x=enhancers_pre_attn,           # 输入: 早期自注意力特征
+        #     residual=enhancers_attended_1   # 残差: 交叉注意力特征
+        # )
+        # 
+        # # 门控融合已在LCWnetFootprint内部完成
+        # # 将footprint输出传递给后续模块
+        # enhancers_output = enhancers_footprint
+        # ```
+        # ============================================================================
+        
         # 交叉注意力机制 1 (CBAT后) - 使用集中配置
         self.cross_attention_1 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
@@ -250,6 +293,13 @@ class EPIModel(nn.Module):
         enhancers_output = self.pre_enhancer_self_attn(enhancers_output)
         promoters_output = self.pre_promoter_self_attn(promoters_output)
         
+        # ============================================================================
+        # LCWnet Footprint集成点 1: 保存早期自注意力输出
+        # ============================================================================
+        # enhancers_pre_attn_for_footprint = enhancers_output.clone()  # [B, L, D]
+        # 这个特征将作为LCWnet的主输入，用于提取时频特征
+        # ============================================================================
+        
         # 转回 (seq_len, batch, features) 供后续模块使用
         enhancers_output = enhancers_output.permute(1, 0, 2)
         promoters_output = promoters_output.permute(1, 0, 2)
@@ -276,6 +326,29 @@ class EPIModel(nn.Module):
         
         # 残差连接 1
         enhancers_output = enhancers_output + enhancers_attended_1
+        
+        # ============================================================================
+        # LCWnet Footprint集成点 2: 交叉注意力后，应用时频特征提取
+        # ============================================================================
+        # # 转换为 (batch, seq_len, d_model) 格式
+        # enhancers_cross_attn = enhancers_output.permute(1, 0, 2)  # [B, L, D]
+        # 
+        # # 应用LCWnet时频特征提取
+        # # 输入: 早期自注意力特征 (用于CWT分析)
+        # # 残差: 交叉注意力特征 (用于门控融合)
+        # enhancers_with_footprint = self.enhancer_footprint(
+        #     x=enhancers_pre_attn_for_footprint,  # 早期特征作为CWT输入
+        #     residual=enhancers_cross_attn         # 交叉注意力特征作为残差
+        # )  # [B, L, D]
+        # 
+        # # 转回 (seq_len, batch, d_model) 格式
+        # enhancers_output = enhancers_with_footprint.permute(1, 0, 2)
+        # 
+        # # 此时enhancers_output已经融合了:
+        # # 1. 早期自注意力的局部模式
+        # # 2. 交叉注意力的E-P交互信息
+        # # 3. LCWnet提取的时频域特征 (DNA序列的周期性、频率特性)
+        # ============================================================================
         
         # 交叉注意力 2: 增强子查询启动子 (原有)
         enhancers_attended_2, _ = self.cross_attention_2(
