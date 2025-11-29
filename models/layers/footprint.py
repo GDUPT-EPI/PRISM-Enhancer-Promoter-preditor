@@ -13,8 +13,89 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Optional
+from functools import wraps
 
 
+class FootprintConfig:
+    K_MAX = 0.5
+    HIDDEN_DIM = 64
+    NUM_LAYERS = 3
+    FUSION_TYPE = 'attention'
+    LOGSPACE_START = 0.0
+    LOGSPACE_END = 2.0
+    NUM_SCALES = 32
+
+    @classmethod
+    def get_mother_params(cls):
+        return {
+            'k_max': cls.K_MAX,
+            'hidden_dim': cls.HIDDEN_DIM,
+            'num_layers': cls.NUM_LAYERS,
+        }
+
+    @classmethod
+    def get_cwt_params(cls):
+        scales = np.logspace(cls.LOGSPACE_START, cls.LOGSPACE_END, cls.NUM_SCALES).tolist()
+        return {
+            'scales': scales,
+            'k_max': cls.K_MAX,
+            'hidden_dim': cls.HIDDEN_DIM,
+            'num_layers': cls.NUM_LAYERS,
+        }
+
+    @classmethod
+    def get_module_params(cls):
+        return {
+            'fusion_type': cls.FUSION_TYPE,
+        }
+
+
+def footprint_mother_config_decorator(config_class):
+    def decorator(cls):
+        original_init = cls.__init__
+
+        @wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            defaults = config_class.get_mother_params()
+            for k, v in defaults.items():
+                kwargs.setdefault(k, v)
+            original_init(self, *args, **kwargs)
+        cls.__init__ = new_init
+        return cls
+    return decorator
+
+
+def footprint_cwt_config_decorator(config_class):
+    def decorator(cls):
+        original_init = cls.__init__
+
+        @wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            defaults = config_class.get_cwt_params()
+            for k, v in defaults.items():
+                kwargs.setdefault(k, v)
+            original_init(self, *args, **kwargs)
+        cls.__init__ = new_init
+        return cls
+    return decorator
+
+
+def footprint_module_config_decorator(config_class):
+    def decorator(cls):
+        original_init = cls.__init__
+
+        @wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            defaults = config_class.get_module_params()
+            for k, v in defaults.items():
+                setattr(self, k, kwargs.pop(k, v))
+            original_init(self, *args, **kwargs)
+        cls.__init__ = new_init
+        return cls
+    return decorator
+
+
+@footprint_mother_config_decorator(FootprintConfig)
 class LearnableMotherWavelet(nn.Module):
     """
     可学习母小波模块
@@ -29,9 +110,9 @@ class LearnableMotherWavelet(nn.Module):
     
     def __init__(
         self,
-        k_max: float = 0.5,
-        hidden_dim: int = 64,
-        num_layers: int = 3,
+        k_max: float,
+        hidden_dim: int,
+        num_layers: int,
     ):
         super().__init__()
         self.k_max = k_max
@@ -103,6 +184,7 @@ class LearnableMotherWavelet(nn.Module):
         return psi_complex
 
 
+@footprint_cwt_config_decorator(FootprintConfig)
 class ContinuousWaveletTransform(nn.Module):
     """
     连续小波变换模块
@@ -119,21 +201,14 @@ class ContinuousWaveletTransform(nn.Module):
     
     def __init__(
         self,
-        scales: list = None,
-        k_max: float = 0.5,
-        hidden_dim: int = 64,
-        num_layers: int = 3,
+        scales: list,
+        k_max: float,
+        hidden_dim: int,
+        num_layers: int,
     ):
         super().__init__()
-        
-        # 默认尺度：对数均匀分布
-        if scales is None:
-            scales = np.logspace(0, 2, 32).tolist()  # [1, ..., 100]
-        
         self.register_buffer('scales', torch.tensor(scales, dtype=torch.float32))
         self.num_scales = len(scales)
-        
-        # 可学习母小波
         self.mother_wavelet = LearnableMotherWavelet(
             k_max=k_max,
             hidden_dim=hidden_dim,
@@ -206,6 +281,7 @@ class ContinuousWaveletTransform(nn.Module):
         return cwc
 
 
+@footprint_module_config_decorator(FootprintConfig)
 class LCWnetFootprint(nn.Module):
     """
     LCWnet Footprint模块 - 用于DNA序列的时频特征提取
@@ -227,41 +303,27 @@ class LCWnetFootprint(nn.Module):
     def __init__(
         self,
         d_model: int,
-        scales: list = None,
-        k_max: float = 0.5,
-        hidden_dim: int = 64,
-        num_layers: int = 3,
-        fusion_type: str = 'attention',
     ):
         super().__init__()
-        
         self.d_model = d_model
-        self.fusion_type = fusion_type
-        
-        # 连续小波变换模块
-        self.cwt = ContinuousWaveletTransform(
-            scales=scales,
-            k_max=k_max,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-        )
-        
-        num_scales = len(scales) if scales is not None else 32
+        self.fusion_type = getattr(self, 'fusion_type', FootprintConfig.FUSION_TYPE)
+        self.cwt = ContinuousWaveletTransform()
+        num_scales = self.cwt.num_scales
         
         # 尺度-时间特征融合
-        if fusion_type == 'attention':
+        if self.fusion_type == 'attention':
             # 使用注意力机制融合不同尺度
             self.scale_attention = nn.Sequential(
                 nn.Linear(d_model, d_model // 4),
                 nn.Tanh(),
                 nn.Linear(d_model // 4, 1),
             )
-        elif fusion_type == 'mean':
+        elif self.fusion_type == 'mean':
             pass  # 简单平均
-        elif fusion_type == 'max':
+        elif self.fusion_type == 'max':
             pass  # 最大池化
         else:
-            raise ValueError(f"Unknown fusion_type: {fusion_type}")
+            raise ValueError(f"Unknown fusion_type: {self.fusion_type}")
         
         # 特征投影层 (将CWT特征投影回d_model维度)
         self.cwt_proj = nn.Sequential(
@@ -473,101 +535,3 @@ optimizer.step()
 - 紧支撑设计保证了容许条件自动满足，无需额外约束
 - 正则化项是可选的，对于大多数任务，仅使用任务损失即可
 """
-
-
-
-# ============================================================================
-# 测试和使用示例
-# ============================================================================
-
-if __name__ == "__main__":
-    """
-    LCWnet Footprint模块测试
-    """
-    print("=" * 80)
-    print("LCWnet Footprint Module Test")
-    print("=" * 80)
-    
-    # 设置随机种子
-    torch.manual_seed(42)
-    
-    # 模拟参数
-    batch_size = 4
-    seq_len = 128
-    d_model = 64
-    
-    # 创建模块
-    print("\n1. 创建LCWnet Footprint模块...")
-    footprint = LCWnetFootprint(
-        d_model=d_model,
-        scales=np.logspace(0, 2, 16).tolist(),  # 16个尺度
-        k_max=0.5,
-        hidden_dim=32,
-        num_layers=3,
-        fusion_type='attention',
-    )
-    print(f"   - 输入维度: {d_model}")
-    print(f"   - 尺度数量: 16")
-    print(f"   - 融合方式: attention")
-    
-    # 创建模拟输入
-    print("\n2. 创建模拟输入...")
-    x = torch.randn(batch_size, seq_len, d_model)
-    residual = torch.randn(batch_size, seq_len, d_model)
-    print(f"   - 输入形状: {x.shape}")
-    print(f"   - 残差形状: {residual.shape}")
-    
-    # 前向传播
-    print("\n3. 前向传播...")
-    output = footprint(x, residual=residual)
-    print(f"   - 输出形状: {output.shape}")
-    print(f"   - 输出范围: [{output.min().item():.4f}, {output.max().item():.4f}]")
-    
-    # 测试可学习母小波
-    print("\n4. 测试可学习母小波...")
-    mother_wavelet = footprint.cwt.mother_wavelet
-    k_test = torch.linspace(0, 0.5, 100).unsqueeze(-1)
-    psi_test = mother_wavelet(k_test)
-    print(f"   - 频率点数: {k_test.shape[0]}")
-    print(f"   - 母小波形状: {psi_test.shape}")
-    print(f"   - 实部范围: [{psi_test.real.min().item():.4f}, {psi_test.real.max().item():.4f}]")
-    print(f"   - 虚部范围: [{psi_test.imag.min().item():.4f}, {psi_test.imag.max().item():.4f}]")
-    
-    # 测试CWT
-    print("\n5. 测试连续小波变换...")
-    cwc = footprint.cwt(x)
-    print(f"   - CWC形状: {cwc.shape} (B, S, L, D)")
-    print(f"   - CWC范围: [{cwc.min().item():.4f}, {cwc.max().item():.4f}]")
-    
-    # 参数统计
-    print("\n6. 模型参数统计...")
-    total_params = sum(p.numel() for p in footprint.parameters())
-    trainable_params = sum(p.numel() for p in footprint.parameters() if p.requires_grad)
-    print(f"   - 总参数量: {total_params:,}")
-    print(f"   - 可训练参数: {trainable_params:,}")
-    
-    # 梯度测试
-    print("\n7. 梯度反向传播测试...")
-    loss = output.sum()
-    loss.backward()
-    
-    # 检查母小波参数是否有梯度
-    mlp_real_grad = footprint.cwt.mother_wavelet.mlp_real[0].weight.grad
-    mlp_imag_grad = footprint.cwt.mother_wavelet.mlp_imag[0].weight.grad
-    
-    if mlp_real_grad is not None and mlp_imag_grad is not None:
-        print("   ✓ 母小波参数梯度正常")
-        print(f"   - 实部MLP梯度范数: {mlp_real_grad.norm().item():.6f}")
-        print(f"   - 虚部MLP梯度范数: {mlp_imag_grad.norm().item():.6f}")
-    else:
-        print("   ✗ 母小波参数梯度异常")
-    
-    print("\n" + "=" * 80)
-    print("测试完成！LCWnet Footprint模块可以正常工作。")
-    print("=" * 80)
-    
-    print("\n集成到EPIModel的步骤:")
-    print("1. 在EPIModel.__init__中取消注释LCWnet Footprint初始化代码")
-    print("2. 在EPIModel.forward中取消注释集成点1和集成点2的代码")
-    print("3. 确保import语句: from models.layers.footprint import LCWnetFootprint")
-    print("4. 训练时，母小波参数会通过任务损失自动优化")

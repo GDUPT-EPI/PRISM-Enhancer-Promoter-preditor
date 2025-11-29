@@ -12,7 +12,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader
 from models.pleat.optimized_pre import create_optimized_dataset
 from models.PRISMModel import PRISMModel, create_mlm_mask
-from models.layers.footprint import LCWnetFootprint
+from models.layers.footprint import LCWnetFootprint, FootprintConfig
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.nn.functional as F
 import torch
@@ -20,6 +20,22 @@ import numpy as np
 import os
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
+
+
+# 配置类
+class PretrainProjConfig:
+    MIN_SPEC_DIM = 8
+    SPEC_RATIO = 8
+    ALPHA_INIT = 0.1
+    LAMBDA_ALPHA = 1e-3
+    LAMBDA_INVAR = 1e-3
+    LAMBDA_VAR = 1e-3
+    LAMBDA_CELL = 1e-2
+    LAMBDA_SPEC = 1e-3
+    LAMBDA_ORTHO = 1e-3
+    EMA_BETA = 0.1
+    GAMMA = 1.0
+
 
 
 device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
@@ -357,25 +373,26 @@ def main():
     unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     cell_label_map = {c: i for i, c in enumerate(unique_cells_train)}
 
-    footprinter = LCWnetFootprint(d_model=OUT_CHANNELS, scales=None, k_max=0.5, hidden_dim=64, fusion_type='attention').to(device)
-    W_com = torch.nn.Linear(OUT_CHANNELS, OUT_CHANNELS, bias=False).to(device)
-    D_spec = max(8, OUT_CHANNELS // 8)
-    W_spec = torch.nn.Linear(OUT_CHANNELS, D_spec, bias=False).to(device)
-    P_spec2com = torch.nn.Linear(D_spec, OUT_CHANNELS, bias=False).to(device)
-    alpha = torch.nn.Parameter(torch.tensor(0.1, device=device))
+    footprinter = LCWnetFootprint(d_model=OUT_CHANNELS).to(device)
+    D_com = OUT_CHANNELS
+    D_spec = max(PretrainProjConfig.MIN_SPEC_DIM, OUT_CHANNELS // PretrainProjConfig.SPEC_RATIO)
+    W_com = torch.nn.Linear(D_com, D_com, bias=False).to(device)
+    W_spec = torch.nn.Linear(D_com, D_spec, bias=False).to(device)
+    P_spec2com = torch.nn.Linear(D_spec, D_com, bias=False).to(device)
+    alpha = torch.nn.Parameter(torch.tensor(PretrainProjConfig.ALPHA_INIT, device=device))
     cell_classifier = torch.nn.Linear(D_spec, len(unique_cells_train)).to(device)
-    context_proj = torch.nn.Linear(OUT_CHANNELS, DNA_EMBEDDING_VOCAB_SIZE).to(device)
+    context_proj = torch.nn.Linear(D_com, DNA_EMBEDDING_VOCAB_SIZE).to(device)
 
     ema_mu_com = torch.zeros(OUT_CHANNELS, device=device)
     proj_params = {
-        'lambda_alpha': 1e-3,
-        'lambda_invar': 1e-3,
-        'lambda_var': 1e-3,
-        'lambda_cell': 1e-2,
-        'lambda_spec': 1e-3,
-        'lambda_ortho': 1e-3,
-        'ema_beta': 0.1,
-        'gamma': 1.0,
+        'lambda_alpha': PretrainProjConfig.LAMBDA_ALPHA,
+        'lambda_invar': PretrainProjConfig.LAMBDA_INVAR,
+        'lambda_var': PretrainProjConfig.LAMBDA_VAR,
+        'lambda_cell': PretrainProjConfig.LAMBDA_CELL,
+        'lambda_spec': PretrainProjConfig.LAMBDA_SPEC,
+        'lambda_ortho': PretrainProjConfig.LAMBDA_ORTHO,
+        'ema_beta': PretrainProjConfig.EMA_BETA,
+        'gamma': PretrainProjConfig.GAMMA,
     }
 
     optimizer = torch.optim.AdamW(

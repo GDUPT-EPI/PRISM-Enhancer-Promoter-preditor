@@ -16,6 +16,7 @@ from config import (
 )
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
+from models.layers.footprint import FootprintConfig
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
 from models.layers.footprint import LCWnetFootprint
@@ -107,18 +108,10 @@ class PRISMModel(nn.Module):
         # 用于在Self-Attention后提取时频特征
         self.enhancer_footprint = LCWnetFootprint(
             d_model=OUT_CHANNELS,
-            scales=None,  # 使用默认尺度
-            k_max=0.5,
-            hidden_dim=64,
-            fusion_type='attention'
         )
         
         self.promoter_footprint = LCWnetFootprint(
             d_model=OUT_CHANNELS,
-            scales=None,
-            k_max=0.5,
-            hidden_dim=64,
-            fusion_type='attention'
         )
         
         # Footprint门控融合 (Self-Attn Footprint + Cross-Attn Footprint)
