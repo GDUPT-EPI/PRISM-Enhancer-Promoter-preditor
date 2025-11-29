@@ -16,24 +16,32 @@ from config import (
 )
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
-from models.layers.attn import RoPEAttention
+from models.layers.attn import *
+from models.layers.FourierKAN import FourierKAN
+from models.EPIModel import CBATTransformerEncoderLayer
+from config import *
 
 
 class PRISMModel(nn.Module):
     """
     PRISM预训练模型
     
-    架构流程:
+    架构流程 (与EPIModel对齐):
     1. DNA Embedding (6-mer tokenization)
     2. CNN特征提取
-    3. Self-Attention (RoPE)
-    4. Cross-Attention (Enhancer query Promoter)
-    5. MLM Head (预测masked tokens)
+    3. Pre-CBAT Self-Attention (RoPE)
+    4. CBAT Transformer Encoder Layers
+    5. Cross-Attention (Enhancer query Promoter)
+    6. MLM Head (预测masked tokens)
     """
     
     def __init__(self):
         super(PRISMModel, self).__init__()
         
+        self.num_transformer_layers = 1 # 这里的层数可以根据配置调整，EPIModel使用的是TRANSFORMER_LAYERS，这里我们保持一致或者根据需要设定。EPIModel用了TRANSFORMER_LAYERS变量。
+        # 为了完全对齐，我应该使用 config 中的 TRANSFORMER_LAYERS
+
+
         # DNA嵌入层 - 使用6-mer overlapping tokenization
         self.embedding_en = create_dna_embedding_layer(
             vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
@@ -49,45 +57,63 @@ class PRISMModel(nn.Module):
         )
         
         # CNN特征提取
-        self.enhancer_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, 
-                     kernel_size=CNN_KERNEL_SIZE),
+        self.enhancer_sequential = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
             nn.BatchNorm1d(OUT_CHANNELS),
             nn.Dropout(p=CNN_DROPOUT)
         )
-        self.promoter_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, 
-                     kernel_size=CNN_KERNEL_SIZE),
+        self.promoter_sequential = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
             nn.BatchNorm1d(OUT_CHANNELS),
             nn.Dropout(p=CNN_DROPOUT)
         )
         
-        # Self-Attention (使用RoPE)
+        # Transformer参数
         TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
-        self.enhancer_self_attn = RoPEAttention(
-            d_model=OUT_CHANNELS, 
-            num_heads=TRANSFORMER_HEADS, 
-            dropout=TRANSFORMER_DROPOUT
+        img_size = 16  # 与EPIModel保持一致
+        
+        # Enhancer CBAT Transformer layers
+        self.enhancer_transformer_layers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS, 
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                img_size=img_size
+            ) for _ in range(self.num_transformer_layers)
+        ])
+
+        # Promoter CBAT Transformer layers
+        self.promoter_transformer_layers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                img_size=img_size
+            ) for _ in range(self.num_transformer_layers)
+        ])
+        
+        # 早期自注意力机制 (Pre-CBAT) - 使用RoPE
+        self.pre_enhancer_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )
-        self.promoter_self_attn = RoPEAttention(
-            d_model=OUT_CHANNELS, 
-            num_heads=TRANSFORMER_HEADS, 
-            dropout=TRANSFORMER_DROPOUT
+        self.pre_promoter_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )
         
         # Cross-Attention (Enhancer query Promoter)
+        # EPIModel中使用的是 cross_attention_1
         if PRISM_USE_CROSS_ATTENTION:
-            self.cross_attention = nn.MultiheadAttention(
+            self.cross_attention_1 = nn.MultiheadAttention(
                 embed_dim=OUT_CHANNELS, 
                 num_heads=TRANSFORMER_HEADS, 
                 batch_first=False
             )
         
         # MLM Head - 预测masked tokens
+        # 注意：EPIModel在cross_attention_1之后还有残差连接和后续层，PRISM截断到这里
+        # 输入是 enhancer_final (cross attention output + residual)
         self.mlm_head = nn.Sequential(
             nn.Linear(OUT_CHANNELS, TRANSFORMER_FF_DIM),
             nn.GELU(),
@@ -96,9 +122,9 @@ class PRISMModel(nn.Module):
             nn.Linear(TRANSFORMER_FF_DIM, DNA_EMBEDDING_VOCAB_SIZE)
         )
         
-        # Layer Norms
-        self.norm_en = nn.LayerNorm(OUT_CHANNELS)
-        self.norm_pr = nn.LayerNorm(OUT_CHANNELS)
+        # Layer Norms (保留原有的，虽然EPIModel主要在TransformerLayer内部做norm)
+        # 为了对齐MLM head前的状态，我们可能需要一个LayerNorm
+        self.norm_final = nn.LayerNorm(OUT_CHANNELS)
         
         # 损失函数 - 使用交叉熵
         self.criterion = nn.CrossEntropyLoss(ignore_index=DNA_EMBEDDING_PADDING_IDX)
@@ -120,16 +146,17 @@ class PRISMModel(nn.Module):
             enhancer_mask_positions: [B, L_en] bool tensor, True表示该位置被mask
             
         Returns:
-            mlm_logits: [B, L_en', vocab_size] MLM预测logits (注意长度变化)
-            enhancer_repr: [B, L_en', D] Enhancer表示
-            promoter_repr: [B, L_pr', D] Promoter表示
-            seq_length_mapping: 原始序列长度到CNN后序列长度的映射信息
+            mlm_logits: [B, L_en', vocab_size] MLM预测logits
+            enhancer_final: [B, L_en', D] Enhancer表示
+            promoter_final: [B, L_pr', D] Promoter表示
+            seq_length_mapping: 序列长度映射信息
         """
         # 保存原始序列长度
         original_en_length = enhancer_ids.size(1)
         
-        # 填充短序列
         min_required_length = 59
+        
+        # 填充短序列
         if enhancer_ids.size(1) < min_required_length:
             padding_size = min_required_length - enhancer_ids.size(1)
             enhancer_ids = F.pad(enhancer_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
@@ -138,49 +165,60 @@ class PRISMModel(nn.Module):
             promoter_ids = F.pad(promoter_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
         
         # DNA嵌入
-        enhancer_emb = self.embedding_en(enhancer_ids)  # [B, L_en, D_emb]
-        promoter_emb = self.embedding_pr(promoter_ids)  # [B, L_pr, D_emb]
+        enhancer_embedding = self.embedding_en(enhancer_ids)
+        promoter_embedding = self.embedding_pr(promoter_ids)
         
         # CNN特征提取
-        # [B, L, D] -> [B, D, L] -> CNN -> [B, C, L']
-        enhancer_cnn_out = self.enhancer_cnn(enhancer_emb.transpose(1, 2))  # [B, C, L_en']
-        promoter_cnn_out = self.promoter_cnn(promoter_emb.transpose(1, 2))  # [B, C, L_pr']
+        enhancers_output = self.enhancer_sequential(enhancer_embedding.permute(0, 2, 1))
+        promoters_output = self.promoter_sequential(promoter_embedding.permute(0, 2, 1))
         
         # 记录CNN后的序列长度
-        cnn_seq_length = enhancer_cnn_out.size(2)
+        cnn_seq_length = enhancers_output.size(2)
         
-        # [B, C, L'] -> [B, L', C]
-        enhancer_cnn_out = enhancer_cnn_out.transpose(1, 2)
-        promoter_cnn_out = promoter_cnn_out.transpose(1, 2)
+        # 转换为Transformer格式 (seq_len, batch, features)
+        enhancers_output = enhancers_output.permute(2, 0, 1)
+        promoters_output = promoters_output.permute(2, 0, 1)
         
-        # Self-Attention (RoPE)
-        enhancer_self_out = self.enhancer_self_attn(enhancer_cnn_out)  # [B, L_en', C]
-        promoter_self_out = self.promoter_self_attn(promoter_cnn_out)  # [B, L_pr', C]
+        # 早期自注意力 (Pre-CBAT) - 使用RoPEAttention
+        # RoPEAttention需要 (batch, seq_len, d_model) 格式
+        enhancers_output = enhancers_output.permute(1, 0, 2)
+        promoters_output = promoters_output.permute(1, 0, 2)
+        
+        enhancers_output = self.pre_enhancer_self_attn(enhancers_output)
+        promoters_output = self.pre_promoter_self_attn(promoters_output)
+        
+        # 转回 (seq_len, batch, features) 供CBAT模块使用
+        enhancers_output = enhancers_output.permute(1, 0, 2)
+        promoters_output = promoters_output.permute(1, 0, 2)
+        
+        # Transformer编码 - 使用CBAT模块
+        for layer in self.enhancer_transformer_layers:
+            enhancers_output, _ = layer(enhancers_output)
+
+        for layer in self.promoter_transformer_layers:
+            promoters_output, _ = layer(promoters_output)
+            
+        # 保存promoter output用于返回
+        promoter_final = promoters_output.permute(1, 0, 2) # [B, L, D]
+        
+        # Cross-Attention 1: 增强子查询启动子
+        if PRISM_USE_CROSS_ATTENTION:
+            # MultiheadAttention 默认 batch_first=False (seq_len, batch, embed_dim)
+            enhancers_attended_1, _ = self.cross_attention_1(
+                enhancers_output, promoters_output, promoters_output
+            )
+            
+            # 残差连接 1
+            enhancers_output = enhancers_output + enhancers_attended_1
+            
+        # 转换为 (batch, seq_len, features) 用于MLM Head
+        enhancer_final = enhancers_output.permute(1, 0, 2)
         
         # Layer Norm
-        enhancer_self_out = self.norm_en(enhancer_self_out)
-        promoter_self_out = self.norm_pr(promoter_self_out)
+        enhancer_final = self.norm_final(enhancer_final)
         
-        # Cross-Attention (Enhancer query Promoter)
-        if PRISM_USE_CROSS_ATTENTION:
-            # MultiheadAttention需要 [L, B, C] 格式
-            enhancer_cross_in = enhancer_self_out.transpose(0, 1)  # [L_en', B, C]
-            promoter_cross_in = promoter_self_out.transpose(0, 1)  # [L_pr', B, C]
-            
-            enhancer_cross_out, _ = self.cross_attention(
-                enhancer_cross_in,  # query
-                promoter_cross_in,  # key
-                promoter_cross_in   # value
-            )  # [L_en', B, C]
-            
-            # 残差连接
-            enhancer_cross_out = enhancer_cross_out.transpose(0, 1)  # [B, L_en', C]
-            enhancer_final = enhancer_self_out + enhancer_cross_out
-        else:
-            enhancer_final = enhancer_self_out
-        
-        # MLM Head - 预测masked tokens
-        mlm_logits = self.mlm_head(enhancer_final)  # [B, L_en', vocab_size]
+        # MLM Head
+        mlm_logits = self.mlm_head(enhancer_final)
         
         # 返回序列长度映射信息
         seq_length_mapping = {
@@ -188,7 +226,7 @@ class PRISMModel(nn.Module):
             'cnn_length': cnn_seq_length
         }
         
-        return mlm_logits, enhancer_final, promoter_self_out, seq_length_mapping
+        return mlm_logits, enhancer_final, promoter_final, seq_length_mapping
     
     def compute_mlm_loss(self, mlm_logits, original_ids, mask_positions, seq_length_mapping=None):
         """

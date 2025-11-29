@@ -3,7 +3,9 @@
 数据加载模块 - 用于从新的数据结构中加载增强子-启动子配对数据
 符合项目规范：集中配置管理、相对路径、简洁高效
 """
-
+from config import DOMAIN_KL_DIR
+from torch.utils.data import Dataset, Sampler
+import random
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
@@ -190,11 +192,6 @@ class MyDataset():
 
 
 # ####################### PRISM.py 特供数据导入 ########################
-
-from config import DOMAIN_KL_DIR
-from torch.utils.data import Dataset, Sampler
-import random
-
 
 def load_prism_data(data_type: str = "train") -> Tuple[pd.DataFrame, Dict[str, str], Dict[str, str]]:
     """
