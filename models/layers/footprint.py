@@ -281,7 +281,54 @@ class LCWnetFootprint(nn.Module):
         
         # Layer Norm
         self.norm = nn.LayerNorm(d_model)
-    
+        
+        # 样本级footprint压缩网络 Φ_CWC (Conv + Pooling)
+        # 输入: [B, S, L] (CWC幅度谱)
+        # 输出: [B, D_v] (样本级footprint向量)
+        # 这里 D_v 设为 d_model 以便与主干融合
+        
+        self.footprint_compressor = nn.Sequential(
+            # 第一层Conv: 压缩尺度维 S -> S/2
+            nn.Conv2d(in_channels=1, out_channels=8, kernel_size=(3, 3), padding=(1, 1)),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2, 2)),  # [B, 8, S/2, L/2]
+            
+            # 第二层Conv: 进一步提取特征
+            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), padding=(1, 1)),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 8)),  # 压缩到固定大小 [B, 16, 4, 8]
+            
+            nn.Flatten(),  # [B, 16*4*8 = 512]
+            nn.Linear(512, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU()
+        )
+
+    def _extract_sample_footprint(self, cwc: torch.Tensor) -> torch.Tensor:
+        """
+        从CWC提取样本级footprint向量 v_i = Φ_CWC(|CWC_i|)
+        
+        Args:
+            cwc: [B, S, L, D] 连续小波系数
+            
+        Returns:
+            v: [B, D_v] 样本级footprint向量
+        """
+        B, S, L, D = cwc.shape
+        
+        # 1. 计算幅度谱 M = |CWC|
+        # [B, S, L, D] -> [B, S, L] (取D维度的平均或最大值作为代表)
+        # 这里我们取D维度的L2范数，表示该位置的总能量
+        magnitude = cwc.abs().norm(dim=-1)  # [B, S, L]
+        
+        # 2. 增加通道维度供Conv2d使用
+        magnitude = magnitude.unsqueeze(1)  # [B, 1, S, L]
+        
+        # 3. 通过压缩网络提取特征
+        v = self.footprint_compressor(magnitude)  # [B, D_v]
+        
+        return v
+
     def _fuse_scales(self, cwc: torch.Tensor) -> torch.Tensor:
         """
         融合多尺度CWT特征
@@ -323,7 +370,7 @@ class LCWnetFootprint(nn.Module):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
         
@@ -332,7 +379,8 @@ class LCWnetFootprint(nn.Module):
             residual: 残差连接输入 [B, L, D] (可选)
             
         Returns:
-            output: 输出序列 [B, L, D]
+            output: 序列级输出 [B, L, D] (用于继续Transformer流)
+            sample_footprint: 样本级footprint向量 [B, D] (用于注入到后续层)
         """
         B, L, D = x.shape
         
@@ -342,24 +390,27 @@ class LCWnetFootprint(nn.Module):
         # Step 1: 连续小波变换
         cwc = self.cwt(x)  # [B, S, L, D]
         
-        # Step 2: 多尺度特征融合
+        # Step 2: 提取样本级footprint向量 (新增功能)
+        sample_footprint = self._extract_sample_footprint(cwc)  # [B, D]
+        
+        # Step 3: 多尺度特征融合 (用于序列级输出)
         cwt_features = self._fuse_scales(cwc)  # [B, L, D]
         
-        # Step 3: CWT特征投影
+        # Step 4: CWT特征投影
         cwt_features = self.cwt_proj(cwt_features)  # [B, L, D]
         
-        # Step 4: 门控融合 (原始特征 vs CWT特征)
+        # Step 5: 门控融合 (原始特征 vs CWT特征)
         gate_input = torch.cat([identity, cwt_features], dim=-1)  # [B, L, 2D]
         gate_weight = self.gate(gate_input)  # [B, L, D]
         
         # 门控加权: g·cwt + (1-g)·identity
         output = gate_weight * cwt_features + (1 - gate_weight) * identity
         
-        # Step 5: 输出投影和归一化
+        # Step 6: 输出投影和归一化
         output = self.out_proj(output)
         output = self.norm(output)
         
-        return output
+        return output, sample_footprint
 
 
 # ============================================================================

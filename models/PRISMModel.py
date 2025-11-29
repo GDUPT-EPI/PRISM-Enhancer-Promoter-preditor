@@ -18,6 +18,7 @@ from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
+from models.layers.footprint import LCWnetFootprint
 from models.EPIModel import CBATTransformerEncoderLayer
 from config import *
 
@@ -101,6 +102,37 @@ class PRISMModel(nn.Module):
         self.pre_promoter_self_attn = RoPEAttention(
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )
+        
+        # Footprint模块 (LCWnet)
+        # 用于在Self-Attention后提取时频特征
+        self.enhancer_footprint = LCWnetFootprint(
+            d_model=OUT_CHANNELS,
+            scales=None,  # 使用默认尺度
+            k_max=0.5,
+            hidden_dim=64,
+            fusion_type='attention'
+        )
+        
+        self.promoter_footprint = LCWnetFootprint(
+            d_model=OUT_CHANNELS,
+            scales=None,
+            k_max=0.5,
+            hidden_dim=64,
+            fusion_type='attention'
+        )
+        
+        # Footprint门控融合 (Self-Attn Footprint + Cross-Attn Footprint)
+        # 输入维度是 2 * d_model (两个footprint向量拼接)
+        # 输出维度是 d_model (融合后的向量)
+        self.footprint_fusion_gate = nn.Sequential(
+            nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS),
+            nn.Sigmoid()
+        )
+        
+        # 融合后的Footprint投影到序列长度 (用于注入Transformer)
+        # 将 [B, D] 投影并重复到 [B, L, D]
+        # 注意：这里我们实际上不需要投影到序列长度，而是将其作为全局上下文添加到每个token
+        # 或者将其加到Transformer的输入中
         
         # Cross-Attention (Enhancer query Promoter)
         # EPIModel中使用的是 cross_attention_1
@@ -191,6 +223,24 @@ class PRISMModel(nn.Module):
         enhancers_output = enhancers_output.permute(1, 0, 2)
         promoters_output = promoters_output.permute(1, 0, 2)
         
+        # -------------------------------------------------------------------
+        # Footprint Integration Point 1: CNN -> Self-Attn 后
+        # -------------------------------------------------------------------
+        # 输入: [B, L, D] (batch_first=True for LCWnetFootprint)
+        # enhancers_output目前是 [L, B, D]，需要转置
+        
+        enhancers_for_footprint = enhancers_output.permute(1, 0, 2) # [B, L, D]
+        promoters_for_footprint = promoters_output.permute(1, 0, 2) # [B, L, D]
+        
+        # 提取Enhancer Footprint (这里不仅返回序列输出，还返回样本级向量)
+        # 注意：我们只用这里提取的样本级向量，序列输出暂不替换原流程（或者根据需求替换）
+        # 根据指令：在初期的CNN->self attn部分的enhancer attn后输入footprint
+        # 我们提取footprint向量用于后续融合
+        _, enhancer_footprint_vec_1 = self.enhancer_footprint(enhancers_for_footprint) # [B, D]
+        
+        # 提取Promoter Footprint (对称操作)
+        _, promoter_footprint_vec_1 = self.promoter_footprint(promoters_for_footprint) # [B, D]
+        
         # Transformer编码 - 使用CBAT模块
         for layer in self.enhancer_transformer_layers:
             enhancers_output, _ = layer(enhancers_output)
@@ -210,6 +260,60 @@ class PRISMModel(nn.Module):
             
             # 残差连接 1
             enhancers_output = enhancers_output + enhancers_attended_1
+            
+            # -------------------------------------------------------------------
+            # Footprint Integration Point 2: Cross-Attn 1 后
+            # -------------------------------------------------------------------
+            # 再次提取Footprint，这次基于Cross-Attn后的特征
+            # 输入: [B, L, D]
+            enhancers_after_cross = enhancers_output.permute(1, 0, 2) # [B, L, D]
+            
+            # 使用同一个Enhancer Footprint模块或者共享权重的模块
+            # 这里我们复用 self.enhancer_footprint 提取特征
+            _, enhancer_footprint_vec_2 = self.enhancer_footprint(enhancers_after_cross) # [B, D]
+            
+            # -------------------------------------------------------------------
+            # Footprint Fusion: Gate Control
+            # -------------------------------------------------------------------
+            # 两个footprint使用门控拼接
+            # f_fused = Gate([f1, f2]) * f1 + (1 - Gate([f1, f2])) * f2  <-- 或者是简单的拼接后投影
+            # 根据代码实现：gate_input = cat([f1, f2]), gate = sigmoid(linear(gate_input))
+            # output = gate * f1 + (1-gate) * f2 (假设维度一致)
+            # 或者更通用的：output = Linear(cat(f1, f2)) * gate
+            
+            # 这里我们采用简单的加权融合
+            footprint_concat = torch.cat([enhancer_footprint_vec_1, enhancer_footprint_vec_2], dim=-1) # [B, 2D]
+            gate_weight = self.footprint_fusion_gate(footprint_concat) # [B, D] (Sigmoid output)
+            
+            # 融合后的Footprint向量
+            fused_footprint = gate_weight * enhancer_footprint_vec_1 + (1 - gate_weight) * enhancer_footprint_vec_2 # [B, D]
+            
+            # -------------------------------------------------------------------
+            # Footprint Injection 1: Feed to first CBAT after cross attn (Simulated)
+            # -------------------------------------------------------------------
+            # 这里的 "first CBAT after cross attn" 在PRISMModel中实际上是 MLM Head 之前的处理
+            # 因为PRISMModel只包含到CrossAttn的部分。
+            # 如果按照EPIModel的完整结构，后面还有CBAT层。
+            # 但在PRISM中，我们直接将融合后的footprint注入到当前特征中
+            
+            # 将 [B, D] 扩展为 [L, B, D] 并加到 enhancer_output
+            fused_footprint_expanded = fused_footprint.unsqueeze(0).expand(enhancers_output.size(0), -1, -1) # [L, B, D]
+            
+            # 注入方式：相加 (Residual-like)
+            enhancers_output = enhancers_output + fused_footprint_expanded
+            
+            # -------------------------------------------------------------------
+            # Footprint Injection 2: Residual connect to single CBAT before F-KAN
+            # -------------------------------------------------------------------
+            # 在PRISMModel中没有显式的 "single CBAT before F-KAN"，
+            # F-KAN通常在EPIModel的末端。
+            # 在这里，我们将 fused_footprint 返回，或者将其融入到 enhancer_final 中
+            # 使得后续如果有 F-KAN 模块（在下游任务微调时），可以利用这个特征。
+            # 也可以理解为：在进入MLM Head之前，不仅注入到序列特征，
+            # 还可能作为全局特征影响最后的分类。
+            
+            # 对于PRISM预训练任务，我们已经将其加到了 enhancers_output 中，
+            # 这会通过 LayerNorm 和 MLM Head 传播。
             
         # 转换为 (batch, seq_len, features) 用于MLM Head
         enhancer_final = enhancers_output.permute(1, 0, 2)
