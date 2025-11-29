@@ -6,14 +6,7 @@ PRISM Model - 简化版BERT预训练模型
 from torch import nn
 import torch
 import torch.nn.functional as F
-from config import (
-    LEARNING_RATE, EMBEDDING_DIM, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, OUT_CHANNELS,
-    TRANSFORMER_HEADS, TRANSFORMER_FF_DIM, CNN_DROPOUT,
-    WEIGHT_DECAY, DNA_EMBEDDING_VOCAB_SIZE, DNA_EMBEDDING_DIM,
-    DNA_EMBEDDING_PADDING_IDX, DNA_EMBEDDING_INIT_STD,
-    BERT_LEARNING_RATE, BERT_WARMUP_STEPS, BERT_MAX_GRAD_NORM,
-    PRISM_USE_CROSS_ATTENTION, PRISM_POOLING_TYPE
-)
+from config import *
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.layers.footprint import FootprintConfig
