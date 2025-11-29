@@ -39,8 +39,8 @@ class PRISMModel(nn.Module):
     def __init__(self):
         super(PRISMModel, self).__init__()
         
-        self.num_transformer_layers = 1 # 这里的层数可以根据配置调整，EPIModel使用的是TRANSFORMER_LAYERS，这里我们保持一致或者根据需要设定。EPIModel用了TRANSFORMER_LAYERS变量。
-        # 为了完全对齐，我应该使用 config 中的 TRANSFORMER_LAYERS
+        self.num_transformer_layers = TRANSFORMER_LAYERS
+        assert OUT_CHANNELS % TRANSFORMER_HEADS == 0
 
 
         # DNA嵌入层 - 使用6-mer overlapping tokenization
@@ -128,6 +128,12 @@ class PRISMModel(nn.Module):
             nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS),
             nn.Sigmoid()
         )
+        self.footprint_inject_proj = nn.Sequential(
+            nn.LayerNorm(OUT_CHANNELS),
+            nn.Linear(OUT_CHANNELS, OUT_CHANNELS),
+            nn.GELU()
+        )
+        self.footprint_alpha = nn.Parameter(torch.tensor(0.5))
         
         # 融合后的Footprint投影到序列长度 (用于注入Transformer)
         # 将 [B, D] 投影并重复到 [B, L, D]
@@ -206,6 +212,7 @@ class PRISMModel(nn.Module):
         
         # 记录CNN后的序列长度
         cnn_seq_length = enhancers_output.size(2)
+        cnn_seq_length_pr = promoters_output.size(2)
         
         # 转换为Transformer格式 (seq_len, batch, features)
         enhancers_output = enhancers_output.permute(2, 0, 1)
@@ -254,8 +261,18 @@ class PRISMModel(nn.Module):
         # Cross-Attention 1: 增强子查询启动子
         if PRISM_USE_CROSS_ATTENTION:
             # MultiheadAttention 默认 batch_first=False (seq_len, batch, embed_dim)
+            promoter_pad_orig = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+            K = CNN_KERNEL_SIZE
+            P = POOL_KERNEL_SIZE
+            promoter_key_padding_mask = torch.zeros(promoter_ids.size(0), cnn_seq_length_pr, dtype=torch.bool, device=promoter_ids.device)
+            for j in range(cnn_seq_length_pr):
+                start = j * P
+                end = min(start + P + K - 2, promoter_ids.size(1) - 1)
+                region_all_pad = promoter_pad_orig[:, start:end+1].all(dim=-1)
+                promoter_key_padding_mask[:, j] = region_all_pad
             enhancers_attended_1, _ = self.cross_attention_1(
-                enhancers_output, promoters_output, promoters_output
+                enhancers_output, promoters_output, promoters_output,
+                key_padding_mask=promoter_key_padding_mask
             )
             
             # 残差连接 1
@@ -297,10 +314,9 @@ class PRISMModel(nn.Module):
             # 但在PRISM中，我们直接将融合后的footprint注入到当前特征中
             
             # 将 [B, D] 扩展为 [L, B, D] 并加到 enhancer_output
-            fused_footprint_expanded = fused_footprint.unsqueeze(0).expand(enhancers_output.size(0), -1, -1) # [L, B, D]
-            
-            # 注入方式：相加 (Residual-like)
-            enhancers_output = enhancers_output + fused_footprint_expanded
+            fused_footprint_proj = self.footprint_inject_proj(fused_footprint)
+            fused_footprint_expanded = fused_footprint_proj.unsqueeze(0).expand(enhancers_output.size(0), -1, -1)
+            enhancers_output = enhancers_output + self.footprint_alpha * fused_footprint_expanded
             
             # -------------------------------------------------------------------
             # Footprint Injection 2: Residual connect to single CBAT before F-KAN
@@ -349,25 +365,20 @@ class PRISMModel(nn.Module):
         B, L_cnn, V = mlm_logits.shape
         L_orig = original_ids.size(1)
         
-        # 如果序列长度不匹配，需要对mask_positions进行下采样
         if L_cnn != L_orig:
-            # 使用最近邻下采样将mask_positions从L_orig映射到L_cnn
-            # 计算下采样比例
-            downsample_ratio = L_orig / L_cnn
-            
-            # 创建新的mask_positions [B, L_cnn]
-            mask_positions_downsampled = torch.zeros(B, L_cnn, dtype=torch.bool, device=mask_positions.device)
-            original_ids_downsampled = torch.zeros(B, L_cnn, dtype=torch.long, device=original_ids.device)
-            
-            for i in range(L_cnn):
-                # 计算对应的原始序列位置
-                orig_idx = int(i * downsample_ratio)
-                if orig_idx < L_orig:
-                    mask_positions_downsampled[:, i] = mask_positions[:, orig_idx]
-                    original_ids_downsampled[:, i] = original_ids[:, orig_idx]
-            
-            mask_positions = mask_positions_downsampled
-            original_ids = original_ids_downsampled
+            K = CNN_KERNEL_SIZE
+            P = POOL_KERNEL_SIZE
+            mask_positions_cnn = torch.zeros(B, L_cnn, dtype=torch.bool, device=mask_positions.device)
+            original_ids_cnn = torch.zeros(B, L_cnn, dtype=torch.long, device=original_ids.device)
+            for j in range(L_cnn):
+                start = j * P
+                end = min(start + P + K - 2, L_orig - 1)
+                region_mask = mask_positions[:, start:end+1].any(dim=-1)
+                center = start + (end - start) // 2
+                original_ids_cnn[:, j] = original_ids[:, center]
+                mask_positions_cnn[:, j] = region_mask
+            mask_positions = mask_positions_cnn
+            original_ids = original_ids_cnn
         
         # 展平
         mlm_logits_flat = mlm_logits.view(-1, V)  # [B*L_cnn, V]
@@ -394,7 +405,7 @@ class PRISMModel(nn.Module):
 
 
 def create_mlm_mask(token_ids, mask_prob=0.15, mask_token_id=4096, 
-                    vocab_size=4097, pad_token_id=0):
+                    vocab_size=4097, pad_token_id=0, block_mask: bool = False, block_size: int = 3):
     """
     创建MLM mask
     
@@ -420,9 +431,19 @@ def create_mlm_mask(token_ids, mask_prob=0.15, mask_token_id=4096,
     # 创建mask positions (不mask padding和超出vocab范围的token)
     is_valid = (token_ids != pad_token_id) & (token_ids < vocab_size) & (token_ids >= 0)
     
-    # 随机选择mask_prob比例的token
-    rand = torch.rand(B, L, device=device)
-    mask_positions = (rand < mask_prob) & is_valid
+    if block_mask:
+        mask_positions = torch.zeros(B, L, dtype=torch.bool, device=device)
+        rand = torch.rand(B, L, device=device)
+        start_positions = (rand < mask_prob) & is_valid
+        for b in range(B):
+            starts = torch.nonzero(start_positions[b], as_tuple=False).flatten()
+            for s in starts:
+                e = min(s + block_size, L)
+                mask_positions[b, s:e] = True
+        mask_positions = mask_positions & is_valid
+    else:
+        rand = torch.rand(B, L, device=device)
+        mask_positions = (rand < mask_prob) & is_valid
     
     # 对于被选中的token:
     # 80%替换为[MASK], 10%替换为随机token, 10%保持不变

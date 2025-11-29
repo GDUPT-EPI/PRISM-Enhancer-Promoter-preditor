@@ -4,11 +4,12 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 from functools import wraps
 import numpy as np
+from config import MAX_PROMOTER_LENGTH, MAX_ENHANCER_LENGTH
 
 class RoPEConfig:
     # 基础配置 - 使用配置文件中的参数
     # 位置编码配置
-    POS_ENCODING_MAX_LEN = 1000
+    POS_ENCODING_MAX_LEN = max(8192, MAX_PROMOTER_LENGTH, MAX_ENHANCER_LENGTH)
     ROPE_MAX_SEQ_LEN = POS_ENCODING_MAX_LEN  # 使用相同的位置编码最大长度
     ROPE_BASE = 10000.0  # RoPE基础频率
     ROPE_SCALING_TYPE = "linear"  # 线性缩放类型
@@ -277,4 +278,3 @@ def apply_rotary_pos_emb(
     q_embed = q * cos + rotate_half(q) * sin
     k_embed = k * cos + rotate_half(k) * sin
     return q_embed, k_embed
-

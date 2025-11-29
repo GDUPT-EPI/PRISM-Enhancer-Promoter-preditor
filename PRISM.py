@@ -112,7 +112,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx):
             mask_prob=BERT_MASK_PROB,
             mask_token_id=BERT_MASK_TOKEN_ID,
             vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-            pad_token_id=BERT_PAD_TOKEN_ID
+            pad_token_id=BERT_PAD_TOKEN_ID,
+            block_mask=True,
+            block_size=KMER_SIZE
         )
         
         # 前向传播
@@ -171,7 +173,9 @@ def validate(model, dataloader, cell_name=""):
                 mask_prob=BERT_MASK_PROB,
                 mask_token_id=BERT_MASK_TOKEN_ID,
                 vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-                pad_token_id=BERT_PAD_TOKEN_ID
+                pad_token_id=BERT_PAD_TOKEN_ID,
+                block_mask=True,
+                block_size=KMER_SIZE
             )
             
             # 前向传播
