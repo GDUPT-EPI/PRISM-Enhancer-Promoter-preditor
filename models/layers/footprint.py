@@ -412,6 +412,11 @@ class LCWnetFootprint(nn.Module):
         
         return output, sample_footprint
 
+    def forward_vector(self, x: torch.Tensor) -> torch.Tensor:
+        cwc = self.cwt(x)
+        sample_footprint = self._extract_sample_footprint(cwc)
+        return sample_footprint
+
 
 # ============================================================================
 # 损失函数部分 (暂未实现，仅注释说明)

@@ -174,21 +174,12 @@ class PRISMModel(nn.Module):
             weight_decay=WEIGHT_DECAY
         )
     
-    def forward(self, enhancer_ids, promoter_ids, enhancer_mask_positions=None):
-        """
-        前向传播
-        
-        Args:
-            enhancer_ids: [B, L_en] Enhancer token IDs
-            promoter_ids: [B, L_pr] Promoter token IDs
-            enhancer_mask_positions: [B, L_en] bool tensor, True表示该位置被mask
-            
-        Returns:
-            mlm_logits: [B, L_en', vocab_size] MLM预测logits
-            enhancer_final: [B, L_en', D] Enhancer表示
-            promoter_final: [B, L_pr', D] Promoter表示
-            seq_length_mapping: 序列长度映射信息
-        """
+    def forward(
+        self,
+        enhancer_ids: torch.Tensor,
+        promoter_ids: torch.Tensor,
+        enhancer_mask_positions: torch.Tensor,
+    ):
         # 保存原始序列长度
         original_en_length = enhancer_ids.size(1)
         
