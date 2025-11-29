@@ -290,12 +290,12 @@ def main():
             val_loss, val_acc = validate(model, val_loader, "ALL")
             logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
             
-            # 保存最佳模型
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                save_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_best.pth")
-                torch.save(model.state_dict(), save_path)
-                logger.info(f"保存最佳模型: {save_path}")
+            # # 保存最佳模型
+            # if val_loss < best_val_loss:
+            #     best_val_loss = val_loss
+            #     save_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_best.pth")
+            #     torch.save(model.state_dict(), save_path)
+            #     logger.info(f"保存最佳模型: {save_path}")
             
             # 定期保存检查点
             checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
