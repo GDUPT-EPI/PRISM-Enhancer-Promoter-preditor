@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
-PRISM_BATCH_SIZE = 128  # PRISM特供batch size (会被分为8个同细胞系 + 8个不同细胞系)
+PRISM_BATCH_SIZE = 96  # PRISM特供batch size (会被分为8个同细胞系 + 8个不同细胞系)
 EPOCH = 20
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
@@ -37,7 +37,7 @@ PERSISTENT_WORKERS = True  # 避免worker重复创建
 NUMBER_WORDS = 4097
 NUMBER_POS = 70
 EMBEDDING_DIM = 768
-CNN_KERNEL_SIZE = 128
+CNN_KERNEL_SIZE = 70
 POOL_KERNEL_SIZE = 20
 OUT_CHANNELS = 64
 
@@ -46,11 +46,8 @@ TRANSFORMER_LAYERS = 12  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 256  # 前馈网络维度
 
-# Stochastic Depth配置
-STOCHASTIC_DEPTH_RATE = 0.2  # 最大drop概率
-
 # CNN和分类头参数 - 集中管理避免冲突
-CNN_DROPOUT = 0.2      # CNN层dropout率
+CNN_DROPOUT = 0.45      # CNN层dropout率
 CLASSIFIER_HIDDEN_SIZE = 128  # 分类头中间层大小
 CLASSIFIER_DROPOUT = 0.33     # 分类头dropout率
 
@@ -65,12 +62,6 @@ MAX_PROMOTER_LENGTH = 4000  # 固定启动子序列长度
 ENHANCER_FEATURE_DIM = (5, 3)  # 5个特征，每个特征3维
 PROMOTER_FEATURE_DIM = (5, 4)  # 5个特征，每个特征4维
 
-# 对抗训练参数
-PGD_EPSILON = 1.0
-PGD_ALPHA = 0.3
-FGM_EPSILON = 1.0
-ENABLE_ADVERSARIAL_TRAINING = True  # 是否启用对抗训练
-K = 3  # PGD攻击迭代次数
 
 # 细胞系配置
 TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
