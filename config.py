@@ -37,12 +37,12 @@ PERSISTENT_WORKERS = True  # 避免worker重复创建
 NUMBER_WORDS = 4097
 NUMBER_POS = 70
 EMBEDDING_DIM = 768
-CNN_KERNEL_SIZE = 40
+CNN_KERNEL_SIZE = 128
 POOL_KERNEL_SIZE = 20
-OUT_CHANNELS = 128
+OUT_CHANNELS = 64
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 16  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_LAYERS = 12  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 256  # 前馈网络维度
 
