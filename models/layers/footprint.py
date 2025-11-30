@@ -1,6 +1,6 @@
 """
 LCWnet: Learnable Continuous Wavelet Transform Network
-可学习连续小波变换网络
+可学习连续小波变换网络 - 用于DNA序列的时频特征提取
 
 核心思想：
 1. 在傅里叶域直接构造可学习的母小波 F[ψ_θ](k)
@@ -8,89 +8,95 @@ LCWnet: Learnable Continuous Wavelet Transform Network
 3. 通过MLP参数化实部和虚部，端到端优化
 """
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from typing import Tuple, Optional
-from functools import wraps
+import torch  # PyTorch深度学习框架
+import torch.nn as nn  # 神经网络模块
+import torch.nn.functional as F  # 神经网络功能模块
+import numpy as np  # 数值计算库
+from typing import Tuple, Optional  # 类型提示
+from functools import wraps  # 函数装饰器工具
 
 
 class FootprintConfig:
-    K_MAX = 0.5
-    HIDDEN_DIM = 64
-    NUM_LAYERS = 3
-    FUSION_TYPE = 'attention'
-    LOGSPACE_START = 0.0
-    LOGSPACE_END = 2.0
-    NUM_SCALES = 32
+    K_MAX = 0.5  # 母小波频率支撑上限，定义紧支撑区间 [0, 0.5]
+    HIDDEN_DIM = 64  # MLP隐藏层维度
+    NUM_LAYERS = 3  # MLP层数
+    FUSION_TYPE = 'attention'  # 多尺度特征融合方式
+    LOGSPACE_START = 0.0  # 对数尺度起始值 (10^0 = 1)
+    LOGSPACE_END = 2.0  # 对数尺度结束值 (10^2 = 100)
+    NUM_SCALES = 32  # CWT尺度数量
 
     @classmethod
     def get_mother_params(cls):
+        """获取可学习母小波参数配置"""
         return {
-            'k_max': cls.K_MAX,
-            'hidden_dim': cls.HIDDEN_DIM,
-            'num_layers': cls.NUM_LAYERS,
+            'k_max': cls.K_MAX,  # 频率支撑上限
+            'hidden_dim': cls.HIDDEN_DIM,  # MLP隐藏维度
+            'num_layers': cls.NUM_LAYERS,  # MLP层数
         }
 
     @classmethod
     def get_cwt_params(cls):
-        scales = np.logspace(cls.LOGSPACE_START, cls.LOGSPACE_END, cls.NUM_SCALES).tolist()
+        """获取连续小波变换参数配置"""
+        scales = np.logspace(cls.LOGSPACE_START, cls.LOGSPACE_END, cls.NUM_SCALES).tolist()  # 生成对数尺度序列
         return {
-            'scales': scales,
-            'k_max': cls.K_MAX,
-            'hidden_dim': cls.HIDDEN_DIM,
-            'num_layers': cls.NUM_LAYERS,
+            'scales': scales,  # CWT尺度参数列表
+            'k_max': cls.K_MAX,  # 母小波频率上限
+            'hidden_dim': cls.HIDDEN_DIM,  # 母小波MLP隐藏维度
+            'num_layers': cls.NUM_LAYERS,  # 母小波MLP层数
         }
 
     @classmethod
     def get_module_params(cls):
+        """获取Footprint模块参数配置"""
         return {
-            'fusion_type': cls.FUSION_TYPE,
+            'fusion_type': cls.FUSION_TYPE,  # 特征融合方式
         }
 
 
 def footprint_mother_config_decorator(config_class):
+    """可学习母小波参数配置装饰器"""
     def decorator(cls):
-        original_init = cls.__init__
+        original_init = cls.__init__  # 保存原始初始化函数
 
         @wraps(original_init)
         def new_init(self, *args, **kwargs):
-            defaults = config_class.get_mother_params()
+            defaults = config_class.get_mother_params()  # 获取默认母小波参数
             for k, v in defaults.items():
-                kwargs.setdefault(k, v)
-            original_init(self, *args, **kwargs)
-        cls.__init__ = new_init
+                kwargs.setdefault(k, v)  # 设置默认参数
+            original_init(self, *args, **kwargs)  # 调用原始初始化
+        cls.__init__ = new_init  # 替换为新的初始化函数
         return cls
     return decorator
 
 
 def footprint_cwt_config_decorator(config_class):
+    """连续小波变换参数配置装饰器"""
     def decorator(cls):
-        original_init = cls.__init__
+        original_init = cls.__init__  # 保存原始初始化函数
 
         @wraps(original_init)
         def new_init(self, *args, **kwargs):
-            defaults = config_class.get_cwt_params()
+            defaults = config_class.get_cwt_params()  # 获取默认CWT参数
             for k, v in defaults.items():
-                kwargs.setdefault(k, v)
-            original_init(self, *args, **kwargs)
-        cls.__init__ = new_init
+                kwargs.setdefault(k, v)  # 设置默认参数
+            original_init(self, *args, **kwargs)  # 调用原始初始化
+        cls.__init__ = new_init  # 替换为新的初始化函数
         return cls
     return decorator
 
 
 def footprint_module_config_decorator(config_class):
+    """Footprint模块参数配置装饰器"""
     def decorator(cls):
-        original_init = cls.__init__
+        original_init = cls.__init__  # 保存原始初始化函数
 
         @wraps(original_init)
         def new_init(self, *args, **kwargs):
-            defaults = config_class.get_module_params()
+            defaults = config_class.get_module_params()  # 获取默认模块参数
             for k, v in defaults.items():
-                setattr(self, k, kwargs.pop(k, v))
-            original_init(self, *args, **kwargs)
-        cls.__init__ = new_init
+                setattr(self, k, kwargs.pop(k, v))  # 设置为实例属性
+            original_init(self, *args, **kwargs)  # 调用原始初始化
+        cls.__init__ = new_init  # 替换为新的初始化函数
         return cls
     return decorator
 
@@ -115,31 +121,31 @@ class LearnableMotherWavelet(nn.Module):
         num_layers: int,
     ):
         super().__init__()
-        self.k_max = k_max
+        self.k_max = k_max  # 频率支撑上限
         
-        # 实部MLP: MLP_θr(k)
+        # 实部MLP: MLP_θr(k) - 学习母小波实部频域表示
         layers_real = []
-        layers_real.append(nn.Linear(1, hidden_dim))
-        layers_real.append(nn.ReLU())
+        layers_real.append(nn.Linear(1, hidden_dim))  # 输入维度1 (频率k)
+        layers_real.append(nn.ReLU())  # 激活函数
         
         for _ in range(num_layers - 2):
-            layers_real.append(nn.Linear(hidden_dim, hidden_dim))
-            layers_real.append(nn.ReLU())
+            layers_real.append(nn.Linear(hidden_dim, hidden_dim))  # 隐藏层
+            layers_real.append(nn.ReLU())  # 激活函数
         
-        layers_real.append(nn.Linear(hidden_dim, 1))  # 输出层线性激活
-        self.mlp_real = nn.Sequential(*layers_real)
+        layers_real.append(nn.Linear(hidden_dim, 1))  # 输出层线性激活 (维度1)
+        self.mlp_real = nn.Sequential(*layers_real)  # 实部MLP网络
         
-        # 虚部MLP: MLP_θi(k)
+        # 虚部MLP: MLP_θi(k) - 学习母小波虚部频域表示
         layers_imag = []
-        layers_imag.append(nn.Linear(1, hidden_dim))
-        layers_imag.append(nn.ReLU())
+        layers_imag.append(nn.Linear(1, hidden_dim))  # 输入维度1 (频率k)
+        layers_imag.append(nn.ReLU())  # 激活函数
         
         for _ in range(num_layers - 2):
-            layers_imag.append(nn.Linear(hidden_dim, hidden_dim))
-            layers_imag.append(nn.ReLU())
+            layers_imag.append(nn.Linear(hidden_dim, hidden_dim))  # 隐藏层
+            layers_imag.append(nn.ReLU())  # 激活函数
         
-        layers_imag.append(nn.Linear(hidden_dim, 1))
-        self.mlp_imag = nn.Sequential(*layers_imag)
+        layers_imag.append(nn.Linear(hidden_dim, 1))  # 输出层线性激活 (维度1)
+        self.mlp_imag = nn.Sequential(*layers_imag)  # 虚部MLP网络
     
     def _compact_support_window(self, k: torch.Tensor) -> torch.Tensor:
         """
@@ -153,7 +159,7 @@ class LearnableMotherWavelet(nn.Module):
         Returns:
             窗函数值 [..., N]
         """
-        return F.relu(k) * F.relu(self.k_max - k)
+        return F.relu(k) * F.relu(self.k_max - k)  # 构建紧支撑窗函数
     
     def forward(self, k: torch.Tensor) -> torch.Tensor:
         """
@@ -170,18 +176,18 @@ class LearnableMotherWavelet(nn.Module):
             复值母小波 [..., N] (复数张量)
         """
         # 计算紧支撑窗函数
-        window = self._compact_support_window(k.squeeze(-1))  # [..., N]
+        window = self._compact_support_window(k.squeeze(-1))  # [..., N] - 紧支撑窗函数
         
         # 实部: MLP_θr(k) · window
-        psi_real = self.mlp_real(k).squeeze(-1) * window  # [..., N]
+        psi_real = self.mlp_real(k).squeeze(-1) * window  # [..., N] - 母小波实部
         
         # 虚部: MLP_θi(k) · window
-        psi_imag = self.mlp_imag(k).squeeze(-1) * window  # [..., N]
+        psi_imag = self.mlp_imag(k).squeeze(-1) * window  # [..., N] - 母小波虚部
         
         # 合成复值母小波
-        psi_complex = torch.complex(psi_real, psi_imag)  # [..., N]
+        psi_complex = torch.complex(psi_real, psi_imag)  # [..., N] - 复数母小波
         
-        return psi_complex
+        return psi_complex  # 返回复值母小波
 
 
 @footprint_cwt_config_decorator(FootprintConfig)
