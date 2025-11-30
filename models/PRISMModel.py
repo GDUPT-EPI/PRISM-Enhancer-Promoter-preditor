@@ -224,6 +224,7 @@ class PRISMModel(nn.Module):
         
         # 提取Promoter Footprint (对称操作)
         _, promoter_footprint_vec_1 = self.promoter_footprint(promoters_for_footprint) # [B, D]
+        fused_footprint = enhancer_footprint_vec_1
         
         # Transformer编码 - 使用CBAT模块
         for layer in self.enhancer_transformer_layers:
@@ -323,7 +324,7 @@ class PRISMModel(nn.Module):
             'cnn_length': cnn_seq_length
         }
         
-        return mlm_logits, enhancer_final, promoter_final, seq_length_mapping
+        return mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint
     
     def compute_mlm_loss(self, mlm_logits, original_ids, mask_positions, seq_length_mapping=None):
         """

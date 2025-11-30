@@ -109,7 +109,7 @@ def prism_collate_fn(batch):
     return padded_enhancer_ids, padded_promoter_ids, cell_lines, labels_tensor
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter, W_com, W_spec, P_spec2com, alpha, cell_classifier, context_proj, cell_label_map, ema_mu_com, proj_params):
+def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spec, cell_label_map, ema_mu_com, proj_params, kb, loss_weights):
     """训练一个epoch"""
     model.train()
     total_loss = 0.0
@@ -136,9 +136,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
         )
         
         # 前向传播
-        mlm_logits, enhancer_final, _, seq_length_mapping = model(masked_enhancer_ids, promoter_ids, mask_positions)
+        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
 
-        v = footprinter.forward_vector(enhancer_final.detach())
+        v = fused_footprint
         z_com = W_com(v)
         z_spec = W_spec(v)
 
@@ -151,7 +151,6 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
             if c not in unique_cells:
                 unique_cells.append(c)
 
-        u_batch = torch.zeros(B, D_com, device=device, dtype=mlm_logits.dtype)
         g_com_list = []
         g_spec_list = []
         cell_label_list = []
@@ -162,24 +161,33 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
             idx_t = torch.tensor(idx, device=device)
             g_c_com = z_com.index_select(0, idx_t).mean(dim=0)
             g_c_spec = z_spec.index_select(0, idx_t).mean(dim=0)
-            tilde_g_spec = P_spec2com(g_c_spec)
-            u_c = g_c_com + alpha * tilde_g_spec
-            u_batch.index_copy_(0, idx_t, u_c.unsqueeze(0).expand(len(idx), -1))
             g_com_list.append(g_c_com)
             g_spec_list.append(g_c_spec)
             cell_label_list.append(cell_label_map.get(c, 0))
 
-        context_bias = context_proj(u_batch)
-        context_bias = context_bias.unsqueeze(1).expand(B, mlm_logits.size(1), V)
-        mlm_logits_biased = mlm_logits + context_bias
+        kb_beta = proj_params['ema_beta']
+        if isinstance(kb, dict):
+            kb.setdefault('spec_centers', {})
+            kb.setdefault('com_centers', {})
+            for i, c in enumerate(unique_cells):
+                g_c_spec = g_spec_list[i]
+                g_c_com = g_com_list[i]
+                if c in kb['spec_centers']:
+                    kb['spec_centers'][c] = kb['spec_centers'][c] * (1 - kb_beta) + g_c_spec.detach().cpu() * kb_beta
+                else:
+                    kb['spec_centers'][c] = g_c_spec.detach().cpu()
+                if c in kb['com_centers']:
+                    kb['com_centers'][c] = kb['com_centers'][c] * (1 - kb_beta) + g_c_com.detach().cpu() * kb_beta
+                else:
+                    kb['com_centers'][c] = g_c_com.detach().cpu()
         
-        # 计算损失
-        bert_loss, accuracy = model.compute_mlm_loss(mlm_logits_biased, original_enhancer_ids, mask_positions, seq_length_mapping)
+        
+        
+        bert_loss, accuracy = model.compute_mlm_loss(mlm_logits, original_enhancer_ids, mask_positions, seq_length_mapping)
 
         g_com_stack = torch.stack(g_com_list) if len(g_com_list) > 0 else torch.zeros(1, D_com, device=device, dtype=v.dtype)
         g_spec_stack = torch.stack(g_spec_list) if len(g_spec_list) > 0 else torch.zeros(1, z_spec.size(-1), device=device, dtype=v.dtype)
 
-        loss_alpha = proj_params['lambda_alpha'] * (alpha.pow(2).sum())
         loss_invar = proj_params['lambda_invar'] * ((g_com_stack - ema_mu_com).pow(2).mean())
         ema_mu_com.mul_(1 - proj_params['ema_beta']).add_(g_com_stack.detach().mean(dim=0) * proj_params['ema_beta'])
 
@@ -192,9 +200,13 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
         loss_cov = proj_params['lambda_var'] * (off.pow(2).sum())
 
         if g_spec_stack.size(0) > 0:
-            logits_cell = cell_classifier(g_spec_stack.detach())
-            labels_tensor = torch.tensor(cell_label_list, device=device)
-            loss_cell = proj_params['lambda_cell'] * F.cross_entropy(logits_cell, labels_tensor)
+            centers = g_spec_stack
+            centers_norm = F.normalize(centers, dim=-1)
+            z_spec_norm = F.normalize(z_spec, dim=-1)
+            logits = z_spec_norm @ centers_norm.T
+            logits = logits / max(loss_weights.get('tau', 0.07), 1e-6)
+            local_labels = torch.tensor([unique_cells.index(cell_lines[i]) for i in range(B)], device=device)
+            loss_cell = F.cross_entropy(logits, local_labels)
         else:
             loss_cell = torch.tensor(0.0, device=device)
 
@@ -203,13 +215,13 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
         g_spec_map = {}
         for i, c in enumerate(unique_cells):
             g_spec_map[c] = g_spec_list[i]
-        g_per_sample = torch.stack([g_spec_map.get(cell_lines[i], torch.zeros_like(z_spec[0])) for i in range(B)]).to(device).detach()
+        g_per_sample = torch.stack([g_spec_map.get(cell_lines[i], torch.zeros_like(z_spec[0])) for i in range(B)]).to(device)
         loss_within = proj_params['lambda_spec'] * ((z_spec - g_per_sample).pow(2).mean())
 
         w_ortho = W_com.weight @ W_spec.weight.t()
         loss_ortho = proj_params['lambda_ortho'] * (w_ortho.pow(2).sum())
 
-        total_loss_batch = bert_loss + loss_alpha + loss_invar + loss_var + loss_cov + loss_cell + loss_spec_reg + loss_within + loss_ortho
+        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + loss_weights.get('w_mlm', 0.1) * bert_loss + loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho
         
         # 反向传播
         optimizer.zero_grad()
@@ -239,7 +251,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, footprinter,
     return avg_loss, avg_accuracy
 
 
-def validate(model, dataloader, cell_name="", footprinter=None, W_com=None, W_spec=None, P_spec2com=None, alpha=None, context_proj=None, cell_label_map=None):
+def validate(model, dataloader, cell_name="", W_com=None, W_spec=None, cell_label_map=None, loss_weights=None):
     """验证函数"""
     model.eval()
     total_loss = 0.0
@@ -267,32 +279,7 @@ def validate(model, dataloader, cell_name="", footprinter=None, W_com=None, W_sp
             )
             
             # 前向传播
-            mlm_logits, enhancer_final, _, seq_length_mapping = model(masked_enhancer_ids, promoter_ids, mask_positions)
-
-            if footprinter is not None:
-                v = footprinter.forward_vector(enhancer_final)
-                z_com = W_com(v)
-                z_spec = W_spec(v)
-                B = enhancer_ids.size(0)
-                D_com = z_com.size(-1)
-                unique_cells = []
-                for c in cell_lines:
-                    if c not in unique_cells:
-                        unique_cells.append(c)
-                u_batch = torch.zeros(B, D_com, device=device, dtype=mlm_logits.dtype)
-                for c in unique_cells:
-                    idx = [i for i in range(B) if cell_lines[i] == c]
-                    if len(idx) == 0:
-                        continue
-                    idx_t = torch.tensor(idx, device=device)
-                    g_c_com = z_com.index_select(0, idx_t).mean(dim=0)
-                    g_c_spec = z_spec.index_select(0, idx_t).mean(dim=0)
-                    tilde_g_spec = P_spec2com(g_c_spec)
-                    u_c = g_c_com + alpha * tilde_g_spec
-                    u_batch.index_copy_(0, idx_t, u_c.unsqueeze(0).expand(len(idx), -1))
-                context_bias = context_proj(u_batch)
-                context_bias = context_bias.unsqueeze(1).expand(B, mlm_logits.size(1), mlm_logits.size(-1))
-                mlm_logits = mlm_logits + context_bias
+            mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
             
             # 计算损失
             loss, accuracy = model.compute_mlm_loss(mlm_logits, original_enhancer_ids, mask_positions, seq_length_mapping)
@@ -373,15 +360,10 @@ def main():
     unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     cell_label_map = {c: i for i, c in enumerate(unique_cells_train)}
 
-    footprinter = LCWnetFootprint(d_model=OUT_CHANNELS).to(device)
     D_com = OUT_CHANNELS
     D_spec = max(PretrainProjConfig.MIN_SPEC_DIM, OUT_CHANNELS // PretrainProjConfig.SPEC_RATIO)
     W_com = torch.nn.Linear(D_com, D_com, bias=False).to(device)
     W_spec = torch.nn.Linear(D_com, D_spec, bias=False).to(device)
-    P_spec2com = torch.nn.Linear(D_spec, D_com, bias=False).to(device)
-    alpha = torch.nn.Parameter(torch.tensor(PretrainProjConfig.ALPHA_INIT, device=device))
-    cell_classifier = torch.nn.Linear(D_spec, len(unique_cells_train)).to(device)
-    context_proj = torch.nn.Linear(D_com, DNA_EMBEDDING_VOCAB_SIZE).to(device)
 
     ema_mu_com = torch.zeros(OUT_CHANNELS, device=device)
     proj_params = {
@@ -397,13 +379,8 @@ def main():
 
     optimizer = torch.optim.AdamW(
         list(model.parameters())
-        + list(footprinter.parameters())
         + list(W_com.parameters())
-        + list(W_spec.parameters())
-        + list(P_spec2com.parameters())
-        + [alpha]
-        + list(cell_classifier.parameters())
-        + list(context_proj.parameters()),
+        + list(W_spec.parameters()),
         lr=BERT_LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
     )
@@ -424,22 +401,21 @@ def main():
     
     for epoch_idx in range(EPOCH):
         # 训练
+        kb = {}
+        loss_weights = {'w_cell': 1.0, 'w_mlm': 0.1, 'tau': 0.07}
         train_loss, train_acc = train_epoch(
             model,
             train_loader,
             optimizer,
             scheduler,
             epoch_idx,
-            footprinter,
             W_com,
             W_spec,
-            P_spec2com,
-            alpha,
-            cell_classifier,
-            context_proj,
             cell_label_map,
             ema_mu_com,
             proj_params,
+            kb,
+            loss_weights,
         )
         
         logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
@@ -450,13 +426,10 @@ def main():
                 model,
                 val_loader,
                 "ALL",
-                footprinter,
                 W_com,
                 W_spec,
-                P_spec2com,
-                alpha,
-                context_proj,
                 cell_label_map,
+                loss_weights,
             )
             logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
             
@@ -471,6 +444,12 @@ def main():
             checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f"保存检查点: {checkpoint_path}")
+
+            kb_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"footprint_kb_epoch_{epoch_idx+1}.pt")
+            try:
+                torch.save(kb, kb_path)
+            except Exception:
+                pass
     
     logger.info("=" * 80)
     logger.info("PRISM预训练完成")
