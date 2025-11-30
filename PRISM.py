@@ -399,9 +399,9 @@ def main():
     
     best_val_loss = float('inf')
     
+    kb = {}
     for epoch_idx in range(EPOCH):
         # 训练
-        kb = {}
         loss_weights = {'w_cell': 1.0, 'w_mlm': 0.1, 'tau': 0.07}
         train_loss, train_acc = train_epoch(
             model,
