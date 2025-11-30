@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from models.pleat.optimized_pre import create_optimized_dataset
 from models.PRISMModel import PRISMModel, create_mlm_mask
 from models.layers.footprint import LCWnetFootprint, FootprintConfig
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 import torch
 import numpy as np
@@ -231,7 +231,6 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
         torch.nn.utils.clip_grad_norm_(model.parameters(), BERT_MAX_GRAD_NORM)
         
         optimizer.step()
-        scheduler.step()
         
         # 统计
         total_loss += total_loss_batch.item()
@@ -242,7 +241,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
         train_pbar.set_postfix({
             'loss': f'{total_loss_batch.item():.4f}',
             'acc': f'{accuracy:.4f}',
-            'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+            'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
         })
     
     avg_loss = total_loss / num_batches
@@ -385,7 +384,15 @@ def main():
         weight_decay=WEIGHT_DECAY,
     )
     total_steps = len(train_loader) * EPOCH
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=2,
+        threshold=1e-3,
+        threshold_mode='rel',
+        min_lr=1e-6
+    )
     
     logger.info(f"批量大小: {PRISM_BATCH_SIZE} (对比采样: {PRISM_BATCH_SIZE//2}同细胞系 + {PRISM_BATCH_SIZE//2}不同细胞系)")
     logger.info(f"训练轮数: {EPOCH}")
@@ -430,6 +437,8 @@ def main():
                 loss_weights,
             )
             logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
+            scheduler.step(val_loss)
+            logger.info(f"当前学习率: {optimizer.param_groups[0]['lr']:.6f}")
             
             # # 保存最佳模型
             # if val_loss < best_val_loss:
