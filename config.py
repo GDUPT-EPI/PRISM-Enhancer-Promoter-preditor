@@ -43,7 +43,7 @@ OUT_CHANNELS = 128
 
 # Transformer相关参数 - 集中管理避免冲突
 TRANSFORMER_LAYERS = 24  # 每个enhancer/promoter的transformer层数
-TRANSFORMER_HEADS = 12   # 多头注意力头数
+TRANSFORMER_HEADS = 16   # 多头注意力头数
 TRANSFORMER_FF_DIM = 512  # 前馈网络维度
 
 # Stochastic Depth配置
