@@ -602,7 +602,7 @@ class CBAT(nn.Module):
         
         # 7x7 Conv (提取特征 + 残差路径)
         self.conv_7x7 = nn.Sequential(
-            nn.Conv2d(d_model, d_model, kernel_size=7, padding=3, bias=False),
+            nn.Conv2d(d_model, d_model, kernel_size=15, padding=7, bias=False),
             nn.BatchNorm2d(d_model),
             nn.GELU(),
         )
@@ -610,7 +610,7 @@ class CBAT(nn.Module):
         # 可分离3x3卷积 (Depthwise + Pointwise)
         self.separable_conv = nn.Sequential(
             # Depthwise
-            nn.Conv2d(d_model, d_model, kernel_size=3, padding=1, 
+            nn.Conv2d(d_model, d_model, kernel_size=7, padding=3, 
                      groups=d_model, bias=False),
             nn.BatchNorm2d(d_model),
             nn.GELU(),
