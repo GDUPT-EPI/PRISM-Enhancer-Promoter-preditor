@@ -397,8 +397,6 @@ def main():
     logger.info("开始训练")
     logger.info("=" * 80)
     
-    best_val_loss = float('inf')
-    
     kb = {}
     for epoch_idx in range(EPOCH):
         # 训练
