@@ -369,7 +369,7 @@ class PRISMModel(nn.Module):
             # 没有masked token
             return torch.tensor(0.0, device=mlm_logits.device, requires_grad=True), 0.0  # 返回零损失和零准确率
         
-        loss = F.cross_entropy(masked_logits, masked_labels)  # CrossEntropyLoss - 交叉熵损失计算
+        loss = F.cross_entropy(masked_logits, masked_labels, label_smoothing=0.1)
         
         # 计算准确率
         with torch.no_grad():

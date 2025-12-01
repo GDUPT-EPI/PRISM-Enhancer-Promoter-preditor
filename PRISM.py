@@ -24,17 +24,17 @@ from torch.nn.utils.rnn import pad_sequence
 
 # 预训练投影配置类 - 定义高维投影任务的超参数
 class PretrainProjConfig:
-    MIN_SPEC_DIM = 8  # 特异子空间最小维度 d_spec
-    SPEC_RATIO = 8    # 特异子空间与公共子空间的维度比例 d_com/d_spec
-    ALPHA_INIT = 0.1  # 门控参数α的初始值，控制共同vs特异特征的占比
-    LAMBDA_ALPHA = 1e-3  # α的正则化权重 λ_α，惩罚过多使用特异特征
-    LAMBDA_INVAR = 1e-3  # 跨细胞公共一致性损失权重 λ_invar
-    LAMBDA_VAR = 1e-3    # 公共空间方差约束损失权重 λ_var
-    LAMBDA_CELL = 1e-2   # 特异空间细胞分类损失权重 λ_cell
-    LAMBDA_SPEC = 1e-3   # 特异空间稀疏正则化权重 λ_spec
-    LAMBDA_ORTHO = 1e-3  # 公共/特异子空间正交约束权重 λ_ortho
-    EMA_BETA = 0.1       # 公共特征全局EMA均值更新系数β
-    GAMMA = 1.0          # 期望的最小标准差阈值γ
+    MIN_SPEC_DIM = 8  # 特异子空间最小维度 d_spec - 定义细胞类型特异特征的最小维度
+    SPEC_RATIO = 8    # 特异子空间与公共子空间的维度比例 d_com/d_spec - 控制公共特征与特异特征的维度关系
+    ALPHA_INIT = 0.25  # α初始化值 - footprint融合权重初始值，控制自注意力与交叉注意力特征的融合比例
+    LAMBDA_ALPHA = 3e-3  # α正则化系数λ_α - footprint融合权重的L1正则化，防止权重过大
+    LAMBDA_INVAR = 5e-3  # 不变性损失系数λ_invar - 跨细胞公共一致性损失的权重，强制不同细胞类型的公共特征相似
+    LAMBDA_VAR = 3e-3  # 方差损失系数λ_var - 公共空间维度方差约束的权重，确保每个维度都有信息
+    LAMBDA_CELL = 6e-1  # 细胞分类损失系数λ_cell - 特异空间细胞分类/对比损失的权重，增强细胞类型区分度
+    LAMBDA_SPEC = 7e-2  # 特异性损失系数λ_spec - 细胞类型特异性特征的权重，增强特征判别性
+    LAMBDA_ORTHO = 1e-2  # 正交性损失系数λ_ortho - 特征正交性约束的权重，减少特征冗余
+    EMA_BETA = 0.1       # 公共特征全局EMA均值更新系数β - 知识库中心点平滑更新的指数移动平均系数
+    GAMMA = 1.0          # 期望的最小标准差阈值γ - 公共空间维度方差约束的最小标准差阈值
 
 
 
@@ -114,6 +114,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
     model.train()
     total_loss = 0.0
     total_accuracy = 0.0
+    total_spec_acc = 0.0
     num_batches = 0
     
     train_pbar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", 
@@ -212,8 +213,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
             logits = logits / max(loss_weights.get('tau', 0.07), 1e-6)  # 温度参数τ，控制分布锐度
             local_labels = torch.tensor([unique_cells.index(cell_lines[i]) for i in range(B)], device=device)  # 样本对应的细胞索引标签
             loss_cell = F.cross_entropy(logits, local_labels)  # L_cell - 特异空间细胞分类/对比损失
+            spec_acc_batch = (logits.argmax(dim=1) == local_labels).float().mean()
         else:
             loss_cell = torch.tensor(0.0, device=device)
+            spec_acc_batch = torch.tensor(0.0, device=device)
 
         loss_spec_reg = proj_params['lambda_spec'] * (g_spec_stack.abs().mean() + g_spec_stack.pow(2).mean())  # L_spec_reg = λ_spec * (||g^spec_c||_1 + ||g^spec_c||_2^2) - 特异空间稀疏正则化，鼓励使用少量维度
 
@@ -240,19 +243,21 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
         # 统计
         total_loss += total_loss_batch.item()
         total_accuracy += accuracy
+        total_spec_acc += spec_acc_batch.item()
         num_batches += 1
         
         # 更新进度条
         train_pbar.set_postfix({
             'loss': f'{total_loss_batch.item():.4f}',
             'acc': f'{accuracy:.4f}',
-            'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
+            'spec_acc': f'{spec_acc_batch.item():.4f}'
         })
     
     avg_loss = total_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
     
-    return avg_loss, avg_accuracy
+    avg_spec_acc = total_spec_acc / num_batches
+    return avg_loss, avg_accuracy, avg_spec_acc
 
 
 def validate(model, dataloader, cell_name="", cell_label_map=None, loss_weights=None):
@@ -446,7 +451,7 @@ def main():
     total_steps = len(train_loader) * EPOCH
     scheduler = ReduceLROnPlateau(
         optimizer,
-        mode='min',
+        mode='max',
         factor=0.5,
         patience=2,
         threshold=1e-3,
@@ -467,8 +472,9 @@ def main():
     kb = {}
     for epoch_idx in range(EPOCH):
         # 训练
-        loss_weights = {'w_cell': 1.0, 'w_mlm': 0.1, 'tau': 0.07}
-        train_loss, train_acc = train_epoch(
+        loss_weights = {'w_cell': 6.0, 'w_mlm': 0.01, 'tau': 0.045}
+        logger.info(f"Loss Weights: w_cell={loss_weights['w_cell']:.2f}, w_mlm={loss_weights['w_mlm']:.2f}, tau={loss_weights['tau']:.2f}")
+        train_loss, train_acc, train_spec_acc = train_epoch(
             model,
             train_loader,
             optimizer,
@@ -481,7 +487,7 @@ def main():
             loss_weights,
         )
         
-        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Spec Acc: {train_spec_acc:.4f}")
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
@@ -510,10 +516,8 @@ def main():
                 loss_weights,
             )
             sep_metrics = validate_separability(model, val_loader)
-            logger.info(f"Separability: fisher={sep_metrics['spec_fisher_ratio']:.4f}, com_disp={sep_metrics['com_center_dispersion']:.4f}, cells={sep_metrics['num_cells']}")
-            logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
-            scheduler.step(val_loss)
-            logger.info(f"当前学习率: {optimizer.param_groups[0]['lr']:.6f}")
+            logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, Fisher: {sep_metrics['spec_fisher_ratio']:.4f}, ComDisp: {sep_metrics['com_center_dispersion']:.4f}, Cells: {sep_metrics['num_cells']}")
+            scheduler.step(sep_metrics['spec_fisher_ratio'])
             
             # # 保存最佳模型
             # if val_loss < best_val_loss:
