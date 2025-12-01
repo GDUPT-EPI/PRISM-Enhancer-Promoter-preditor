@@ -26,7 +26,7 @@ BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
 PRISM_BATCH_SIZE = 96  # PRISM特供batch size (会被分为8个同细胞系 + 8个不同细胞系)
 EPOCH = 20
 LEARNING_RATE = 2e-4
-VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
+VALIDATION_INTERVAL = 3  # 每隔多少个epoch进行一次验证
 
 # 数据加载器配置
 NUM_WORKERS = 4  # 从16减少到4，降低CPU上下文切换开销

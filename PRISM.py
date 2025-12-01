@@ -485,6 +485,23 @@ def main():
         
         logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
         
+        # 保存检查点
+        checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
+        torch.save(model.state_dict(), checkpoint_path)
+        logger.info(f"保存检查点: {checkpoint_path}")
+
+        # 保存知识库 (包含中心点和模型状态)
+        kb_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"footprint_kb_epoch_{epoch_idx+1}.pt")
+        
+        # 更新KB中的模型状态，方便直接加载专家
+        kb['model_state'] = model.state_dict()
+        
+        try:
+            torch.save(kb, kb_path)
+            logger.info(f"保存知识库: {kb_path}")
+        except Exception as e:
+            logger.error(f"保存知识库失败: {e}")
+        
         # 验证
         if epoch_idx % VALIDATION_INTERVAL == 0 or epoch_idx == EPOCH - 1:
             val_loss, val_acc = validate(
@@ -506,23 +523,6 @@ def main():
             #     save_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_best.pth")
             #     torch.save(model.state_dict(), save_path)
             #     logger.info(f"保存最佳模型: {save_path}")
-            
-            # 保存检查点
-            checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
-            torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f"保存检查点: {checkpoint_path}")
-
-            # 保存知识库 (包含中心点和模型状态)
-            kb_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"footprint_kb_epoch_{epoch_idx+1}.pt")
-            
-            # 更新KB中的模型状态，方便直接加载专家
-            kb['model_state'] = model.state_dict()
-            
-            try:
-                torch.save(kb, kb_path)
-                logger.info(f"保存知识库: {kb_path}")
-            except Exception as e:
-                logger.error(f"保存知识库失败: {e}")
     
     logger.info("=" * 80)
     logger.info("PRISM预训练完成")
