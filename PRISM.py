@@ -501,7 +501,6 @@ def main():
             cell_logits = cell_expert(enh_ids, pr_ids)
             if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
                 cell_logits = cell_logits.squeeze(1)
-            logger.info(f"cell_logits.shape={tuple(cell_logits.shape)}, cell_targets.shape={tuple(cell_targets.shape)}")
             cell_loss = F.cross_entropy(cell_logits, cell_targets)
             with torch.no_grad():
                 cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
