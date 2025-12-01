@@ -474,8 +474,6 @@ def main():
             optimizer,
             scheduler,
             epoch_idx,
-            W_com,
-            W_spec,
             cell_label_map,
             ema_mu_com,
             proj_params,
