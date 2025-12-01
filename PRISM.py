@@ -286,7 +286,7 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
         state = torch.load(full_path, map_location=device)
         if isinstance(state, dict):
             if 'model_state' in state:
-                model.load_state_dict(state['model_state'])
+                model.load_state_dict(state['model_state'], strict=False)
             if 'optimizer_state' in state:
                 try:
                     optimizer.load_state_dict(state['optimizer_state'])
@@ -303,7 +303,8 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
             kb = state.get('kb', {}) or {}
     else:
         if os.path.exists(model_path):
-            model.load_state_dict(torch.load(model_path, map_location=device))
+            sd = torch.load(model_path, map_location=device)
+            model.load_state_dict(sd, strict=False)
         if os.path.exists(kb_path):
             kb = torch.load(kb_path, map_location='cpu')
     return latest_epoch, kb, ema_mu
