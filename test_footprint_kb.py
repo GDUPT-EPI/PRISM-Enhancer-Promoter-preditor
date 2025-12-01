@@ -196,41 +196,11 @@ def evaluate(cfg: TestConfig) -> Dict[str, float]:
     acc_com = correct_com / max(total, 1)
     acc_spec = correct_spec / max(total, 1)
 
-    # 验证函数
-    from sklearn.metrics import silhouette_score
-    def compute_silhouette_score(z_spec: torch.Tensor, cell_labels: List[str]) -> float:
-        """
-        计算轮廓系数，衡量细胞系在特异性空间中的区分度。
-        取值范围 [-1, 1]，越高表示区分越好。
-        """
-        if len(set(cell_labels)) < 2:
-            return 0.0
-        
-        # 将字符串标签转换为数字索引
-        unique_cells = sorted(list(set(cell_labels)))
-        labels = [unique_cells.index(c) for c in cell_labels]
-        
-        # 采样计算以加快速度（如果样本太多）
-        if len(labels) > 5000:
-            import numpy as np
-            indices = np.random.choice(len(labels), 5000, replace=False)
-            z_subset = z_spec[indices].cpu().numpy()
-            labels_subset = np.array(labels)[indices]
-            return silhouette_score(z_subset, labels_subset)
-            
-        return silhouette_score(z_spec.cpu().numpy(), labels)
-
     try:
         import matplotlib.pyplot as plt
-        X = torch.cat(all_z_spec, dim=0)
-        
-        # 计算轮廓系数
-        sil_score = compute_silhouette_score(X, all_cell)
-        print(f"Silhouette Score (Differentiation): {sil_score:.4f}")
-        
+        X = torch.cat(all_z_spec, dim=0).numpy()
         # PCA可视化特异性空间
-        X_np = X.numpy()
-        Xc = X_np - X_np.mean(axis=0, keepdims=True)
+        Xc = X - X.mean(axis=0, keepdims=True)
         U, S, Vt = torch.linalg.svd(torch.tensor(Xc), full_matrices=False)
         PCs = (torch.tensor(Xc) @ Vt[:, :2]).numpy()
         

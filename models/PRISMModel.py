@@ -9,9 +9,10 @@ import torch.nn.functional as F
 from config import *
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
-from models.layers.footprint import FootprintExpert, FootprintConfig
+from models.layers.footprint import FootprintConfig, FootprintExpert
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
+from models.layers.footprint import FootprintExpert
 from models.EPIModel import CBATTransformerEncoderLayer
 from config import *
 
@@ -95,15 +96,13 @@ class PRISMModel(nn.Module):
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )  # 启动子RoPE位置编码自注意力 - 旋转位置嵌入
         
-        # Footprint模块 (LCWnet)
-        # 用于在Self-Attention后提取时频特征
-        # 使用 FootprintExpert 替代原始 LCWnetFootprint，包含投影头
+        # Footprint专家模块
         self.enhancer_footprint = FootprintExpert(
             d_model=OUT_CHANNELS,
-        )  # 增强子专家模块
+        )
         self.promoter_footprint = FootprintExpert(
             d_model=OUT_CHANNELS,
-        )  # 启动子专家模块
+        )
         
         # Footprint门控融合 (Self-Attn Footprint + Cross-Attn Footprint)
         # 输入维度是 2 * d_model (两个footprint向量拼接)
@@ -214,16 +213,13 @@ class PRISMModel(nn.Module):
         enhancers_for_footprint = enhancers_output.permute(1, 0, 2) # [B, L, D] - 增强子特征重排为Footprint输入格式
         promoters_for_footprint = promoters_output.permute(1, 0, 2) # [B, L, D] - 启动子特征重排为Footprint输入格式
         
-        # 提取Enhancer Footprint
-        # expert返回: seq_out, sample_vec, z_com, z_spec
-        _, enhancer_footprint_vec_1, z_com_en, z_spec_en = self.enhancer_footprint(enhancers_for_footprint) 
-        
-        # 提取Promoter Footprint (虽然目前只用enhancer做对比学习，但为了完整性)
-        _, promoter_footprint_vec_1, _, _ = self.promoter_footprint(promoters_for_footprint) 
-        
-        fused_footprint = enhancer_footprint_vec_1  # 初始融合footprint
-        
-        # 返回投影特征供Loss计算
+        # 提取Enhancer Footprint (这里不仅返回序列输出，还返回样本级向量)
+        # 注意：我们只用这里提取的样本级向量，序列输出暂不替换原流程（或者根据需求替换）
+        # 根据指令：在初期的CNN->self attn部分的enhancer attn后输入footprint
+        # 我们提取footprint向量用于后续融合
+        _, enhancer_footprint_vec_1, z_com_en, z_spec_en = self.enhancer_footprint(enhancers_for_footprint)
+        _, promoter_footprint_vec_1, _, _ = self.promoter_footprint(promoters_for_footprint)
+        fused_footprint = enhancer_footprint_vec_1
         self.current_z_com = z_com_en
         self.current_z_spec = z_spec_en
         
@@ -266,7 +262,7 @@ class PRISMModel(nn.Module):
             
             # 使用同一个Enhancer Footprint模块或者共享权重的模块
             # 这里我们复用 self.enhancer_footprint 提取特征
-            _, enhancer_footprint_vec_2, _, _ = self.enhancer_footprint(enhancers_after_cross) 
+            _, enhancer_footprint_vec_2, _, _ = self.enhancer_footprint(enhancers_after_cross)
             
             # -------------------------------------------------------------------
             # Footprint Fusion: Gate Control

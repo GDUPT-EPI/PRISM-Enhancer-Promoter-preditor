@@ -135,19 +135,12 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
             block_size=KMER_SIZE
         )
         
-        # 由于Python解包的特性，我们需要确保 model 返回值的数量匹配
-        # 我们重新修改一下 model() 的调用
+        # 前向传播
         mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
 
-        v = fused_footprint  # v_i = Φ_CWC(M_i)
-        
-        # 从模型获取投影特征 (取自第一次调用的结果)
+        v = fused_footprint
         z_com = model.current_z_com
         z_spec = model.current_z_spec
-        
-        # 获取投影矩阵权重用于正交约束
-        W_com_weight = model.enhancer_footprint.w_com.weight
-        W_spec_weight = model.enhancer_footprint.w_spec.weight
 
         B = enhancer_ids.size(0)  # batch大小
         V = mlm_logits.size(-1)   # 词汇表大小
@@ -230,13 +223,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
         g_per_sample = torch.stack([g_spec_map.get(cell_lines[i], torch.zeros_like(z_spec[0])) for i in range(B)]).to(device)  # [B, d_spec] - 每个样本对应的细胞中心
         loss_within = proj_params['lambda_spec'] * ((z_spec - g_per_sample).pow(2).mean())  # L_within = λ_spec * ||z^spec_{c,i} - g^spec_c||^2 - 细胞内一致性约束，防止噪声主导
 
-        w_ortho = W_com_weight @ W_spec_weight.t()  # W_com · W_spec^T，计算公共/特异投影矩阵的互相关
+        w_ortho = model.enhancer_footprint.w_com.weight @ model.enhancer_footprint.w_spec.weight.t()
         loss_ortho = proj_params['lambda_ortho'] * (w_ortho.pow(2).sum())  # L_ortho = λ_ortho * ||W_com · W_spec^T||_F^2 - 子空间正交约束，避免特征污染
 
-        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + \
-                          loss_weights.get('w_mlm', 0.1) * bert_loss + \
-                          loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho
-
+        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + loss_weights.get('w_mlm', 0.1) * bert_loss + loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho  # 总损失: L = w_cell*L_cell + w_mlm*L_BERT + L_invar + L_var + L_cov + L_spec_reg + L_within + L_ortho
+        
         # 反向传播
         optimizer.zero_grad()
         total_loss_batch.backward()
@@ -309,6 +300,68 @@ def validate(model, dataloader, cell_name="", cell_label_map=None, loss_weights=
     return avg_loss, avg_accuracy
 
 
+def validate_separability(model, dataloader):
+    model.eval()
+    with torch.no_grad():
+        spec_vectors = {}
+        com_vectors = {}
+        counts = {}
+        for data in dataloader:
+            enhancer_ids, promoter_ids, cell_lines, labels = data
+            enhancer_ids = enhancer_ids.to(device, non_blocking=True)
+            promoter_ids = promoter_ids.to(device, non_blocking=True)
+            masked_enhancer_ids, mask_positions, _ = create_mlm_mask(
+                enhancer_ids,
+                mask_prob=BERT_MASK_PROB,
+                mask_token_id=BERT_MASK_TOKEN_ID,
+                vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+                pad_token_id=BERT_PAD_TOKEN_ID,
+                block_mask=True,
+                block_size=KMER_SIZE,
+            )
+            _logits, _en_final, _pr_final, _map, _fused = model(masked_enhancer_ids, promoter_ids, mask_positions)
+            z_com = model.current_z_com
+            z_spec = model.current_z_spec
+            for i, c in enumerate(cell_lines):
+                if c not in spec_vectors:
+                    spec_vectors[c] = []
+                    com_vectors[c] = []
+                    counts[c] = 0
+                spec_vectors[c].append(z_spec[i].detach())
+                com_vectors[c].append(z_com[i].detach())
+                counts[c] += 1
+        spec_centers = {}
+        com_centers = {}
+        for c in spec_vectors:
+            spec_centers[c] = torch.stack(spec_vectors[c], dim=0).mean(dim=0)
+            com_centers[c] = torch.stack(com_vectors[c], dim=0).mean(dim=0)
+        intra_spec = []
+        for c in spec_vectors:
+            center = spec_centers[c]
+            vecs = torch.stack(spec_vectors[c], dim=0)
+            intra_spec.append(((vecs - center).pow(2).sum(dim=-1)).mean())
+        intra_spec_mean = torch.stack(intra_spec).mean() if intra_spec else torch.tensor(0.0)
+        centers_list = list(spec_centers.values())
+        inter = []
+        for i in range(len(centers_list)):
+            for j in range(i + 1, len(centers_list)):
+                d = (centers_list[i] - centers_list[j]).pow(2).sum().sqrt()
+                inter.append(d)
+        inter_mean = torch.stack(inter).mean() if inter else torch.tensor(0.0)
+        fisher_ratio = (inter_mean / (intra_spec_mean + 1e-8)).item()
+        com_center_vals = list(com_centers.values())
+        if com_center_vals:
+            mu_com = torch.stack(com_center_vals, dim=0).mean(dim=0)
+            com_disp = torch.stack([(c - mu_com).pow(2).sum().sqrt() for c in com_center_vals]).mean().item()
+        else:
+            com_disp = 0.0
+    return {
+        'spec_fisher_ratio': fisher_ratio,
+        'com_center_dispersion': com_disp,
+        'num_cells': len(spec_centers),
+    }
+
+
 def main():
     """主函数"""
     logger.info("=" * 80)
@@ -358,8 +411,6 @@ def main():
     
     # 创建模型
     logger.info("创建PRISM模型...")
-    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
-    num_cell_lines = len(unique_cells_train)
     model = PRISMModel()
     model = model.to(device)
     
@@ -375,11 +426,6 @@ def main():
     unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     cell_label_map = {c: i for i, c in enumerate(unique_cells_train)}
 
-    D_com = OUT_CHANNELS
-    D_spec = max(PretrainProjConfig.MIN_SPEC_DIM, OUT_CHANNELS // PretrainProjConfig.SPEC_RATIO)
-    W_com = torch.nn.Linear(D_com, D_com, bias=False).to(device)
-    W_spec = torch.nn.Linear(D_com, D_spec, bias=False).to(device)
-
     ema_mu_com = torch.zeros(OUT_CHANNELS, device=device)
     proj_params = {
         'lambda_alpha': PretrainProjConfig.LAMBDA_ALPHA,
@@ -393,9 +439,7 @@ def main():
     }
 
     optimizer = torch.optim.AdamW(
-        list(model.parameters())
-        + list(W_com.parameters())
-        + list(W_spec.parameters()),
+        model.parameters(),
         lr=BERT_LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
     )
@@ -430,6 +474,8 @@ def main():
             optimizer,
             scheduler,
             epoch_idx,
+            W_com,
+            W_spec,
             cell_label_map,
             ema_mu_com,
             proj_params,
@@ -448,6 +494,8 @@ def main():
                 cell_label_map,
                 loss_weights,
             )
+            sep_metrics = validate_separability(model, val_loader)
+            logger.info(f"Separability: fisher={sep_metrics['spec_fisher_ratio']:.4f}, com_disp={sep_metrics['com_center_dispersion']:.4f}, cells={sep_metrics['num_cells']}")
             logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}")
             scheduler.step(val_loss)
             logger.info(f"当前学习率: {optimizer.param_groups[0]['lr']:.6f}")

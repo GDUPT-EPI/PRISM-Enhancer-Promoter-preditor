@@ -487,103 +487,19 @@ class LCWnetFootprint(nn.Module):
 
 
 class FootprintExpert(nn.Module):
-    """
-    Footprint专家模块：集成特征提取与解纠缠投影
-    
-    将LCWnetFootprint与解纠缠投影层封装在一起，
-    确保预训练的"专家知识"（包括如何提取特征和如何区分特异性）能被完整保存和复用。
-    """
     def __init__(self, d_model: int, d_spec_ratio: int = 8):
         super().__init__()
         self.backbone = LCWnetFootprint(d_model)
-        
-        # 投影头配置
         self.d_model = d_model
         self.d_spec = max(8, d_model // d_spec_ratio)
-        
-        # 解纠缠投影层 (Disentanglement Projections)
-        # W_com: 投影到公共子空间 (Common Subspace)
         self.w_com = nn.Linear(d_model, d_model, bias=False)
-        # W_spec: 投影到特异子空间 (Specific Subspace)
         self.w_spec = nn.Linear(d_model, self.d_spec, bias=False)
-        
+
     def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
-        """
-        Args:
-            x: 输入序列 [B, L, D]
-            residual: 残差连接 [B, L, D]
-            
-        Returns:
-            seq_out: 序列级输出 [B, L, D]
-            sample_vec: 样本级footprint向量 [B, D]
-            z_com: 公共特征投影 [B, D_com]
-            z_spec: 特异特征投影 [B, D_spec]
-        """
-        # 1. 获取 Backbone 特征
         seq_out, sample_vec = self.backbone(x, residual)
-        
-        # 2. 投影到子空间
         z_com = self.w_com(sample_vec)
         z_spec = self.w_spec(sample_vec)
-        
         return seq_out, sample_vec, z_com, z_spec
 
-    def forward_vector(self, x: torch.Tensor):
-        """仅提取向量特征"""
+    def forward_vector(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone.forward_vector(x)
-
-# ============================================================================
-# 损失函数部分 (暂未实现，仅注释说明)
-# ============================================================================
-
-"""
-LCWnet损失函数设计 (待实现)
-
-根据论文，LCWnet的训练采用端到端方式，损失函数包含两部分：
-
-1. **下游任务损失** (Primary Loss):
-   - 对于EP预测任务，使用AdaptiveIMMAXLoss (已在EPIModel中实现)
-   - Loss_task = AdaptiveIMMAXLoss(predictions, labels)
-
-2. **小波正则化损失** (Wavelet Regularization Loss, 可选):
-   - 目的：鼓励学习到的母小波具有良好的时频局部化特性
-   - 可能的正则化项：
-     a. 频域平滑性: L_smooth = ||∇_k F[ψ_θ](k)||^2
-     b. 时域紧凑性: L_compact = ∫ |x|^2 |ψ(x)|^2 dx
-     c. 能量归一化: L_energy = (||ψ||_2 - 1)^2
-
-总损失:
-Loss_total = Loss_task + λ_reg · Loss_wavelet
-
-其中 λ_reg 是正则化权重超参数 (建议范围: 0.001 - 0.01)
-
-实现建议:
-- 在训练循环中，将LCWnetFootprint的输出传递给下游模型
-- 计算任务损失后，可选地添加小波正则化项
-- 通过反向传播同时优化母小波参数和下游模型参数
-
-示例代码框架:
-```python
-# 前向传播
-cwt_features = lcwnet_footprint(x)
-predictions = downstream_model(cwt_features)
-
-# 计算损失
-task_loss = criterion(predictions, labels)
-
-# 可选：计算小波正则化损失
-# wavelet_reg_loss = compute_wavelet_regularization(lcwnet_footprint.cwt.mother_wavelet)
-# total_loss = task_loss + lambda_reg * wavelet_reg_loss
-
-total_loss = task_loss  # 简化版本
-
-# 反向传播
-total_loss.backward()
-optimizer.step()
-```
-
-注意事项:
-- 母小波的学习是隐式的，通过任务损失的梯度反向传播实现
-- 紧支撑设计保证了容许条件自动满足，无需额外约束
-- 正则化项是可选的，对于大多数任务，仅使用任务损失即可
-"""
