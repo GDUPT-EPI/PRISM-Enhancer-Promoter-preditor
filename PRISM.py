@@ -78,23 +78,44 @@ def prism_collate_fn(batch):
     # 将DNA序列转换为token IDs
     enhancer_ids_list = [tokenizer.encode(seq) for seq in enhancer_seqs]
     promoter_ids_list = [tokenizer.encode(seq) for seq in promoter_seqs]
-    
-    # 填充序列
-    padded_enhancer_ids = pad_sequence(enhancer_ids_list, batch_first=True, padding_value=0)
-    padded_promoter_ids = pad_sequence(promoter_ids_list, batch_first=True, padding_value=0)
-    
-    # 确保最小长度
-    if padded_enhancer_ids.size(1) < MAX_ENHANCER_LENGTH:
-        padding_size = MAX_ENHANCER_LENGTH - padded_enhancer_ids.size(1)
-        padded_enhancer_ids = torch.nn.functional.pad(
-            padded_enhancer_ids, (0, padding_size), mode='constant', value=0
-        )
-    
-    if padded_promoter_ids.size(1) < MAX_PROMOTER_LENGTH:
-        padding_size = MAX_PROMOTER_LENGTH - padded_promoter_ids.size(1)
-        padded_promoter_ids = torch.nn.functional.pad(
-            padded_promoter_ids, (0, padding_size), mode='constant', value=0
-        )
+
+    K = CNN_KERNEL_SIZE
+    P = POOL_KERNEL_SIZE
+    pad_id = DNA_EMBEDDING_PADDING_IDX
+    min_req = K + P - 1
+
+    max_len_en = max(int(x.size(0)) for x in enhancer_ids_list) if enhancer_ids_list else min_req
+    max_len_pr = max(int(x.size(0)) for x in promoter_ids_list) if promoter_ids_list else min_req
+
+    adj_base_en = max(1, max_len_en - (K - 1))
+    adj_base_pr = max(1, max_len_pr - (K - 1))
+    target_len_en = (K - 1) + ((adj_base_en + P - 1) // P) * P
+    target_len_pr = (K - 1) + ((adj_base_pr + P - 1) // P) * P
+    target_len_en = max(min_req, min(target_len_en, MAX_ENHANCER_LENGTH))
+    target_len_pr = max(min_req, min(target_len_pr, MAX_PROMOTER_LENGTH))
+
+    processed_en = []
+    for ids in enhancer_ids_list:
+        L = int(ids.size(0))
+        if L > target_len_en:
+            s = (L - target_len_en) // 2
+            ids = ids[s:s + target_len_en]
+        processed_en.append(ids)
+    processed_pr = []
+    for ids in promoter_ids_list:
+        L = int(ids.size(0))
+        if L > target_len_pr:
+            s = (L - target_len_pr) // 2
+            ids = ids[s:s + target_len_pr]
+        processed_pr.append(ids)
+
+    padded_enhancer_ids = pad_sequence(processed_en, batch_first=True, padding_value=pad_id)
+    padded_promoter_ids = pad_sequence(processed_pr, batch_first=True, padding_value=pad_id)
+
+    if padded_enhancer_ids.size(1) < target_len_en:
+        padded_enhancer_ids = torch.nn.functional.pad(padded_enhancer_ids, (0, target_len_en - padded_enhancer_ids.size(1)), value=pad_id)
+    if padded_promoter_ids.size(1) < target_len_pr:
+        padded_promoter_ids = torch.nn.functional.pad(padded_promoter_ids, (0, target_len_pr - padded_promoter_ids.size(1)), value=pad_id)
     
     labels_tensor = torch.tensor(labels, dtype=torch.float)
     

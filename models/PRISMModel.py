@@ -18,6 +18,23 @@ from models.EPIModel import CBATTransformerEncoderLayer
 from config import *
 
 
+class AttnPool1d(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.proj = nn.Linear(d, d)
+        self.v = nn.Parameter(torch.zeros(d))
+        nn.init.normal_(self.v, mean=0.0, std=0.02)
+        self.drop = nn.Dropout(CNN_DROPOUT)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):
+        h = torch.tanh(self.proj(self.drop(x)))
+        s = (h * self.v).sum(-1)
+        s = s.masked_fill(mask, -1e9)
+        w = torch.softmax(s, dim=-1)
+        w = w.masked_fill(mask, 0.0)
+        norm = w.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        w = w / norm
+        return (x * w.unsqueeze(-1)).sum(dim=1)
+
 class PRISMModel(nn.Module):
     """
     PRISM预训练模型 - BERT风格的DNA序列预训练
@@ -165,17 +182,16 @@ class PRISMModel(nn.Module):
         enhancer_mask_positions: torch.Tensor,
     ):
         # 保存原始序列长度
-        original_en_length = enhancer_ids.size(1)  # 原始增强子序列长度L_orig
-        
-        min_required_length = 59  # 最小序列长度要求 - 满足CNN和Transformer计算需求
-        
-        # 填充短序列
+        original_en_length = enhancer_ids.size(1)
+
+        K = CNN_KERNEL_SIZE
+        P = POOL_KERNEL_SIZE
+        min_required_length = K + P - 1
+
         if enhancer_ids.size(1) < min_required_length:
-            padding_size = min_required_length - enhancer_ids.size(1)
-            enhancer_ids = F.pad(enhancer_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)  # 增强子序列填充至最小长度
+            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         if promoter_ids.size(1) < min_required_length:
-            padding_size = min_required_length - promoter_ids.size(1)
-            promoter_ids = F.pad(promoter_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)  # 启动子序列填充至最小长度
+            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         
         # DNA嵌入
         enhancer_embedding = self.embedding_en(enhancer_ids)  # E_en = Embed(en_ids) - 增强子序列嵌入表示
@@ -246,13 +262,17 @@ class PRISMModel(nn.Module):
                 end = min(start + P + K - 2, promoter_ids.size(1) - 1)
                 region_all_pad = promoter_pad_orig[:, start:end+1].all(dim=-1)
                 promoter_key_padding_mask[:, j] = region_all_pad  # CNN池化区域全填充的掩码
+            # 长度感知缩放：根据有效token比例对注意力输出进行缩放，减轻零填充噪声影响
+            valid_ratio_en = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
+            valid_ratio_pr = (promoter_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
             enhancers_attended_1, _ = self.cross_attention_1(
                 enhancers_output, promoters_output, promoters_output,
                 key_padding_mask=promoter_key_padding_mask
             )  # A_en^CA = CrossAttn(A_en, A_pr, A_pr) - 增强子查询启动子交叉注意力
             
             # 残差连接 1
-            enhancers_output = enhancers_output + enhancers_attended_1  # A_en^res = A_en + A_en^CA - 交叉注意力残差连接
+            scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
+            enhancers_output = enhancers_output + scale * enhancers_attended_1  # A_en^res = A_en + s*A_en^CA
             
             # -------------------------------------------------------------------
             # Footprint Integration Point 2: Cross-Attn 1 后
@@ -314,7 +334,10 @@ class PRISMModel(nn.Module):
         enhancer_final = self.norm_final(enhancer_final)  # LayerNorm(enhancer_final) - 最终层归一化
         
         # MLM Head
-        mlm_logits = self.mlm_head(enhancer_final)  # logits = MLMHead(Final) - 掩码语言模型预测
+        # 长度感知归一：对序列维做基于有效token比例的缩放，减轻不同长度影响
+        valid_ratio_seq = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).view(-1, 1, 1).clamp(min=1e-6)
+        enhancer_final = enhancer_final * valid_ratio_seq
+        mlm_logits = self.mlm_head(enhancer_final)
         
         # 返回序列长度映射信息
         seq_length_mapping = {
@@ -512,7 +535,8 @@ class PRISMBackbone(nn.Module):
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
             dropout=TRANSFORMER_DROPOUT
         )
-        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        self.attn_pool_en = AttnPool1d(OUT_CHANNELS)
+        self.attn_pool_pr = AttnPool1d(OUT_CHANNELS)
         self.classifier = FourierKAN(
             in_features=OUT_CHANNELS * 2,
             out_features=1,
@@ -533,13 +557,13 @@ class PRISMBackbone(nn.Module):
         )
 
     def forward(self, enhancer_ids, promoter_ids, cell_logits=None):
-        min_required_length = 59
+        K = CNN_KERNEL_SIZE
+        P = POOL_KERNEL_SIZE
+        min_required_length = K + P - 1
         if enhancer_ids.size(1) < min_required_length:
-            padding_size = min_required_length - enhancer_ids.size(1)
-            enhancer_ids = F.pad(enhancer_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         if promoter_ids.size(1) < min_required_length:
-            padding_size = min_required_length - promoter_ids.size(1)
-            promoter_ids = F.pad(promoter_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         enhancer_embedding = self.embedding_en(enhancer_ids)
         promoter_embedding = self.embedding_pr(promoter_ids)
         enhancers_output = self.enhancer_sequential(enhancer_embedding.permute(0, 2, 1))
@@ -557,14 +581,27 @@ class PRISMBackbone(nn.Module):
         for layer in self.promoter_transformer_layers:
             promoters_output, layer_loss = layer(promoters_output)
             total_adaptive_loss += layer_loss
+        promoter_pad_orig = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        cnn_seq_length_pr = promoters_output.size(0)
+        promoter_key_padding_mask = torch.zeros(promoter_ids.size(0), cnn_seq_length_pr, dtype=torch.bool, device=promoter_ids.device)
+        for j in range(cnn_seq_length_pr):
+            start = j * P
+            end = min(start + P + K - 2, promoter_ids.size(1) - 1)
+            region_all_pad = promoter_pad_orig[:, start:end+1].all(dim=-1)
+            promoter_key_padding_mask[:, j] = region_all_pad
+        valid_ratio_en = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
+        valid_ratio_pr = (promoter_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
         enhancers_attended_1, _ = self.cross_attention_1(
-            enhancers_output, promoters_output, promoters_output
+            enhancers_output, promoters_output, promoters_output,
+            key_padding_mask=promoter_key_padding_mask
         )
-        enhancers_output = enhancers_output + enhancers_attended_1
+        scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
+        enhancers_output = enhancers_output + scale * enhancers_attended_1
         enhancers_attended_2, _ = self.cross_attention_2(
-            enhancers_output, promoters_output, promoters_output
+            enhancers_output, promoters_output, promoters_output,
+            key_padding_mask=promoter_key_padding_mask
         )
-        enhancers_final = enhancers_output + enhancers_attended_2
+        enhancers_final = enhancers_output + scale * enhancers_attended_2
         enhancers_final_transposed = enhancers_final.permute(1, 0, 2)
         promoters_output_transposed = promoters_output.permute(1, 0, 2)
         enhancers_final_cbat, loss_e = self.post_enhancer_cbat(enhancers_final_transposed, return_loss=True)
@@ -573,8 +610,24 @@ class PRISMBackbone(nn.Module):
         total_adaptive_loss += loss_p
         enhancers_final = enhancers_final_cbat.permute(1, 0, 2)
         promoters_final = promoters_final_cbat.permute(1, 0, 2)
-        enhancers_pooled = self.adaptive_pool(enhancers_final.permute(1, 2, 0)).squeeze(-1)
-        promoters_pooled = self.adaptive_pool(promoters_final.permute(1, 2, 0)).squeeze(-1)
+        enh_len = enhancers_final.size(0)
+        pr_len = promoters_final.size(0)
+        enh_pad_orig = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
+        pr_pad_orig = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        enh_mask = torch.zeros(enhancer_ids.size(0), enh_len, dtype=torch.bool, device=enhancer_ids.device)
+        pr_mask = torch.zeros(promoter_ids.size(0), pr_len, dtype=torch.bool, device=promoter_ids.device)
+        for j in range(enh_len):
+            s = j * P
+            e = min(s + P + K - 2, enhancer_ids.size(1) - 1)
+            enh_mask[:, j] = enh_pad_orig[:, s:e+1].all(dim=-1)
+        for j in range(pr_len):
+            s = j * P
+            e = min(s + P + K - 2, promoter_ids.size(1) - 1)
+            pr_mask[:, j] = pr_pad_orig[:, s:e+1].all(dim=-1)
+        enh_feat_attn = enhancers_final.permute(1, 0, 2)
+        pr_feat_attn = promoters_final.permute(1, 0, 2)
+        enhancers_pooled = self.attn_pool_en(enh_feat_attn, enh_mask)
+        promoters_pooled = self.attn_pool_pr(pr_feat_attn, pr_mask)
         combined = torch.cat([enhancers_pooled, promoters_pooled], dim=1)
         if cell_logits is not None:
             cell_probs = F.softmax(cell_logits, dim=-1)
