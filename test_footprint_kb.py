@@ -7,7 +7,7 @@ from typing import List, Tuple, Dict
 from pathlib import Path
 
 from models.pleat.embedding import KMerTokenizer, create_dna_embedding_layer
-from models.layers.footprint import LCWnetFootprint
+from models.layers.footprint import FootprintExpert
 from data_loader import load_prism_data, PRISMDataset
 
 
@@ -15,7 +15,14 @@ class TestConfig:
     def __init__(self):
         self.root = Path(__file__).resolve().parent
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.kb_path = str(self.root / "save_model/prism/footprint_kb_epoch_3.pt")
+        # 尝试自动查找最新的KB
+        kb_dir = self.root / "save_model/prism"
+        kbs = sorted(list(kb_dir.glob("footprint_kb_epoch_*.pt")), key=os.path.getmtime)
+        if kbs:
+            self.kb_path = str(kbs[-1])
+        else:
+            self.kb_path = str(self.root / "save_model/prism/footprint_kb_epoch_1.pt")
+            
         self.batch_size = 96
         self.max_en_len = 1000
         self.max_pr_len = 4000
@@ -93,123 +100,165 @@ def classify(footprints: torch.Tensor, names: List[str], centers: torch.Tensor) 
     return [names[i] for i in idx]
 
 
-def compute_cell_means(split: str, cfg: TestConfig, extractor: EnhancerExtractor, footprint: LCWnetFootprint) -> Dict[str, torch.Tensor]:
+def compute_cell_means(split: str, cfg: TestConfig, extractor: EnhancerExtractor, footprint: FootprintExpert) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
     pairs_df, e_seqs, p_seqs = load_prism_data(split)
     ds = PRISMDataset(pairs_df, e_seqs, p_seqs)
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0, collate_fn=lambda b: collate_fn(b, cfg))
-    sums: Dict[str, torch.Tensor] = {}
+    
+    sums_com: Dict[str, torch.Tensor] = {}
+    sums_spec: Dict[str, torch.Tensor] = {}
     counts: Dict[str, int] = {}
+    
     with torch.no_grad():
         for enh_ids, prom_ids, cells, labels in dl:
             enh_ids = enh_ids.to(cfg.device)
             feats = extractor(enh_ids)
-            fp = footprint.forward_vector(feats)
+            # Expert forward: seq_out, sample_vec, z_com, z_spec
+            _, _, z_com, z_spec = footprint(feats)
+            
             for i, c in enumerate(cells):
-                v = fp[i].detach()
-                if c not in sums:
-                    sums[c] = torch.zeros_like(v)
+                v_com = z_com[i].detach()
+                v_spec = z_spec[i].detach()
+                
+                if c not in counts:
+                    sums_com[c] = torch.zeros_like(v_com)
+                    sums_spec[c] = torch.zeros_like(v_spec)
                     counts[c] = 0
-                sums[c] = sums[c] + v
+                
+                sums_com[c] += v_com
+                sums_spec[c] += v_spec
                 counts[c] += 1
-    means = {c: (sums[c] / max(counts[c], 1)).to(cfg.device) for c in sums}
-    return means
-
-
-def solve_map(means: Dict[str, torch.Tensor], centers: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, List[str]]:
-    names = sorted(set(means.keys()) & set(centers.keys()))
-    if not names:
-        return torch.eye(next(iter(means.values())).numel(), device=next(iter(means.values())).device), []
-    M = torch.stack([means[n] for n in names], dim=0)
-    K = torch.stack([centers[n].to(M.device) for n in names], dim=0)
-    pinv = torch.linalg.pinv(M)
-    A = pinv @ K
-    return A, names
+                
+    means_com = {c: (sums_com[c] / max(counts[c], 1)).to(cfg.device) for c in sums_com}
+    means_spec = {c: (sums_spec[c] / max(counts[c], 1)).to(cfg.device) for c in sums_spec}
+    return means_com, means_spec
 
 
 def evaluate(cfg: TestConfig) -> Dict[str, float]:
-    pairs_df, e_seqs, p_seqs = load_prism_data("val")
-    ds = PRISMDataset(pairs_df, e_seqs, p_seqs)
-    dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0, collate_fn=lambda b: collate_fn(b, cfg))
-
+    print(f"Loading KB from: {cfg.kb_path}")
     kb = load_kb(cfg.kb_path)
+    
+    # 加载中心点
     com_names_all, com_centers_all = centers_to_tensor(kb["com_centers"], cfg.device)
     spec_names_all, spec_centers_all = centers_to_tensor(kb["spec_centers"], cfg.device)
 
     extractor = EnhancerExtractor(cfg).to(cfg.device)
-    footprint = LCWnetFootprint(d_model=cfg.out_channels).to(cfg.device)
+    
+    # 初始化专家并加载权重
+    footprint = FootprintExpert(d_model=cfg.out_channels).to(cfg.device)
+    
+    if 'model_state' in kb and kb['model_state'] is not None:
+        print("Loading expert weights from KB...")
+        # 过滤出 enhancer_footprint 相关的权重
+        expert_dict = {k.replace("enhancer_footprint.", ""): v 
+                       for k, v in kb['model_state'].items() 
+                       if k.startswith("enhancer_footprint.")}
+        footprint.load_state_dict(expert_dict, strict=False)
+    else:
+        print("WARNING: No model state found in KB, using random weights!")
+
     extractor.eval()
     footprint.eval()
 
-    train_means = compute_cell_means("train", cfg, extractor, footprint)
-    A_com, common_com = solve_map(train_means, kb["com_centers"])  
-    if common_com:
-        idxs = [com_names_all.index(n) for n in common_com]
-        com_centers = com_centers_all[idxs]
-        com_names = common_com
-    else:
-        com_centers = com_centers_all
-        com_names = com_names_all
-    B_spec, common_spec = solve_map(train_means, kb["spec_centers"])  
-    if common_spec:
-        idxs_s = [spec_names_all.index(n) for n in common_spec]
-        spec_centers = spec_centers_all[idxs_s]
-        spec_names = common_spec
-    else:
-        spec_centers = spec_centers_all
-        spec_names = spec_names_all
+    # 不再需要 solve_map，因为我们直接有投影层
+    # 我们直接评估验证集上的表现
+
+    pairs_df, e_seqs, p_seqs = load_prism_data("val")
+    ds = PRISMDataset(pairs_df, e_seqs, p_seqs)
+    dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0, collate_fn=lambda b: collate_fn(b, cfg))
 
     total = 0
-    correct = 0
-    total_s = 0
-    correct_s = 0
-    all_fp = []
+    correct_com = 0
+    correct_spec = 0
+    
+    all_z_spec = []
     all_cell = []
 
     with torch.no_grad():
         for enh_ids, prom_ids, cells, labels in dl:
             enh_ids = enh_ids.to(cfg.device)
             feats = extractor(enh_ids)
-            fp = footprint.forward_vector(feats)
-            fp_com = fp @ A_com
-            preds = classify(fp_com, com_names, com_centers)
-            fp_spec = fp @ B_spec
-            preds_s = classify(fp_spec, spec_names, spec_centers)
+            
+            # 直接通过专家头获得投影
+            _, _, z_com, z_spec = footprint(feats)
+            
+            # 分类: 找最近的中心
+            preds_com = classify(z_com, com_names_all, com_centers_all)
+            preds_spec = classify(z_spec, spec_names_all, spec_centers_all)
 
             total += len(cells)
-            correct += sum(1 for p, g in zip(preds, cells) if p == g)
-            total_s += len(cells)
-            correct_s += sum(1 for p, g in zip(preds_s, cells) if p == g)
-            all_fp.append(fp.cpu())
+            correct_com += sum(1 for p, g in zip(preds_com, cells) if p == g)
+            correct_spec += sum(1 for p, g in zip(preds_spec, cells) if p == g)
+            
+            all_z_spec.append(z_spec.cpu())
             all_cell.extend(cells)
 
-    acc = correct / max(total, 1)
-    acc_s = correct_s / max(total_s, 1)
+    acc_com = correct_com / max(total, 1)
+    acc_spec = correct_spec / max(total, 1)
+
+    # 验证函数
+    from sklearn.metrics import silhouette_score
+    def compute_silhouette_score(z_spec: torch.Tensor, cell_labels: List[str]) -> float:
+        """
+        计算轮廓系数，衡量细胞系在特异性空间中的区分度。
+        取值范围 [-1, 1]，越高表示区分越好。
+        """
+        if len(set(cell_labels)) < 2:
+            return 0.0
+        
+        # 将字符串标签转换为数字索引
+        unique_cells = sorted(list(set(cell_labels)))
+        labels = [unique_cells.index(c) for c in cell_labels]
+        
+        # 采样计算以加快速度（如果样本太多）
+        if len(labels) > 5000:
+            import numpy as np
+            indices = np.random.choice(len(labels), 5000, replace=False)
+            z_subset = z_spec[indices].cpu().numpy()
+            labels_subset = np.array(labels)[indices]
+            return silhouette_score(z_subset, labels_subset)
+            
+        return silhouette_score(z_spec.cpu().numpy(), labels)
 
     try:
         import matplotlib.pyplot as plt
-        X = torch.cat(all_fp, dim=0).numpy()
-        Xc = X - X.mean(axis=0, keepdims=True)
+        X = torch.cat(all_z_spec, dim=0)
+        
+        # 计算轮廓系数
+        sil_score = compute_silhouette_score(X, all_cell)
+        print(f"Silhouette Score (Differentiation): {sil_score:.4f}")
+        
+        # PCA可视化特异性空间
+        X_np = X.numpy()
+        Xc = X_np - X_np.mean(axis=0, keepdims=True)
         U, S, Vt = torch.linalg.svd(torch.tensor(Xc), full_matrices=False)
         PCs = (torch.tensor(Xc) @ Vt[:, :2]).numpy()
+        
         uniq = sorted(set(all_cell))
         colors = {c: i for i, c in enumerate(uniq)}
         cmap = plt.get_cmap("tab20")
-        plt.figure(figsize=(8, 6))
+        
+        plt.figure(figsize=(10, 8))
         for c in uniq:
             idxs = [i for i, cc in enumerate(all_cell) if cc == c]
+            if not idxs: continue
             pts = PCs[idxs]
-            plt.scatter(pts[:, 0], pts[:, 1], s=12, color=cmap(colors[c] % 20), label=c)
+            plt.scatter(pts[:, 0], pts[:, 1], s=20, alpha=0.7, color=cmap(colors[c] % 20), label=c)
+            
         plt.xlabel("PC1")
         plt.ylabel("PC2")
-        plt.title("Footprint KB Val PCA")
-        plt.legend(markerscale=1.5, fontsize=8)
-        out_path = str(cfg.root / "save_model/prism/footprint_kb_val_pca.png")
+        plt.title(f"Footprint Expert Spec-Space PCA (Acc: {acc_spec:.2%})")
+        plt.legend(markerscale=1.5, fontsize=8, bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
-        plt.savefig(out_path, dpi=160)
-    except Exception:
-        pass
+        
+        out_path = str(cfg.root / "save_model/prism/footprint_expert_val_pca.png")
+        plt.savefig(out_path, dpi=300)
+        print(f"Saved PCA plot to {out_path}")
+        
+    except Exception as e:
+        print(f"Plotting failed: {e}")
 
-    return {"accuracy_com": acc, "accuracy_spec": acc_s}
+    return {"accuracy_com": acc_com, "accuracy_spec": acc_spec}
 
 
 if __name__ == "__main__":

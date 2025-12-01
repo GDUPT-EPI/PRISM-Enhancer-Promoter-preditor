@@ -486,6 +486,52 @@ class LCWnetFootprint(nn.Module):
         return sample_footprint
 
 
+class FootprintExpert(nn.Module):
+    """
+    Footprint专家模块：集成特征提取与解纠缠投影
+    
+    将LCWnetFootprint与解纠缠投影层封装在一起，
+    确保预训练的"专家知识"（包括如何提取特征和如何区分特异性）能被完整保存和复用。
+    """
+    def __init__(self, d_model: int, d_spec_ratio: int = 8):
+        super().__init__()
+        self.backbone = LCWnetFootprint(d_model)
+        
+        # 投影头配置
+        self.d_model = d_model
+        self.d_spec = max(8, d_model // d_spec_ratio)
+        
+        # 解纠缠投影层 (Disentanglement Projections)
+        # W_com: 投影到公共子空间 (Common Subspace)
+        self.w_com = nn.Linear(d_model, d_model, bias=False)
+        # W_spec: 投影到特异子空间 (Specific Subspace)
+        self.w_spec = nn.Linear(d_model, self.d_spec, bias=False)
+        
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+        """
+        Args:
+            x: 输入序列 [B, L, D]
+            residual: 残差连接 [B, L, D]
+            
+        Returns:
+            seq_out: 序列级输出 [B, L, D]
+            sample_vec: 样本级footprint向量 [B, D]
+            z_com: 公共特征投影 [B, D_com]
+            z_spec: 特异特征投影 [B, D_spec]
+        """
+        # 1. 获取 Backbone 特征
+        seq_out, sample_vec = self.backbone(x, residual)
+        
+        # 2. 投影到子空间
+        z_com = self.w_com(sample_vec)
+        z_spec = self.w_spec(sample_vec)
+        
+        return seq_out, sample_vec, z_com, z_spec
+
+    def forward_vector(self, x: torch.Tensor):
+        """仅提取向量特征"""
+        return self.backbone.forward_vector(x)
+
 # ============================================================================
 # 损失函数部分 (暂未实现，仅注释说明)
 # ============================================================================

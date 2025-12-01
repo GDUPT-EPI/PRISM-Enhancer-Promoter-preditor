@@ -109,7 +109,7 @@ def prism_collate_fn(batch):
     return padded_enhancer_ids, padded_promoter_ids, cell_lines, labels_tensor
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spec, cell_label_map, ema_mu_com, proj_params, kb, loss_weights):
+def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_map, ema_mu_com, proj_params, kb, loss_weights):
     """训练一个epoch"""
     model.train()
     total_loss = 0.0
@@ -135,12 +135,31 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
             block_size=KMER_SIZE
         )
         
-        # 前向传播
-        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
+        # 增强的细胞分类损失
+        loss_classification = torch.tensor(0.0, device=device)
+        if hasattr(model, 'cell_classifier') and model.cell_classifier is not None and mlm_logits.size(-1) > 0:
+            # 前向传播已经返回了 cell_logits (在 fused_footprint 之后)
+            # model returns: mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint, cell_logits
+            # 我们需要重新解包返回值
+            
+            # 注意：这里我们假设 model 已经修改为返回 cell_logits
+            # 如果 cell_logits 是 None，则不计算损失
+            # 在 model() 调用时我们只接收了 5 个返回值，现在应该是 6 个
+            pass # 下面会重新调用或处理
+            
+        # 由于Python解包的特性，我们需要确保 model 返回值的数量匹配
+        # 我们重新修改一下 model() 的调用
+        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint, cell_logits = model(masked_enhancer_ids, promoter_ids, mask_positions)
 
-        v = fused_footprint  # v_i = Φ_CWC(M_i) - 样本级footprint向量，来自CWT特征压缩
-        z_com = W_com(v)     # z^com_{c,i} = W_com · v_i - 公共子空间投影，承载BERT所需信息
-        z_spec = W_spec(v)   # z^spec_{c,i} = W_spec · v_i - 特异子空间投影，用于细胞系区分
+        v = fused_footprint  # v_i = Φ_CWC(M_i)
+        
+        # 从模型获取投影特征 (取自第一次调用的结果)
+        z_com = model.current_z_com
+        z_spec = model.current_z_spec
+        
+        # 获取投影矩阵权重用于正交约束
+        W_com_weight = model.enhancer_footprint.w_com.weight
+        W_spec_weight = model.enhancer_footprint.w_spec.weight
 
         B = enhancer_ids.size(0)  # batch大小
         V = mlm_logits.size(-1)   # 词汇表大小
@@ -169,6 +188,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
         if isinstance(kb, dict):
             kb.setdefault('spec_centers', {})  # 初始化特异特征中心点缓存
             kb.setdefault('com_centers', {})   # 初始化公共特征中心点缓存
+            
+            # 确保所有需要的键都在
+            if 'model_state' not in kb:
+                kb['model_state'] = None
+                
             for i, c in enumerate(unique_cells):
                 g_c_spec = g_spec_list[i]
                 g_c_com = g_com_list[i]
@@ -218,11 +242,24 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
         g_per_sample = torch.stack([g_spec_map.get(cell_lines[i], torch.zeros_like(z_spec[0])) for i in range(B)]).to(device)  # [B, d_spec] - 每个样本对应的细胞中心
         loss_within = proj_params['lambda_spec'] * ((z_spec - g_per_sample).pow(2).mean())  # L_within = λ_spec * ||z^spec_{c,i} - g^spec_c||^2 - 细胞内一致性约束，防止噪声主导
 
-        w_ortho = W_com.weight @ W_spec.weight.t()  # W_com · W_spec^T，计算公共/特异投影矩阵的互相关
+        w_ortho = W_com_weight @ W_spec_weight.t()  # W_com · W_spec^T，计算公共/特异投影矩阵的互相关
         loss_ortho = proj_params['lambda_ortho'] * (w_ortho.pow(2).sum())  # L_ortho = λ_ortho * ||W_com · W_spec^T||_F^2 - 子空间正交约束，避免特征污染
 
-        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + loss_weights.get('w_mlm', 0.1) * bert_loss + loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho  # 总损失: L = w_cell*L_cell + w_mlm*L_BERT + L_invar + L_var + L_cov + L_spec_reg + L_within + L_ortho
-        
+        # 计算分类损失
+        if cell_logits is not None:
+             # 确保 unique_cells 包含当前batch的所有细胞系
+             # 简单的做法是直接用 cell_lines 里的 label
+             # 但我们需要全局的 map
+             
+             # 获取batch中每个样本的全局label index
+             batch_labels = torch.tensor([cell_label_map.get(c, 0) for c in cell_lines], device=device)
+             loss_classification = F.cross_entropy(cell_logits, batch_labels)
+
+        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + \
+                          loss_weights.get('w_mlm', 0.1) * bert_loss + \
+                          loss_weights.get('w_class', 0.5) * loss_classification + \
+                          loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho
+
         # 反向传播
         optimizer.zero_grad()
         total_loss_batch.backward()
@@ -250,7 +287,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, W_com, W_spe
     return avg_loss, avg_accuracy
 
 
-def validate(model, dataloader, cell_name="", W_com=None, W_spec=None, cell_label_map=None, loss_weights=None):
+def validate(model, dataloader, cell_name="", cell_label_map=None, loss_weights=None):
     """验证函数"""
     model.eval()
     total_loss = 0.0
@@ -278,7 +315,7 @@ def validate(model, dataloader, cell_name="", W_com=None, W_spec=None, cell_labe
             )
             
             # 前向传播
-            mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
+            mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint, cell_logits = model(masked_enhancer_ids, promoter_ids, mask_positions)
             
             # 计算损失
             loss, accuracy = model.compute_mlm_loss(mlm_logits, original_enhancer_ids, mask_positions, seq_length_mapping)
@@ -344,7 +381,9 @@ def main():
     
     # 创建模型
     logger.info("创建PRISM模型...")
-    model = PRISMModel()
+    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
+    num_cell_lines = len(unique_cells_train)
+    model = PRISMModel(num_cell_lines=num_cell_lines)
     model = model.to(device)
     
     # 打印模型信息
@@ -447,16 +486,22 @@ def main():
             #     torch.save(model.state_dict(), save_path)
             #     logger.info(f"保存最佳模型: {save_path}")
             
-            # 定期保存检查点
+            # 保存检查点
             checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f"保存检查点: {checkpoint_path}")
 
+            # 保存知识库 (包含中心点和模型状态)
             kb_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"footprint_kb_epoch_{epoch_idx+1}.pt")
+            
+            # 更新KB中的模型状态，方便直接加载专家
+            kb['model_state'] = model.state_dict()
+            
             try:
                 torch.save(kb, kb_path)
-            except Exception:
-                pass
+                logger.info(f"保存知识库: {kb_path}")
+            except Exception as e:
+                logger.error(f"保存知识库失败: {e}")
     
     logger.info("=" * 80)
     logger.info("PRISM预训练完成")
