@@ -484,18 +484,26 @@ def main():
     # 创建数据集
     train_dataset = PRISMDataset(train_pairs_df, train_e_seqs, train_p_seqs)
     
-    # 创建对比采样器
-    train_sampler = CellBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)
-    
-    # 创建数据加载器
     logger.info("创建数据加载器...")
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_sampler=train_sampler,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        collate_fn=prism_collate_fn,
-    )
+    if USE_RANDOM_EP_DATALOADER:
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=PRISM_BATCH_SIZE,
+            shuffle=True,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            collate_fn=prism_collate_fn,
+        )
+        logger.info("使用随机EP导入 (跨细胞系随机批次)")
+    else:
+        train_sampler = CellBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_sampler=train_sampler,
+            num_workers=NUM_WORKERS,
+            pin_memory=True,
+            collate_fn=prism_collate_fn,
+        )
     
     val_loader = None
     
@@ -544,8 +552,15 @@ def main():
         for p in model.parameters():
             p.requires_grad = False
         optimizer = torch.optim.AdamW(list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        training_mode = "expert_only"
+    elif TRAIN_EP_ONLY:
+        for p in cell_expert.parameters():
+            p.requires_grad = False
+        optimizer = torch.optim.AdamW(list(model.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        training_mode = "ep_only"
     else:
         optimizer = torch.optim.AdamW(list(model.parameters()) + list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        training_mode = "joint"
     total_steps = len(train_loader) * EPOCH
     scheduler = None
     
@@ -570,9 +585,11 @@ def main():
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
         if TRAIN_EXPERT_ONLY:
-            logger.info("Expert-only training: optimizing CellClassificationExpert only")
+            logger.info("模式: 仅训练细胞专家头")
+        elif TRAIN_EP_ONLY:
+            logger.info("模式: 仅训练EP互作主干")
         else:
-            logger.info("Loss Weights: cell=0.35, ep=0.65")
+            logger.info("模式: 联合训练 (cell=0.35, ep=0.65)")
         model.train(); cell_expert.train()
         total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
@@ -584,18 +601,33 @@ def main():
             labels = labels.to(device)
             cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
 
-            cell_logits = cell_expert(enh_ids, pr_ids)
-            if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
-                cell_logits = cell_logits.squeeze(1)
-            cell_loss = F.cross_entropy(cell_logits, cell_targets)
-            with torch.no_grad():
-                cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
-
             if TRAIN_EXPERT_ONLY:
+                cell_logits = cell_expert(enh_ids, pr_ids)
+                if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
+                    cell_logits = cell_logits.squeeze(1)
+                cell_loss = F.cross_entropy(cell_logits, cell_targets)
+                with torch.no_grad():
+                    cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
                 loss = cell_loss
                 optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
                 ep_acc = 0.0
+            elif TRAIN_EP_ONLY:
+                ep_outputs, adaptive_loss = model(enh_ids, pr_ids, None)
+                ep_outputs = ep_outputs.squeeze(-1)
+                ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
+                with torch.no_grad():
+                    ep_preds = (ep_outputs >= 0.5).long()
+                    ep_acc = (ep_preds == labels.long()).float().mean().item()
+                loss = ep_loss
+                optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(model.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
+                cell_acc = 0.0
             else:
+                cell_logits = cell_expert(enh_ids, pr_ids)
+                if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
+                    cell_logits = cell_logits.squeeze(1)
+                cell_loss = F.cross_entropy(cell_logits, cell_targets)
+                with torch.no_grad():
+                    cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
                 ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_logits)
                 ep_outputs = ep_outputs.squeeze(-1)
                 ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
@@ -624,6 +656,9 @@ def main():
             'optimizer_state': optimizer.state_dict(),
             'epoch': epoch_idx + 1,
             'train_expert_only': TRAIN_EXPERT_ONLY,
+            'train_ep_only': TRAIN_EP_ONLY,
+            'use_random_ep_dataloader': USE_RANDOM_EP_DATALOADER,
+            'training_mode': training_mode,
         }
         if scheduler is not None:
             full_state['scheduler_state'] = scheduler.state_dict()
