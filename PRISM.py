@@ -274,7 +274,7 @@ def _find_latest_epoch(save_dir: str) -> int:
             epochs.append(int(m2.group(1)))
     return max(epochs) if epochs else 0
 
-def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):
+def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau, cell_expert: torch.nn.Module | None = None):
     latest_epoch = _find_latest_epoch(save_dir)
     if latest_epoch <= 0:
         return 0, {}, torch.zeros(OUT_CHANNELS, device=device)
@@ -288,6 +288,11 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
         if isinstance(state, dict):
             if 'model_state' in state:
                 model.load_state_dict(state['model_state'], strict=False)
+            if cell_expert is not None and 'cell_expert_state' in state:
+                try:
+                    cell_expert.load_state_dict(state['cell_expert_state'], strict=False)
+                except Exception:
+                    pass
             if 'optimizer_state' in state:
                 try:
                     optimizer.load_state_dict(state['optimizer_state'])
@@ -305,7 +310,16 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
     else:
         if os.path.exists(model_path):
             sd = torch.load(model_path, map_location=device)
-            model.load_state_dict(sd, strict=False)
+            if isinstance(sd, dict):
+                if 'backbone' in sd:
+                    model.load_state_dict(sd['backbone'], strict=False)
+                else:
+                    model.load_state_dict(sd, strict=False)
+                if cell_expert is not None and 'cell_expert' in sd:
+                    try:
+                        cell_expert.load_state_dict(sd['cell_expert'], strict=False)
+                    except Exception:
+                        pass
         if os.path.exists(kb_path):
             kb = torch.load(kb_path, map_location='cpu')
     return latest_epoch, kb, ema_mu
@@ -505,7 +519,10 @@ def main():
     logger.info("开始训练")
     logger.info("=" * 80)
     
-    start_epoch = 0
+    os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)
+    start_epoch, _kb, _ema_mu = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler, cell_expert)
+    if start_epoch > 0:
+        logger.info(f"从最近权重恢复: epoch {start_epoch}")
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
         logger.info("Loss Weights: cell=0.35, ep=0.65")
@@ -549,6 +566,17 @@ def main():
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
         torch.save({'backbone': model.state_dict(), 'cell_expert': cell_expert.state_dict()}, checkpoint_path)
         logger.info(f"保存检查点: {checkpoint_path}")
+        full_state_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")
+        full_state = {
+            'model_state': model.state_dict(),
+            'cell_expert_state': cell_expert.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'epoch': epoch_idx + 1,
+        }
+        if scheduler is not None:
+            full_state['scheduler_state'] = scheduler.state_dict()
+        torch.save(full_state, full_state_path)
+        logger.info(f"保存完整状态: {full_state_path}")
 
         # 保存知识库 (包含中心点和模型状态)
         # 移除验证流程
