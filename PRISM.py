@@ -5,13 +5,13 @@ PRISM预训练脚本 - BERT风格的Masked Language Modeling
 
 from config import *
 from config import PRISM_SAVE_MODEL_DIR, PRISM_BATCH_SIZE
-from data_loader import load_prism_data, PRISMDataset, PRISMContrastiveSampler
+from data_loader import load_prism_data, PRISMDataset, CellBatchSampler
 
 import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
 from models.pleat.optimized_pre import create_optimized_dataset
-from models.PRISMModel import PRISMModel, create_mlm_mask
+from models.PRISMModel import PRISMBackbone, CellClassificationExpert
 from models.layers.footprint import LCWnetFootprint, FootprintConfig
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
@@ -25,17 +25,7 @@ import re
 
 # 预训练投影配置类 - 定义高维投影任务的超参数
 class PretrainProjConfig:
-    MIN_SPEC_DIM = 8  # 特异子空间最小维度 d_spec - 定义细胞类型特异特征的最小维度
-    SPEC_RATIO = 8    # 特异子空间与公共子空间的维度比例 d_com/d_spec - 控制公共特征与特异特征的维度关系
-    ALPHA_INIT = 0.25  # α初始化值 - footprint融合权重初始值，控制自注意力与交叉注意力特征的融合比例
-    LAMBDA_ALPHA = 3e-3  # α正则化系数λ_α - footprint融合权重的L1正则化，防止权重过大
-    LAMBDA_INVAR = 5e-3  # 不变性损失系数λ_invar - 跨细胞公共一致性损失的权重，强制不同细胞类型的公共特征相似
-    LAMBDA_VAR = 3e-3  # 方差损失系数λ_var - 公共空间维度方差约束的权重，确保每个维度都有信息
-    LAMBDA_CELL = 6e-1  # 细胞分类损失系数λ_cell - 特异空间细胞分类/对比损失的权重，增强细胞类型区分度
-    LAMBDA_SPEC = 7e-2  # 特异性损失系数λ_spec - 细胞类型特异性特征的权重，增强特征判别性
-    LAMBDA_ORTHO = 1e-2  # 正交性损失系数λ_ortho - 特征正交性约束的权重，减少特征冗余
-    EMA_BETA = 0.1       # 公共特征全局EMA均值更新系数β - 知识库中心点平滑更新的指数移动平均系数
-    GAMMA = 1.0          # 期望的最小标准差阈值γ - 公共空间维度方差约束的最小标准差阈值
+    pass
 
 
 
@@ -108,6 +98,16 @@ def prism_collate_fn(batch):
     labels_tensor = torch.tensor(labels, dtype=torch.float)
     
     return padded_enhancer_ids, padded_promoter_ids, cell_lines, labels_tensor
+
+
+def apply_random_mask(x_ids: torch.Tensor, mask_prob: float = PRISM_RANDOM_MASK_PROB, pad_id: int = PRISM_RANDOM_MASK_PAD_ID) -> torch.Tensor:
+    B, L = x_ids.shape
+    valid = (x_ids != pad_id)
+    rand = torch.rand(B, L, device=x_ids.device)
+    sel = (rand < mask_prob) & valid
+    x_masked = x_ids.clone()
+    x_masked[sel] = pad_id
+    return x_masked
 
 
 def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_map, ema_mu_com, proj_params, kb, loss_weights):
@@ -429,21 +429,13 @@ def main():
     logger.info(f"训练样本数: {len(train_pairs_df)}")
     logger.info(f"训练细胞系: {', '.join(sorted(train_pairs_df['cell_line'].unique()))}")
     
-    logger.info("加载验证数据 (domain-kl)...")
-    val_pairs_df, val_e_seqs, val_p_seqs = load_prism_data("val")
-    logger.info(f"验证样本数: {len(val_pairs_df)}")
-    logger.info(f"验证细胞系: {', '.join(sorted(val_pairs_df['cell_line'].unique()))}")
+    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     
     # 创建数据集
     train_dataset = PRISMDataset(train_pairs_df, train_e_seqs, train_p_seqs)
-    val_dataset = PRISMDataset(val_pairs_df, val_e_seqs, val_p_seqs)
     
     # 创建对比采样器
-    train_sampler = PRISMContrastiveSampler(
-        train_dataset, 
-        batch_size=PRISM_BATCH_SIZE, 
-        shuffle=True
-    )
+    train_sampler = CellBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)
     
     # 创建数据加载器
     logger.info("创建数据加载器...")
@@ -455,18 +447,13 @@ def main():
         collate_fn=prism_collate_fn,
     )
     
-    val_loader = DataLoader(
-        dataset=val_dataset,
-        batch_size=PRISM_BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        collate_fn=prism_collate_fn,
-    )
+    val_loader = None
     
     # 创建模型
     logger.info("创建PRISM模型...")
-    model = PRISMModel()
+    num_cells = len(unique_cells_train)
+    cell_expert = CellClassificationExpert(num_classes=num_cells).to(device)
+    model = PRISMBackbone(num_classes=num_cells).to(device)
     model = model.to(device)
     
     # 打印模型信息
@@ -478,40 +465,17 @@ def main():
     logger.info(f"模型在GPU上: {next(model.parameters()).is_cuda}")
     
     # 创建优化器和调度器
-    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     cell_label_map = {c: i for i, c in enumerate(unique_cells_train)}
 
-    ema_mu_com = torch.zeros(OUT_CHANNELS, device=device)
-    proj_params = {
-        'lambda_alpha': PretrainProjConfig.LAMBDA_ALPHA,
-        'lambda_invar': PretrainProjConfig.LAMBDA_INVAR,
-        'lambda_var': PretrainProjConfig.LAMBDA_VAR,
-        'lambda_cell': PretrainProjConfig.LAMBDA_CELL,
-        'lambda_spec': PretrainProjConfig.LAMBDA_SPEC,
-        'lambda_ortho': PretrainProjConfig.LAMBDA_ORTHO,
-        'ema_beta': PretrainProjConfig.EMA_BETA,
-        'gamma': PretrainProjConfig.GAMMA,
-    }
+    start_epoch = 0
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=BERT_LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
-    )
+    optimizer = torch.optim.AdamW(list(model.parameters()) + list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     total_steps = len(train_loader) * EPOCH
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='max',
-        factor=0.5,
-        patience=2,
-        threshold=1e-3,
-        threshold_mode='rel',
-        min_lr=1e-6
-    )
+    scheduler = None
     
-    logger.info(f"批量大小: {PRISM_BATCH_SIZE} (对比采样: {PRISM_BATCH_SIZE//2}同细胞系 + {PRISM_BATCH_SIZE//2}不同细胞系)")
+    logger.info(f"批量大小: {PRISM_BATCH_SIZE} (纯细胞系批次)")
     logger.info(f"训练轮数: {EPOCH}")
-    logger.info(f"学习率: {BERT_LEARNING_RATE}")
+    logger.info(f"学习率: {LEARNING_RATE}")
     logger.info(f"总训练步数: {total_steps}")
     
     # 训练循环
@@ -519,74 +483,54 @@ def main():
     logger.info("开始训练")
     logger.info("=" * 80)
     
-    start_epoch, kb, ema_loaded = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)
-    if isinstance(ema_loaded, torch.Tensor) and ema_loaded.numel() == ema_mu_com.numel():
-        ema_mu_com.copy_(ema_loaded)
-    if start_epoch > 0:
-        logger.info(f"从检查点恢复: {start_epoch}")
-    kb = kb if isinstance(kb, dict) else {}
+    start_epoch = 0
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
-        loss_weights = {'w_cell': 6.0, 'w_mlm': 0.01, 'tau': 0.045}
-        logger.info(f"Loss Weights: w_cell={loss_weights['w_cell']:.2f}, w_mlm={loss_weights['w_mlm']:.2f}, tau={loss_weights['tau']:.2f}")
-        train_loss, train_acc, train_spec_acc = train_epoch(
-            model,
-            train_loader,
-            optimizer,
-            scheduler,
-            epoch_idx,
-            cell_label_map,
-            ema_mu_com,
-            proj_params,
-            kb,
-            loss_weights,
-        )
-        
-        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Spec Acc: {train_spec_acc:.4f}")
+        logger.info("Loss Weights: cell=0.35, ep=0.65")
+        model.train(); cell_expert.train()
+        total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
+        for batch in pbar:
+            enh_ids, pr_ids, cell_lines, labels = batch
+            enh_ids = enh_ids.to(device); pr_ids = pr_ids.to(device)
+            enh_ids = apply_random_mask(enh_ids)
+            pr_ids = apply_random_mask(pr_ids)
+            labels = labels.to(device)
+            cell_targets = torch.tensor([cell_label_map[c] for c in cell_lines], device=device, dtype=torch.long)
+
+            cell_logits = cell_expert(enh_ids, pr_ids)
+            if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
+                cell_logits = cell_logits.squeeze(1)
+            logger.info(f"cell_logits.shape={tuple(cell_logits.shape)}, cell_targets.shape={tuple(cell_targets.shape)}")
+            cell_loss = F.cross_entropy(cell_logits, cell_targets)
+            with torch.no_grad():
+                cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
+
+            ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_logits)
+            ep_outputs = ep_outputs.squeeze(-1)
+            ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
+            with torch.no_grad():
+                ep_preds = (ep_outputs >= 0.5).long()
+                ep_acc = (ep_preds == labels.long()).float().mean().item()
+
+            loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
+            optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
+
+            total_loss += loss.item(); total_cell_acc += cell_acc; total_ep_acc += ep_acc; n_batches += 1
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'cell_acc': f'{cell_acc:.4f}', 'ep_acc': f'{ep_acc:.4f}'})
+
+        avg_loss = total_loss / max(n_batches, 1)
+        avg_cell_acc = total_cell_acc / max(n_batches, 1)
+        avg_ep_acc = total_ep_acc / max(n_batches, 1)
+        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, Cell Acc: {avg_cell_acc:.4f}, EP Acc: {avg_ep_acc:.4f}")
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
-        torch.save(model.state_dict(), checkpoint_path)
+        torch.save({'backbone': model.state_dict(), 'cell_expert': cell_expert.state_dict()}, checkpoint_path)
         logger.info(f"保存检查点: {checkpoint_path}")
 
         # 保存知识库 (包含中心点和模型状态)
-        kb_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"footprint_kb_epoch_{epoch_idx+1}.pt")
-        
-        # 更新KB中的模型状态，方便直接加载专家
-        kb['model_state'] = model.state_dict()
-        
-        try:
-            torch.save(kb, kb_path)
-            logger.info(f"保存知识库: {kb_path}")
-        except Exception as e:
-            logger.error(f"保存知识库失败: {e}")
-        full_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")
-        full_state = {
-            'epoch': epoch_idx + 1,
-            'model_state': model.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'scheduler_state': scheduler.state_dict(),
-            'ema_mu_com': ema_mu_com.detach().cpu(),
-            'kb': kb,
-        }
-        try:
-            torch.save(full_state, full_path)
-            logger.info(f"保存完整检查点: {full_path}")
-        except Exception as e:
-            logger.error(f"保存完整检查点失败: {e}")
-        
-        # 验证
-        if epoch_idx % VALIDATION_INTERVAL == 0 or epoch_idx == EPOCH - 1:
-            val_loss, val_acc = validate(
-                model,
-                val_loader,
-                "ALL",
-                cell_label_map,
-                loss_weights,
-            )
-            sep_metrics = validate_separability(model, val_loader)
-            logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f}, Fisher: {sep_metrics['spec_fisher_ratio']:.4f}, ComDisp: {sep_metrics['com_center_dispersion']:.4f}, Cells: {sep_metrics['num_cells']}")
-            scheduler.step(sep_metrics['spec_fisher_ratio'])
+        # 移除验证流程
             
             # # 保存最佳模型
             # if val_loss < best_val_loss:

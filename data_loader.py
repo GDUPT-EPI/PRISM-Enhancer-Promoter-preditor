@@ -343,3 +343,45 @@ class PRISMContrastiveSampler(Sampler):
     
     def __len__(self):
         return self.num_batches
+
+
+class CellBatchSampler(Sampler):
+    """
+    细胞系纯批次采样器
+    每个batch仅包含同一细胞系的样本，用于批次级细胞系分类
+    """
+    def __init__(self, dataset: PRISMDataset, batch_size: int, shuffle: bool = True):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.cell_lines = dataset.cell_lines
+        self.cell_line_groups = {c: g.copy() for c, g in dataset.cell_line_groups.items()}
+        self.total_samples = len(dataset)
+        self.num_batches = max(1, self.total_samples // max(1, batch_size))
+
+    def __iter__(self):
+        cell_line_indices = {}
+        for cell_line, indices in self.cell_line_groups.items():
+            indices = indices.copy()
+            if self.shuffle:
+                random.shuffle(indices)
+            cell_line_indices[cell_line] = indices
+
+        # 轮询细胞系，生成纯细胞批次
+        cell_idx = 0
+        for _ in range(self.num_batches):
+            cell = self.cell_lines[cell_idx % len(self.cell_lines)]
+            pool = cell_line_indices[cell]
+            batch = []
+            while len(batch) < self.batch_size:
+                if len(pool) == 0:
+                    pool = self.cell_line_groups[cell].copy()
+                    if self.shuffle:
+                        random.shuffle(pool)
+                    cell_line_indices[cell] = pool
+                batch.append(pool.pop())
+            cell_idx += 1
+            yield batch
+
+    def __len__(self):
+        return self.num_batches

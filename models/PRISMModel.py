@@ -12,6 +12,7 @@ from models.pleat.RoPE import RoPEConfig
 from models.layers.footprint import FootprintConfig, FootprintExpert
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
+from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.layers.footprint import FootprintExpert
 from models.EPIModel import CBATTransformerEncoderLayer
 from config import *
@@ -437,3 +438,255 @@ def create_mlm_mask(token_ids, mask_prob=0.15, mask_token_id=4096,
     # 10%: 保持不变 (不需要操作)
     
     return masked_ids, mask_positions, original_ids  # 返回masked IDs、掩码位置和原始IDs
+
+
+class PRISMBackbone(nn.Module):
+    def __init__(self, num_classes: int = None):
+        super().__init__()
+        self.num_transformer_layers = TRANSFORMER_LAYERS
+        self.embedding_en = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.embedding_pr = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.enhancer_sequential = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
+            nn.BatchNorm1d(OUT_CHANNELS),
+            nn.Dropout(p=CNN_DROPOUT)
+        )
+        self.promoter_sequential = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
+            nn.BatchNorm1d(OUT_CHANNELS),
+            nn.Dropout(p=CNN_DROPOUT)
+        )
+        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
+        img_size = PRISM_IMG_SIZE
+        self.enhancer_transformer_layers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                img_size=img_size
+            ) for _ in range(self.num_transformer_layers)
+        ])
+        self.promoter_transformer_layers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                img_size=img_size
+            ) for _ in range(self.num_transformer_layers)
+        ])
+        self.pre_enhancer_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        self.pre_promoter_self_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        self.cross_attention_1 = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        self.cross_attention_2 = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        self.post_enhancer_cbat = CBAT(
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=TRANSFORMER_DROPOUT
+        )
+        self.post_promoter_cbat = CBAT(
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=TRANSFORMER_DROPOUT
+        )
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(1)
+        self.classifier = FourierKAN(
+            in_features=OUT_CHANNELS * 2,
+            out_features=1,
+            grid_size=5,
+            width=2 * (OUT_CHANNELS * 2) + 1,
+        )
+        self.cell_inject_proj = nn.Sequential(
+            nn.LayerNorm(num_classes or 1),
+            nn.Linear(num_classes or 1, OUT_CHANNELS * 2),
+            nn.GELU()
+        )
+        self.cell_alpha = nn.Parameter(torch.tensor(0.0))
+        self.criterion = AdaptiveIMMAXLoss()
+        self.optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY
+        )
+
+    def forward(self, enhancer_ids, promoter_ids, cell_logits=None):
+        min_required_length = 59
+        if enhancer_ids.size(1) < min_required_length:
+            padding_size = min_required_length - enhancer_ids.size(1)
+            enhancer_ids = F.pad(enhancer_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+        if promoter_ids.size(1) < min_required_length:
+            padding_size = min_required_length - promoter_ids.size(1)
+            promoter_ids = F.pad(promoter_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+        enhancer_embedding = self.embedding_en(enhancer_ids)
+        promoter_embedding = self.embedding_pr(promoter_ids)
+        enhancers_output = self.enhancer_sequential(enhancer_embedding.permute(0, 2, 1))
+        promoters_output = self.promoter_sequential(promoter_embedding.permute(0, 2, 1))
+        enhancers_output = enhancers_output.permute(2, 0, 1)
+        promoters_output = promoters_output.permute(2, 0, 1)
+        enhancers_output = self.pre_enhancer_self_attn(enhancers_output.permute(1, 0, 2))
+        promoters_output = self.pre_promoter_self_attn(promoters_output.permute(1, 0, 2))
+        enhancers_output = enhancers_output.permute(1, 0, 2)
+        promoters_output = promoters_output.permute(1, 0, 2)
+        total_adaptive_loss = 0.0
+        for layer in self.enhancer_transformer_layers:
+            enhancers_output, layer_loss = layer(enhancers_output)
+            total_adaptive_loss += layer_loss
+        for layer in self.promoter_transformer_layers:
+            promoters_output, layer_loss = layer(promoters_output)
+            total_adaptive_loss += layer_loss
+        enhancers_attended_1, _ = self.cross_attention_1(
+            enhancers_output, promoters_output, promoters_output
+        )
+        enhancers_output = enhancers_output + enhancers_attended_1
+        enhancers_attended_2, _ = self.cross_attention_2(
+            enhancers_output, promoters_output, promoters_output
+        )
+        enhancers_final = enhancers_output + enhancers_attended_2
+        enhancers_final_transposed = enhancers_final.permute(1, 0, 2)
+        promoters_output_transposed = promoters_output.permute(1, 0, 2)
+        enhancers_final_cbat, loss_e = self.post_enhancer_cbat(enhancers_final_transposed, return_loss=True)
+        promoters_final_cbat, loss_p = self.post_promoter_cbat(promoters_output_transposed, return_loss=True)
+        total_adaptive_loss += loss_e
+        total_adaptive_loss += loss_p
+        enhancers_final = enhancers_final_cbat.permute(1, 0, 2)
+        promoters_final = promoters_final_cbat.permute(1, 0, 2)
+        enhancers_pooled = self.adaptive_pool(enhancers_final.permute(1, 2, 0)).squeeze(-1)
+        promoters_pooled = self.adaptive_pool(promoters_final.permute(1, 2, 0)).squeeze(-1)
+        combined = torch.cat([enhancers_pooled, promoters_pooled], dim=1)
+        if cell_logits is not None:
+            cell_probs = F.softmax(cell_logits, dim=-1)
+            inj = self.cell_inject_proj(cell_probs)
+            combined = combined + self.cell_alpha * inj
+        result = self.classifier(combined)
+        return torch.sigmoid(result), total_adaptive_loss
+
+    def compute_loss(self, outputs, labels, adaptive_loss=0.0):
+        loss = self.criterion(outputs, labels)
+        return loss + adaptive_loss
+
+
+class CellClassificationExpert(nn.Module):
+    def __init__(self, num_classes: int):
+        super().__init__()
+        self.enh_embedding = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.pr_embedding = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.enh_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
+            nn.BatchNorm1d(OUT_CHANNELS),
+            nn.Dropout(p=CNN_DROPOUT)
+        )
+        self.pr_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
+            nn.BatchNorm1d(OUT_CHANNELS),
+            nn.Dropout(p=CNN_DROPOUT)
+        )
+        self.pre_enh_attn = RoPEAttention(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=RoPEConfig.ROPE_DROPOUT)
+        self.pre_pr_attn = RoPEAttention(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=RoPEConfig.ROPE_DROPOUT)
+        self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)
+        self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS),
+            nn.Sigmoid()
+        )
+        self.inj_proj = nn.Sequential(
+            nn.LayerNorm(OUT_CHANNELS),
+            nn.Linear(OUT_CHANNELS, OUT_CHANNELS),
+            nn.GELU()
+        )
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        img_size = PRISM_IMG_SIZE
+        self.transformers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=RoPEConfig.ROPE_DROPOUT,
+                img_size=img_size
+            ) for _ in range(PRISM_CLASS_CBATS)
+        ])
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.classifier = FourierKAN(
+            in_features=OUT_CHANNELS * 2,
+            out_features=num_classes,
+            grid_size=5,
+            width=2 * (OUT_CHANNELS * 2) + 1,
+        )
+
+    def forward(self, enh_ids, pr_ids):
+        min_required_length = 59
+        if enh_ids.size(1) < min_required_length:
+            padding_size = min_required_length - enh_ids.size(1)
+            enh_ids = F.pad(enh_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+        if pr_ids.size(1) < min_required_length:
+            padding_size = min_required_length - pr_ids.size(1)
+            pr_ids = F.pad(pr_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
+        embed_en = self.enh_embedding(enh_ids)
+        embed_pr = self.pr_embedding(pr_ids)
+        enh = self.enh_cnn(embed_en.permute(0, 2, 1))
+        pr = self.pr_cnn(embed_pr.permute(0, 2, 1))
+        enh = enh.permute(2, 0, 1)
+        pr = pr.permute(2, 0, 1)
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2))
+        enh_for_fp = enh_pre
+        fp1_seq, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)
+        enh = enh_pre.permute(1, 0, 2)
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2))
+        pr = pr_pre.permute(1, 0, 2)
+        att1, _ = self.cross_attn(enh, pr, pr)
+        enh = enh + att1
+        enh_cross = enh.permute(1, 0, 2)
+        fp2_seq, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)
+        gate = self.fusion_gate(torch.cat([fp1_vec, fp2_vec], dim=-1))
+        fused = gate * fp1_vec + (1 - gate) * fp2_vec
+        proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)
+        enh = enh + self.alpha * proj
+        residual_proj = proj
+        total_loss = 0.0
+        for layer in self.transformers:
+            enh, layer_loss = layer(enh)
+            total_loss += layer_loss
+        att2, _ = self.cross_attn(enh, pr, pr)
+        enh = enh + att2 + self.alpha * residual_proj
+        enh_pooled = self.pool(enh.permute(1, 2, 0)).squeeze(-1)
+        pr_pooled = self.pool(pr.permute(1, 2, 0)).squeeze(-1)
+        combined = torch.cat([enh_pooled, pr_pooled], dim=1)
+        logits = self.classifier(combined)
+        return logits
