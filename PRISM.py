@@ -135,21 +135,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
             block_size=KMER_SIZE
         )
         
-        # 增强的细胞分类损失
-        loss_classification = torch.tensor(0.0, device=device)
-        if hasattr(model, 'cell_classifier') and model.cell_classifier is not None and mlm_logits.size(-1) > 0:
-            # 前向传播已经返回了 cell_logits (在 fused_footprint 之后)
-            # model returns: mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint, cell_logits
-            # 我们需要重新解包返回值
-            
-            # 注意：这里我们假设 model 已经修改为返回 cell_logits
-            # 如果 cell_logits 是 None，则不计算损失
-            # 在 model() 调用时我们只接收了 5 个返回值，现在应该是 6 个
-            pass # 下面会重新调用或处理
-            
         # 由于Python解包的特性，我们需要确保 model 返回值的数量匹配
         # 我们重新修改一下 model() 的调用
-        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint, cell_logits = model(masked_enhancer_ids, promoter_ids, mask_positions)
+        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
 
         v = fused_footprint  # v_i = Φ_CWC(M_i)
         
@@ -245,19 +233,8 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
         w_ortho = W_com_weight @ W_spec_weight.t()  # W_com · W_spec^T，计算公共/特异投影矩阵的互相关
         loss_ortho = proj_params['lambda_ortho'] * (w_ortho.pow(2).sum())  # L_ortho = λ_ortho * ||W_com · W_spec^T||_F^2 - 子空间正交约束，避免特征污染
 
-        # 计算分类损失
-        if cell_logits is not None:
-             # 确保 unique_cells 包含当前batch的所有细胞系
-             # 简单的做法是直接用 cell_lines 里的 label
-             # 但我们需要全局的 map
-             
-             # 获取batch中每个样本的全局label index
-             batch_labels = torch.tensor([cell_label_map.get(c, 0) for c in cell_lines], device=device)
-             loss_classification = F.cross_entropy(cell_logits, batch_labels)
-
         total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + \
                           loss_weights.get('w_mlm', 0.1) * bert_loss + \
-                          loss_weights.get('w_class', 0.5) * loss_classification + \
                           loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho
 
         # 反向传播
@@ -315,7 +292,7 @@ def validate(model, dataloader, cell_name="", cell_label_map=None, loss_weights=
             )
             
             # 前向传播
-            mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint, cell_logits = model(masked_enhancer_ids, promoter_ids, mask_positions)
+            mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
             
             # 计算损失
             loss, accuracy = model.compute_mlm_loss(mlm_logits, original_enhancer_ids, mask_positions, seq_length_mapping)
@@ -383,7 +360,7 @@ def main():
     logger.info("创建PRISM模型...")
     unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
     num_cell_lines = len(unique_cells_train)
-    model = PRISMModel(num_cell_lines=num_cell_lines)
+    model = PRISMModel()
     model = model.to(device)
     
     # 打印模型信息
@@ -453,8 +430,6 @@ def main():
             optimizer,
             scheduler,
             epoch_idx,
-            W_com,
-            W_spec,
             cell_label_map,
             ema_mu_com,
             proj_params,
@@ -470,8 +445,6 @@ def main():
                 model,
                 val_loader,
                 "ALL",
-                W_com,
-                W_spec,
                 cell_label_map,
                 loss_weights,
             )

@@ -29,21 +29,11 @@ class PRISMModel(nn.Module):
     6. MLM Head (预测masked tokens) - 掩码语言模型预测头
     """
     
-    def __init__(self, num_cell_lines=0):
+    def __init__(self):
         super(PRISMModel, self).__init__()
         
         self.num_transformer_layers = TRANSFORMER_LAYERS
         assert OUT_CHANNELS % TRANSFORMER_HEADS == 0
-        
-        # 细胞系分类头（如果提供了num_cell_lines）
-        self.num_cell_lines = num_cell_lines
-        if self.num_cell_lines > 0:
-            self.cell_classifier = nn.Sequential(
-                nn.Linear(OUT_CHANNELS, OUT_CHANNELS // 2),
-                nn.ReLU(),
-                nn.Dropout(CNN_DROPOUT),
-                nn.Linear(OUT_CHANNELS // 2, num_cell_lines)
-            )
 
 
         # DNA嵌入层 - 使用6-mer overlapping tokenization
@@ -335,13 +325,7 @@ class PRISMModel(nn.Module):
             'cnn_length': cnn_seq_length  # CNN后序列长度
         }
         
-        # 细胞系分类 Logits
-        cell_logits = None
-        if self.num_cell_lines > 0:
-            # 使用特异性特征进行分类预测
-            cell_logits = self.cell_classifier(self.current_z_spec)
-        
-        return mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint, cell_logits  # 返回MLM预测、最终特征和融合footprint
+        return mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint  # 返回MLM预测、最终特征和融合footprint
     
     def compute_mlm_loss(self, mlm_logits, original_ids, mask_positions, seq_length_mapping=None):
         """
