@@ -16,7 +16,7 @@ class TestConfig:
         self.root = Path(__file__).resolve().parent
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.kb_path = str(self.root / "save_model/prism/footprint_kb_epoch_3.pt")
-        self.batch_size = 16
+        self.batch_size = 96
         self.max_en_len = 1000
         self.max_pr_len = 4000
         self.vocab_size = 4097
@@ -93,21 +93,75 @@ def classify(footprints: torch.Tensor, names: List[str], centers: torch.Tensor) 
     return [names[i] for i in idx]
 
 
+def compute_cell_means(split: str, cfg: TestConfig, extractor: EnhancerExtractor, footprint: LCWnetFootprint) -> Dict[str, torch.Tensor]:
+    pairs_df, e_seqs, p_seqs = load_prism_data(split)
+    ds = PRISMDataset(pairs_df, e_seqs, p_seqs)
+    dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0, collate_fn=lambda b: collate_fn(b, cfg))
+    sums: Dict[str, torch.Tensor] = {}
+    counts: Dict[str, int] = {}
+    with torch.no_grad():
+        for enh_ids, prom_ids, cells, labels in dl:
+            enh_ids = enh_ids.to(cfg.device)
+            feats = extractor(enh_ids)
+            fp = footprint.forward_vector(feats)
+            for i, c in enumerate(cells):
+                v = fp[i].detach()
+                if c not in sums:
+                    sums[c] = torch.zeros_like(v)
+                    counts[c] = 0
+                sums[c] = sums[c] + v
+                counts[c] += 1
+    means = {c: (sums[c] / max(counts[c], 1)).to(cfg.device) for c in sums}
+    return means
+
+
+def solve_map(means: Dict[str, torch.Tensor], centers: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, List[str]]:
+    names = sorted(set(means.keys()) & set(centers.keys()))
+    if not names:
+        return torch.eye(next(iter(means.values())).numel(), device=next(iter(means.values())).device), []
+    M = torch.stack([means[n] for n in names], dim=0)
+    K = torch.stack([centers[n].to(M.device) for n in names], dim=0)
+    pinv = torch.linalg.pinv(M)
+    A = pinv @ K
+    return A, names
+
+
 def evaluate(cfg: TestConfig) -> Dict[str, float]:
     pairs_df, e_seqs, p_seqs = load_prism_data("val")
     ds = PRISMDataset(pairs_df, e_seqs, p_seqs)
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, num_workers=0, collate_fn=lambda b: collate_fn(b, cfg))
 
     kb = load_kb(cfg.kb_path)
-    com_names, com_centers = centers_to_tensor(kb["com_centers"], cfg.device)
+    com_names_all, com_centers_all = centers_to_tensor(kb["com_centers"], cfg.device)
+    spec_names_all, spec_centers_all = centers_to_tensor(kb["spec_centers"], cfg.device)
 
     extractor = EnhancerExtractor(cfg).to(cfg.device)
     footprint = LCWnetFootprint(d_model=cfg.out_channels).to(cfg.device)
     extractor.eval()
     footprint.eval()
 
+    train_means = compute_cell_means("train", cfg, extractor, footprint)
+    A_com, common_com = solve_map(train_means, kb["com_centers"])  
+    if common_com:
+        idxs = [com_names_all.index(n) for n in common_com]
+        com_centers = com_centers_all[idxs]
+        com_names = common_com
+    else:
+        com_centers = com_centers_all
+        com_names = com_names_all
+    B_spec, common_spec = solve_map(train_means, kb["spec_centers"])  
+    if common_spec:
+        idxs_s = [spec_names_all.index(n) for n in common_spec]
+        spec_centers = spec_centers_all[idxs_s]
+        spec_names = common_spec
+    else:
+        spec_centers = spec_centers_all
+        spec_names = spec_names_all
+
     total = 0
     correct = 0
+    total_s = 0
+    correct_s = 0
     all_fp = []
     all_cell = []
 
@@ -116,14 +170,20 @@ def evaluate(cfg: TestConfig) -> Dict[str, float]:
             enh_ids = enh_ids.to(cfg.device)
             feats = extractor(enh_ids)
             fp = footprint.forward_vector(feats)
-            preds = classify(fp, com_names, com_centers)
+            fp_com = fp @ A_com
+            preds = classify(fp_com, com_names, com_centers)
+            fp_spec = fp @ B_spec
+            preds_s = classify(fp_spec, spec_names, spec_centers)
 
             total += len(cells)
             correct += sum(1 for p, g in zip(preds, cells) if p == g)
+            total_s += len(cells)
+            correct_s += sum(1 for p, g in zip(preds_s, cells) if p == g)
             all_fp.append(fp.cpu())
             all_cell.extend(cells)
 
     acc = correct / max(total, 1)
+    acc_s = correct_s / max(total_s, 1)
 
     try:
         import matplotlib.pyplot as plt
@@ -149,10 +209,11 @@ def evaluate(cfg: TestConfig) -> Dict[str, float]:
     except Exception:
         pass
 
-    return {"accuracy": acc}
+    return {"accuracy_com": acc, "accuracy_spec": acc_s}
 
 
 if __name__ == "__main__":
     cfg = TestConfig()
     res = evaluate(cfg)
-    print(f"Accuracy: {res['accuracy']:.4f}")
+    print(f"Com Accuracy: {res['accuracy_com']:.4f}")
+    print(f"Spec Accuracy: {res['accuracy_spec']:.4f}")
