@@ -14,7 +14,7 @@ DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目�
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
-PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/prism")
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/251202")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
-PRISM_BATCH_SIZE = 72
+PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 3  # 每隔多少个epoch进行一次验证
