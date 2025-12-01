@@ -307,6 +307,9 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
     if os.path.exists(full_path):
         state = torch.load(full_path, map_location=device)
         if isinstance(state, dict):
+            state_epoch = int(state.get('epoch', latest_epoch) or latest_epoch)
+            latest_epoch = max(latest_epoch, state_epoch)
+            logger.info(f"加载完整状态: {full_path} (epoch={state_epoch})")
             if 'model_state' in state:
                 model.load_state_dict(state['model_state'], strict=False)
             if cell_expert is not None and 'cell_expert_state' in state:
@@ -316,12 +319,22 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                     pass
             if 'optimizer_state' in state:
                 try:
-                    optimizer.load_state_dict(state['optimizer_state'])
+                    saved_opt = state['optimizer_state']
+                    saved_groups = len(saved_opt.get('param_groups', []))
+                    curr_groups = len(optimizer.state_dict().get('param_groups', []))
+                    saved_mode = bool(state.get('train_expert_only', False))
+                    if saved_groups == curr_groups and saved_mode == TRAIN_EXPERT_ONLY:
+                        optimizer.load_state_dict(saved_opt)
+                        logger.info("优化器状态已恢复")
+                    else:
+                        logger.info("优化器状态未加载：参数组或训练模式不匹配")
                 except Exception:
                     pass
             if 'scheduler_state' in state:
                 try:
-                    scheduler.load_state_dict(state['scheduler_state'])
+                    if scheduler is not None:
+                        scheduler.load_state_dict(state['scheduler_state'])
+                        logger.info("调度器状态已恢复")
                 except Exception:
                     pass
             if 'ema_mu_com' in state:
@@ -341,6 +354,7 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                         cell_expert.load_state_dict(sd['cell_expert'], strict=False)
                     except Exception:
                         pass
+            logger.info(f"加载模型检查点: {model_path} (epoch={latest_epoch})")
         if os.path.exists(kb_path):
             kb = torch.load(kb_path, map_location='cpu')
     return latest_epoch, kb, ema_mu
@@ -549,6 +563,10 @@ def main():
     start_epoch, _kb, _ema_mu = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler, cell_expert)
     if start_epoch > 0:
         logger.info(f"从最近权重恢复: epoch {start_epoch}")
+    else:
+        logger.info("未发现可恢复检查点，将从头开始训练")
+    if start_epoch >= EPOCH:
+        logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
         if TRAIN_EXPERT_ONLY:
