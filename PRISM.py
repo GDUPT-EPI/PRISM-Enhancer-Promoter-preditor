@@ -526,7 +526,12 @@ def main():
 
     start_epoch = 0
 
-    optimizer = torch.optim.AdamW(list(model.parameters()) + list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    if TRAIN_EXPERT_ONLY:
+        for p in model.parameters():
+            p.requires_grad = False
+        optimizer = torch.optim.AdamW(list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    else:
+        optimizer = torch.optim.AdamW(list(model.parameters()) + list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     total_steps = len(train_loader) * EPOCH
     scheduler = None
     
@@ -546,7 +551,10 @@ def main():
         logger.info(f"从最近权重恢复: epoch {start_epoch}")
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
-        logger.info("Loss Weights: cell=0.35, ep=0.65")
+        if TRAIN_EXPERT_ONLY:
+            logger.info("Expert-only training: optimizing CellClassificationExpert only")
+        else:
+            logger.info("Loss Weights: cell=0.35, ep=0.65")
         model.train(); cell_expert.train()
         total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
@@ -565,15 +573,19 @@ def main():
             with torch.no_grad():
                 cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
 
-            ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_logits)
-            ep_outputs = ep_outputs.squeeze(-1)
-            ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
-            with torch.no_grad():
-                ep_preds = (ep_outputs >= 0.5).long()
-                ep_acc = (ep_preds == labels.long()).float().mean().item()
-
-            loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
-            optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
+            if TRAIN_EXPERT_ONLY:
+                loss = cell_loss
+                optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
+                ep_acc = 0.0
+            else:
+                ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_logits)
+                ep_outputs = ep_outputs.squeeze(-1)
+                ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
+                with torch.no_grad():
+                    ep_preds = (ep_outputs >= 0.5).long()
+                    ep_acc = (ep_preds == labels.long()).float().mean().item()
+                loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
+                optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
 
             total_loss += loss.item(); total_cell_acc += cell_acc; total_ep_acc += ep_acc; n_batches += 1
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'cell_acc': f'{cell_acc:.4f}', 'ep_acc': f'{ep_acc:.4f}'})
@@ -593,6 +605,7 @@ def main():
             'cell_expert_state': cell_expert.state_dict(),
             'optimizer_state': optimizer.state_dict(),
             'epoch': epoch_idx + 1,
+            'train_expert_only': TRAIN_EXPERT_ONLY,
         }
         if scheduler is not None:
             full_state['scheduler_state'] = scheduler.state_dict()
