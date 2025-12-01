@@ -21,6 +21,7 @@ import os
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 import re
+import xml.etree.ElementTree as ET
 
 
 # 预训练投影配置类 - 定义高维投影任务的超参数
@@ -451,7 +452,28 @@ def main():
     
     # 创建模型
     logger.info("创建PRISM模型...")
-    num_cells = len(unique_cells_train)
+    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
+    def load_cell_types(path: str):
+        if os.path.exists(path):
+            try:
+                root = ET.parse(path).getroot()
+                names = []
+                for node in root.findall(".//type"):
+                    name = node.get("name")
+                    if name:
+                        names.append(name.strip())
+                names = [n for n in names if n]
+                if names:
+                    return names
+            except Exception:
+                pass
+        return []
+    fixed_cells = load_cell_types(xml_path)
+    if not fixed_cells:
+        fixed_cells = unique_cells_train
+    label_map = {c: i for i, c in enumerate(fixed_cells)}
+    other_id = label_map.get("OTHER", None)
+    num_cells = len(fixed_cells)
     cell_expert = CellClassificationExpert(num_classes=num_cells).to(device)
     model = PRISMBackbone(num_classes=num_cells).to(device)
     model = model.to(device)
@@ -465,7 +487,7 @@ def main():
     logger.info(f"模型在GPU上: {next(model.parameters()).is_cuda}")
     
     # 创建优化器和调度器
-    cell_label_map = {c: i for i, c in enumerate(unique_cells_train)}
+    cell_label_map = label_map
 
     start_epoch = 0
 
@@ -496,7 +518,7 @@ def main():
             enh_ids = apply_random_mask(enh_ids)
             pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)
-            cell_targets = torch.tensor([cell_label_map[c] for c in cell_lines], device=device, dtype=torch.long)
+            cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
 
             cell_logits = cell_expert(enh_ids, pr_ids)
             if cell_logits.dim() == 3 and cell_logits.size(1) == 1:

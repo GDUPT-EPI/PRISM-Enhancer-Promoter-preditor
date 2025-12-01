@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
-PRISM_BATCH_SIZE = 96
+PRISM_BATCH_SIZE = 72
 EPOCH = 20
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 3  # 每隔多少个epoch进行一次验证
@@ -38,11 +38,11 @@ NUMBER_WORDS = 4097
 NUMBER_POS = 70
 EMBEDDING_DIM = 768
 CNN_KERNEL_SIZE = 128
-POOL_KERNEL_SIZE = 20
+POOL_KERNEL_SIZE = 40
 OUT_CHANNELS = 96
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 8  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_LAYERS = 12  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 256  # 前馈网络维度
 
