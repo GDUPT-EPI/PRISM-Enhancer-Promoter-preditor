@@ -20,6 +20,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
+import re
 
 
 # 预训练投影配置类 - 定义高维投影任务的超参数
@@ -259,6 +260,54 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
     avg_spec_acc = total_spec_acc / num_batches
     return avg_loss, avg_accuracy, avg_spec_acc
 
+def _find_latest_epoch(save_dir: str) -> int:
+    if not os.path.exists(save_dir):
+        return 0
+    epochs = []
+    for name in os.listdir(save_dir):
+        m1 = re.match(r"prism_epoch_(\d+)\.pth$", name)
+        m2 = re.match(r"prism_full_epoch_(\d+)\.pt$", name)
+        if m1:
+            epochs.append(int(m1.group(1)))
+        elif m2:
+            epochs.append(int(m2.group(1)))
+    return max(epochs) if epochs else 0
+
+def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):
+    latest_epoch = _find_latest_epoch(save_dir)
+    if latest_epoch <= 0:
+        return 0, {}, torch.zeros(OUT_CHANNELS, device=device)
+    full_path = os.path.join(save_dir, f"prism_full_epoch_{latest_epoch}.pt")
+    kb_path = os.path.join(save_dir, f"footprint_kb_epoch_{latest_epoch}.pt")
+    model_path = os.path.join(save_dir, f"prism_epoch_{latest_epoch}.pth")
+    ema_mu = torch.zeros(OUT_CHANNELS, device=device)
+    kb = {}
+    if os.path.exists(full_path):
+        state = torch.load(full_path, map_location=device)
+        if isinstance(state, dict):
+            if 'model_state' in state:
+                model.load_state_dict(state['model_state'])
+            if 'optimizer_state' in state:
+                try:
+                    optimizer.load_state_dict(state['optimizer_state'])
+                except Exception:
+                    pass
+            if 'scheduler_state' in state:
+                try:
+                    scheduler.load_state_dict(state['scheduler_state'])
+                except Exception:
+                    pass
+            if 'ema_mu_com' in state:
+                ema_vals = state['ema_mu_com']
+                ema_mu = ema_vals.to(device) if isinstance(ema_vals, torch.Tensor) else torch.tensor(ema_vals, device=device)
+            kb = state.get('kb', {}) or {}
+    else:
+        if os.path.exists(model_path):
+            model.load_state_dict(torch.load(model_path, map_location=device))
+        if os.path.exists(kb_path):
+            kb = torch.load(kb_path, map_location='cpu')
+    return latest_epoch, kb, ema_mu
+
 
 def validate(model, dataloader, cell_name="", cell_label_map=None, loss_weights=None):
     """验证函数"""
@@ -469,8 +518,13 @@ def main():
     logger.info("开始训练")
     logger.info("=" * 80)
     
-    kb = {}
-    for epoch_idx in range(EPOCH):
+    start_epoch, kb, ema_loaded = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)
+    if isinstance(ema_loaded, torch.Tensor) and ema_loaded.numel() == ema_mu_com.numel():
+        ema_mu_com.copy_(ema_loaded)
+    if start_epoch > 0:
+        logger.info(f"从检查点恢复: {start_epoch}")
+    kb = kb if isinstance(kb, dict) else {}
+    for epoch_idx in range(start_epoch, EPOCH):
         # 训练
         loss_weights = {'w_cell': 6.0, 'w_mlm': 0.01, 'tau': 0.045}
         logger.info(f"Loss Weights: w_cell={loss_weights['w_cell']:.2f}, w_mlm={loss_weights['w_mlm']:.2f}, tau={loss_weights['tau']:.2f}")
@@ -505,6 +559,20 @@ def main():
             logger.info(f"保存知识库: {kb_path}")
         except Exception as e:
             logger.error(f"保存知识库失败: {e}")
+        full_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")
+        full_state = {
+            'epoch': epoch_idx + 1,
+            'model_state': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict(),
+            'ema_mu_com': ema_mu_com.detach().cpu(),
+            'kb': kb,
+        }
+        try:
+            torch.save(full_state, full_path)
+            logger.info(f"保存完整检查点: {full_path}")
+        except Exception as e:
+            logger.error(f"保存完整检查点失败: {e}")
         
         # 验证
         if epoch_idx % VALIDATION_INTERVAL == 0 or epoch_idx == EPOCH - 1:
