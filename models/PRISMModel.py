@@ -12,6 +12,7 @@ from models.pleat.RoPE import RoPEConfig
 from models.layers.footprint import FootprintConfig, FootprintExpert
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
+from models.layers.masking import SegmentMaskBuilder, compute_mlm_loss
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.layers.footprint import FootprintExpert
 from models.EPIModel import CBATTransformerEncoderLayer
@@ -392,59 +393,9 @@ class PRISMModel(nn.Module):
         return mlm_logits, enhancer_final, promoter_final, seq_length_mapping, fused_footprint  # 返回MLM预测、最终特征和融合footprint
     
     def compute_mlm_loss(self, mlm_logits, original_ids, mask_positions, seq_length_mapping=None):
-        """
-        计算MLM损失 - Masked Language Model损失计算
-        
-        Args:
-            mlm_logits: [B, L_cnn, vocab_size] 模型预测 (CNN后的序列长度)
-            original_ids: [B, L_orig] 原始token IDs
-            mask_positions: [B, L_orig] bool tensor, True表示该位置被mask
-            seq_length_mapping: 序列长度映射信息
-            
-        Returns:
-            loss: MLM损失
-            accuracy: 预测准确率
-        """
-        B, L_cnn, V = mlm_logits.shape  # B=batch, L_cnn=CNN后序列长度, V=词汇表大小
-        L_orig = original_ids.size(1)  # L_orig=原始序列长度
-        
-        if L_cnn != L_orig:
-            K = CNN_KERNEL_SIZE  # CNN卷积核大小
-            P = POOL_KERNEL_SIZE  # 池化核大小
-            mask_positions_cnn = torch.zeros(B, L_cnn, dtype=torch.bool, device=mask_positions.device)  # CNN长度下的mask位置
-            original_ids_cnn = torch.zeros(B, L_cnn, dtype=torch.long, device=original_ids.device)  # CNN长度下的原始ID
-            for j in range(L_cnn):
-                start = j * P  # 池化起始位置
-                end = min(start + P + K - 2, L_orig - 1)  # 池化结束位置
-                region_mask = mask_positions[:, start:end+1].any(dim=-1)  # 区域内是否有mask
-                center = start + (end - start) // 2  # 区域中心位置
-                original_ids_cnn[:, j] = original_ids[:, center]  # 使用中心位置的原始ID
-                mask_positions_cnn[:, j] = region_mask  # 区域内有mask则标记
-            mask_positions = mask_positions_cnn
-            original_ids = original_ids_cnn
-        
-        # 展平
-        mlm_logits_flat = mlm_logits.view(-1, V)  # [B*L_cnn, V] - 展平预测logits
-        original_ids_flat = original_ids.view(-1)  # [B*L_cnn] - 展平真实标签
-        mask_positions_flat = mask_positions.view(-1)  # [B*L_cnn] - 展平mask位置
-        
-        # 选择masked位置
-        masked_logits = mlm_logits_flat[mask_positions_flat]  # [N_masked, V] - 只取被mask位置的预测
-        masked_labels = original_ids_flat[mask_positions_flat]  # [N_masked] - 只取被mask位置的真实标签
-        
-        # 计算损失
-        if masked_logits.size(0) == 0:
-            # 没有masked token
-            return torch.tensor(0.0, device=mlm_logits.device, requires_grad=True), 0.0  # 返回零损失和零准确率
-        
-        loss = F.cross_entropy(masked_logits, masked_labels, label_smoothing=0.1)
-        
-        # 计算准确率
-        with torch.no_grad():
-            predictions = masked_logits.argmax(dim=-1)  # 获取预测类别
-            accuracy = (predictions == masked_labels).float().mean().item()  # 准确率计算
-        
-        return loss, accuracy  # 返回损失值和准确率
+        return compute_mlm_loss(mlm_logits, original_ids, mask_positions,
+                                cnn_kernel_size=CNN_KERNEL_SIZE,
+                                pool_kernel_size=POOL_KERNEL_SIZE)
 
 
 def create_mlm_mask(token_ids, mask_prob=0.15, mask_token_id=4096, 
@@ -511,26 +462,13 @@ class PRISMBackbone(nn.Module):
     def __init__(self, num_classes: int = None):
         super().__init__()
         self.num_transformer_layers = TRANSFORMER_LAYERS
-        self.embedding_en = create_dna_embedding_layer(
+        self.embedding = create_dna_embedding_layer(
             vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
             embed_dim=DNA_EMBEDDING_DIM,
             padding_idx=DNA_EMBEDDING_PADDING_IDX,
             init_std=DNA_EMBEDDING_INIT_STD
         )
-        self.embedding_pr = create_dna_embedding_layer(
-            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-            embed_dim=DNA_EMBEDDING_DIM,
-            padding_idx=DNA_EMBEDDING_PADDING_IDX,
-            init_std=DNA_EMBEDDING_INIT_STD
-        )
-        self.enhancer_sequential = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(OUT_CHANNELS),
-            nn.Dropout(p=CNN_DROPOUT)
-        )
-        self.promoter_sequential = nn.Sequential(
+        self.sequential = nn.Sequential(
             nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
@@ -539,45 +477,15 @@ class PRISMBackbone(nn.Module):
         )
         TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
         img_size = PRISM_IMG_SIZE
-        self.enhancer_transformer_layers = nn.ModuleList([
+        self.transformer_layers = nn.ModuleList([
             CBATTransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
                 dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
                 img_size=img_size
             ) for _ in range(self.num_transformer_layers)
         ])
-        self.promoter_transformer_layers = nn.ModuleList([
-            CBATTransformerEncoderLayer(
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
-                img_size=img_size
-            ) for _ in range(self.num_transformer_layers)
-        ])
-        self.pre_enhancer_self_attn = RoPEAttention(
+        self.pre_self_attn = RoPEAttention(
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
-        )
-        self.pre_promoter_self_attn = RoPEAttention(
-            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
-        )
-        self.cross_attention_1 = nn.MultiheadAttention(
-            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )
-        self.cross_attention_2 = nn.MultiheadAttention(
-            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )
-        self.post_enhancer_cbat = CBAT(
-            d_model=OUT_CHANNELS,
-            num_heads=TRANSFORMER_HEADS,
-            img_size=img_size,
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-            dropout=TRANSFORMER_DROPOUT
-        )
-        self.post_promoter_cbat = CBAT(
-            d_model=OUT_CHANNELS,
-            num_heads=TRANSFORMER_HEADS,
-            img_size=img_size,
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-            dropout=TRANSFORMER_DROPOUT
         )
         self.attn_pool_en = AttnPool1d(OUT_CHANNELS)
         self.attn_pool_pr = AttnPool1d(OUT_CHANNELS)
@@ -599,6 +507,13 @@ class PRISMBackbone(nn.Module):
             lr=LEARNING_RATE,
             weight_decay=WEIGHT_DECAY
         )
+        self.mask_builder = SegmentMaskBuilder(
+            kernel_size=CNN_KERNEL_SIZE,
+            pool_size=POOL_KERNEL_SIZE,
+            pad_id=DNA_EMBEDDING_PADDING_IDX,
+            cls_id=BERT_CLS_TOKEN_ID,
+            sep_id=BERT_SEP_TOKEN_ID,
+        )
 
     def forward(self, enhancer_ids, promoter_ids, cell_logits=None):
         K = CNN_KERNEL_SIZE
@@ -608,76 +523,29 @@ class PRISMBackbone(nn.Module):
             enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         if promoter_ids.size(1) < min_required_length:
             promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
-        enhancer_embedding = self.embedding_en(enhancer_ids)
-        promoter_embedding = self.embedding_pr(promoter_ids)
-        enhancers_output = self.enhancer_sequential(enhancer_embedding.permute(0, 2, 1))
-        promoters_output = self.promoter_sequential(promoter_embedding.permute(0, 2, 1))
-        enhancers_output = enhancers_output.permute(2, 0, 1)
-        promoters_output = promoters_output.permute(2, 0, 1)
-        enhancers_output = self.pre_enhancer_self_attn(enhancers_output.permute(1, 0, 2))
-        promoters_output = self.pre_promoter_self_attn(promoters_output.permute(1, 0, 2))
-        enhancers_output = enhancers_output.permute(1, 0, 2)
-        promoters_output = promoters_output.permute(1, 0, 2)
+        concat_ids, meta = self.mask_builder.concat_with_specials(enhancer_ids, promoter_ids)
+        embedding = self.embedding(concat_ids)
+        seq_features = self.sequential(embedding.permute(0, 2, 1))
+        seq_features = seq_features.permute(2, 0, 1)
+        L_pool = seq_features.size(0)
+        attn_mask = self.mask_builder.build_segment_attention_mask(meta, pooled_len=L_pool)
+        seq_features = self.pre_self_attn(seq_features.permute(1, 0, 2), attention_mask=attn_mask)
+        seq_features = seq_features.permute(1, 0, 2)
         total_adaptive_loss = 0.0
-        for layer in self.enhancer_transformer_layers:
-            enhancers_output, layer_loss = layer(enhancers_output)
+        for layer in self.transformer_layers:
+            seq_features, layer_loss = layer(seq_features, src_mask=attn_mask)
             total_adaptive_loss += layer_loss
-        for layer in self.promoter_transformer_layers:
-            promoters_output, layer_loss = layer(promoters_output)
-            total_adaptive_loss += layer_loss
-        promoter_pad_orig = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
-        cnn_seq_length_pr = promoters_output.size(0)
-        promoter_key_padding_mask = torch.zeros(promoter_ids.size(0), cnn_seq_length_pr, dtype=torch.bool, device=promoter_ids.device)
-        for j in range(cnn_seq_length_pr):
-            start = j * P
-            end = min(start + P + K - 2, promoter_ids.size(1) - 1)
-            region_all_pad = promoter_pad_orig[:, start:end+1].all(dim=-1)
-            promoter_key_padding_mask[:, j] = region_all_pad
-        valid_ratio_en = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
-        valid_ratio_pr = (promoter_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
-        scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
-        x0 = enhancers_output
-        att1, _ = self.cross_attention_1(
-            x0, promoters_output, promoters_output,
-            key_padding_mask=promoter_key_padding_mask
-        )
-        x1 = x0 + scale * att1
-        att2, _ = self.cross_attention_2(
-            x1, promoters_output, promoters_output,
-            key_padding_mask=promoter_key_padding_mask
-        )
-        enhancers_final = x1 + scale * att2
-        enhancers_final_transposed = enhancers_final.permute(1, 0, 2)
-        promoters_output_transposed = promoters_output.permute(1, 0, 2)
-        enhancers_final_cbat, loss_e = self.post_enhancer_cbat(enhancers_final_transposed, return_loss=True)
-        promoters_final_cbat, loss_p = self.post_promoter_cbat(promoters_output_transposed, return_loss=True)
-        total_adaptive_loss += loss_e
-        total_adaptive_loss += loss_p
-        enhancers_final = enhancers_final_cbat.permute(1, 0, 2)
-        promoters_final = promoters_final_cbat.permute(1, 0, 2)
-        enh_len = enhancers_final.size(0)
-        pr_len = promoters_final.size(0)
-        enh_pad_orig = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
-        pr_pad_orig = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
-        enh_mask = torch.zeros(enhancer_ids.size(0), enh_len, dtype=torch.bool, device=enhancer_ids.device)
-        pr_mask = torch.zeros(promoter_ids.size(0), pr_len, dtype=torch.bool, device=promoter_ids.device)
-        for j in range(enh_len):
-            s = j * P
-            e = min(s + P + K - 2, enhancer_ids.size(1) - 1)
-            enh_mask[:, j] = enh_pad_orig[:, s:e+1].all(dim=-1)
-        for j in range(pr_len):
-            s = j * P
-            e = min(s + P + K - 2, promoter_ids.size(1) - 1)
-            pr_mask[:, j] = pr_pad_orig[:, s:e+1].all(dim=-1)
-        enh_feat_attn = enhancers_final.permute(1, 0, 2)
-        pr_feat_attn = promoters_final.permute(1, 0, 2)
-        enhancers_pooled = self.attn_pool_en(enh_feat_attn, enh_mask)
-        promoters_pooled = self.attn_pool_pr(pr_feat_attn, pr_mask)
-        combined = torch.cat([enhancers_pooled, promoters_pooled], dim=1)
+        L_pool = seq_features.size(0)
+        enh_mask, pr_mask = self.mask_builder.build_pooled_segment_masks(meta, pooled_len=L_pool)
+        feats_for_pool = seq_features.permute(1, 0, 2)
+        enh_vec = self.attn_pool_en(feats_for_pool, enh_mask)
+        pr_vec = self.attn_pool_pr(feats_for_pool, pr_mask)
+        combined = torch.cat([enh_vec, pr_vec], dim=1)
+        combined = F.layer_norm(combined, combined.shape[-1:])
         if cell_logits is not None:
             cell_probs = F.softmax(cell_logits, dim=-1)
             inj = self.cell_inject_proj(cell_probs)
-            combined = combined + self.cell_alpha * inj
+            combined = combined + self.cell_alpha * F.layer_norm(inj, inj.shape[-1:])
         result = self.classifier(combined)
         return torch.sigmoid(result), total_adaptive_loss
 

@@ -12,6 +12,7 @@ from datetime import datetime
 from torch.utils.data import DataLoader
 from models.pleat.optimized_pre import create_optimized_dataset
 from models.PRISMModel import PRISMBackbone, CellClassificationExpert
+from models.layers.masking import create_mlm_mask
 from models.layers.footprint import LCWnetFootprint, FootprintConfig
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
@@ -151,12 +152,12 @@ def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_m
         # 创建MLM mask - BERT风格的掩码预测
         masked_enhancer_ids, mask_positions, original_enhancer_ids = create_mlm_mask(
             enhancer_ids,
-            mask_prob=BERT_MASK_PROB,  # 掩码概率，平衡预测难度与信息保留
+            mask_prob=BERT_MASK_PROB,
             mask_token_id=BERT_MASK_TOKEN_ID,
             vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
             pad_token_id=BERT_PAD_TOKEN_ID,
-            block_mask=True,  # 块级掩码，提高预测难度
-            block_size=KMER_SIZE
+            block_mask=True,
+            block_size=KMER_SIZE,
         )
         
         # 前向传播
@@ -579,8 +580,9 @@ def main():
         for batch in pbar:
             enh_ids, pr_ids, cell_lines, labels = batch
             enh_ids = enh_ids.to(device); pr_ids = pr_ids.to(device)
-            enh_ids = apply_random_mask(enh_ids)
-            pr_ids = apply_random_mask(pr_ids)
+            # 暂停随机PAD掩码，避免训练初期数值不稳
+            # enh_ids = apply_random_mask(enh_ids)
+            # pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)
             cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
 
@@ -603,7 +605,10 @@ def main():
                     ep_preds = (ep_outputs >= 0.5).long()
                     ep_acc = (ep_preds == labels.long()).float().mean().item()
                 loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
-                optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
+                optimizer.zero_grad();
+                loss.backward();
+                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), max_norm=BERT_MAX_GRAD_NORM/2);
+                optimizer.step()
 
             total_loss += loss.item(); total_cell_acc += cell_acc; total_ep_acc += ep_acc; n_batches += 1
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 'cell_acc': f'{cell_acc:.4f}', 'ep_acc': f'{ep_acc:.4f}'})
