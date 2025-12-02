@@ -308,14 +308,15 @@ class PRISMModel(nn.Module):
             # 长度感知缩放：根据有效token比例对注意力输出进行缩放，减轻零填充噪声影响
             valid_ratio_en = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
             valid_ratio_pr = (promoter_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
-            enhancers_attended_1, _ = self.cross_attention_1(
-                enhancers_output, promoters_output, promoters_output,
+            scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
+            x0 = enhancers_output
+            att1, _ = self.cross_attention_1(
+                x0, promoters_output, promoters_output,
                 key_padding_mask=promoter_key_padding_mask
             )  # A_en^CA = CrossAttn(A_en, A_pr, A_pr) - 增强子查询启动子交叉注意力
             
             # 残差连接 1
-            scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
-            enhancers_output = enhancers_output + scale * enhancers_attended_1  # A_en^res = A_en + s*A_en^CA
+            enhancers_output = x0 + scale * att1  # A_en^res = A_en + s*A_en^CA
             
             # -------------------------------------------------------------------
             # Footprint Integration Point 2: Cross-Attn 1 后
@@ -353,9 +354,9 @@ class PRISMModel(nn.Module):
             # 但在PRISM中，我们直接将融合后的footprint注入到当前特征中
             
             # 将 [B, D] 扩展为 [L, B, D] 并加到 enhancer_output
-            fused_footprint_proj = self.footprint_inject_proj(fused_footprint)  # f_proj = MLP(f_fused) - footprint特征投影
-            fused_footprint_expanded = fused_footprint_proj.unsqueeze(0).expand(enhancers_output.size(0), -1, -1)  # [L, B, D] - 复制到序列长度
-            enhancers_output = enhancers_output + self.footprint_alpha * fused_footprint_expanded  # A_en^inj = A_en^res + α*f_proj - footprint注入
+            fused_footprint_proj = self.footprint_inject_proj(fused_footprint)
+            fused_footprint_expanded = fused_footprint_proj.unsqueeze(0).expand(enhancers_output.size(0), -1, -1)
+            enhancers_output = enhancers_output + self.footprint_alpha * fused_footprint_expanded
             
             # -------------------------------------------------------------------
             # Footprint Injection 2: Residual connect to single CBAT before F-KAN
@@ -634,17 +635,18 @@ class PRISMBackbone(nn.Module):
             promoter_key_padding_mask[:, j] = region_all_pad
         valid_ratio_en = (enhancer_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
         valid_ratio_pr = (promoter_ids != DNA_EMBEDDING_PADDING_IDX).float().mean(dim=1).clamp(min=1e-6)
-        enhancers_attended_1, _ = self.cross_attention_1(
-            enhancers_output, promoters_output, promoters_output,
-            key_padding_mask=promoter_key_padding_mask
-        )
         scale = (valid_ratio_en * valid_ratio_pr).view(1, -1, 1)
-        enhancers_output = enhancers_output + scale * enhancers_attended_1
-        enhancers_attended_2, _ = self.cross_attention_2(
-            enhancers_output, promoters_output, promoters_output,
+        x0 = enhancers_output
+        att1, _ = self.cross_attention_1(
+            x0, promoters_output, promoters_output,
             key_padding_mask=promoter_key_padding_mask
         )
-        enhancers_final = enhancers_output + scale * enhancers_attended_2
+        x1 = x0 + scale * att1
+        att2, _ = self.cross_attention_2(
+            x1, promoters_output, promoters_output,
+            key_padding_mask=promoter_key_padding_mask
+        )
+        enhancers_final = x1 + scale * att2
         enhancers_final_transposed = enhancers_final.permute(1, 0, 2)
         promoters_output_transposed = promoters_output.permute(1, 0, 2)
         enhancers_final_cbat, loss_e = self.post_enhancer_cbat(enhancers_final_transposed, return_loss=True)
