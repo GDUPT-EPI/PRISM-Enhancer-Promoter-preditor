@@ -315,6 +315,7 @@ for cell, (enhancers_train, promoters_train, labels_train) in train_data.items()
         collate_fn=simple_collate_fn,
     )
 
+# 确保总是创建 ALL 数据加载器，即使 train_folds 为空
 if len(train_folds) > 0:
     all_train_dataset = ConcatDataset([tf.dataset for tf in train_folds])
     train_loaders["ALL"] = DataLoader(
@@ -325,6 +326,18 @@ if len(train_folds) > 0:
         pin_memory=True,
         prefetch_factor=PREFETCH_FACTOR,
         persistent_workers=PERSISTENT_WORKERS,
+        collate_fn=simple_collate_fn,
+    )
+else:
+    # 如果没有训练数据，创建一个空的数据加载器以避免 KeyError
+    print("警告：没有找到训练数据，创建空的 ALL 数据加载器")
+    empty_dataset = MyDataset(np.array([]), np.array([]), np.array([]))
+    train_loaders["ALL"] = DataLoader(
+        dataset=empty_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=0,  # 没有数据时不需要工作进程
+        pin_memory=False,
         collate_fn=simple_collate_fn,
     )
 # 创建验证数据集
@@ -426,7 +439,10 @@ for i in range(EPOCH):
     
     train_epoch_aupr = average_precision_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
     train_epoch_auc = roc_auc_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
-      
+    
+
+    torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_{cell}_{i+1}.pth"))
+
     if i % VALIDATION_INTERVAL == 0 or i == EPOCH - 1:
         for cell, loader in val_loaders.items():
             val_loss, val_aupr, val_auc = val_forwrd(epimodel, loader, cell)
@@ -436,4 +452,3 @@ for i in range(EPOCH):
                 )
             )
         # 保存模型
-        torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_{cell}_{i+1}.pth"))

@@ -144,6 +144,11 @@ def load_all_val_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
 
 def load_all_train_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     train_data = {}
+    # 首先加载 ALL 数据（如果存在）
+    if (DATA_DIR / "train" / "ALL").exists():
+        train_data["ALL"] = prepare_cell_data("ALL", "train")
+    
+    # 然后加载其他细胞系数据
     for cell_line in CELL_LINES:
         if (DATA_DIR / "train" / cell_line).exists():
             train_data[cell_line] = prepare_cell_data(cell_line, "train")
