@@ -35,6 +35,31 @@ class AttnPool1d(nn.Module):
         w = w / norm
         return (x * w.unsqueeze(-1)).sum(dim=1)
 
+class AttnPool1dWindow(nn.Module):
+    def __init__(self, d: int, kernel_size: int, stride: int):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.attn = AttnPool1d(d)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):
+        B, C, L = x.shape
+        step = self.stride
+        win = self.kernel_size
+        if L < win:
+            return x.new_zeros(B, C, 0)
+        L_pool = 1 + (L - win) // step
+        outs = []
+        for j in range(L_pool):
+            start = j * step
+            end = start + win
+            xw = x[:, :, start:end].permute(0, 2, 1)
+            mw = mask[:, start:end]
+            ow = self.attn(xw, mw)
+            outs.append(ow.unsqueeze(-1))
+        if len(outs) == 0:
+            return x.new_zeros(B, C, 0)
+        return torch.cat(outs, dim=-1)
+
 class PRISMModel(nn.Module):
     """
     PRISM预训练模型 - BERT风格的DNA序列预训练
@@ -69,21 +94,16 @@ class PRISMModel(nn.Module):
             init_std=DNA_EMBEDDING_INIT_STD
         )  # 启动子DNA序列嵌入矩阵W_pr ∈ R^(vocab×d_emb)
         
-        # CNN特征提取
-        self.enhancer_sequential = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(OUT_CHANNELS),
-            nn.Dropout(p=CNN_DROPOUT)
-        )  # 增强子CNN特征提取器 - 局部motif检测
-        self.promoter_sequential = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(OUT_CHANNELS),
-            nn.Dropout(p=CNN_DROPOUT)
-        )  # 启动子CNN特征提取器 - 局部motif检测
+        self.enhancer_conv = nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE)
+        self.enhancer_relu = nn.ReLU()
+        self.enhancer_pool = AttnPool1dWindow(OUT_CHANNELS, POOL_KERNEL_SIZE, POOL_KERNEL_SIZE)
+        self.enhancer_bn = nn.BatchNorm1d(OUT_CHANNELS)
+        self.enhancer_dropout = nn.Dropout(p=CNN_DROPOUT)
+        self.promoter_conv = nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE)
+        self.promoter_relu = nn.ReLU()
+        self.promoter_pool = AttnPool1dWindow(OUT_CHANNELS, POOL_KERNEL_SIZE, POOL_KERNEL_SIZE)
+        self.promoter_bn = nn.BatchNorm1d(OUT_CHANNELS)
+        self.promoter_dropout = nn.Dropout(p=CNN_DROPOUT)
         
         # Transformer参数
         TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
@@ -186,7 +206,7 @@ class PRISMModel(nn.Module):
 
         K = CNN_KERNEL_SIZE
         P = POOL_KERNEL_SIZE
-        min_required_length = K + P - 1
+        min_required_length = K + 2 * P - 1
 
         if enhancer_ids.size(1) < min_required_length:
             enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
@@ -197,9 +217,32 @@ class PRISMModel(nn.Module):
         enhancer_embedding = self.embedding_en(enhancer_ids)  # E_en = Embed(en_ids) - 增强子序列嵌入表示
         promoter_embedding = self.embedding_pr(promoter_ids)  # E_pr = Embed(pr_ids) - 启动子序列嵌入表示
         
-        # CNN特征提取
-        enhancers_output = self.enhancer_sequential(enhancer_embedding.permute(0, 2, 1))  # H_en = CNN(E_en) - 增强子CNN特征提取
-        promoters_output = self.promoter_sequential(promoter_embedding.permute(0, 2, 1))  # H_pr = CNN(E_pr) - 启动子CNN特征提取
+        h_en = self.enhancer_conv(enhancer_embedding.permute(0, 2, 1))
+        h_en = self.enhancer_relu(h_en)
+        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
+        L_conv_en = h_en.size(2)
+        conv_mask_en = torch.zeros(enhancer_ids.size(0), L_conv_en, dtype=torch.bool, device=enhancer_ids.device)
+        for t in range(L_conv_en):
+            s = t
+            e = min(t + CNN_KERNEL_SIZE - 1, enhancer_ids.size(1) - 1)
+            conv_mask_en[:, t] = pad_en[:, s:e+1].all(dim=-1)
+        h_en = self.enhancer_pool(h_en, conv_mask_en)
+        h_en = self.enhancer_bn(h_en)
+        h_en = self.enhancer_dropout(h_en)
+        enhancers_output = h_en
+        h_pr = self.promoter_conv(promoter_embedding.permute(0, 2, 1))
+        h_pr = self.promoter_relu(h_pr)
+        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        L_conv_pr = h_pr.size(2)
+        conv_mask_pr = torch.zeros(promoter_ids.size(0), L_conv_pr, dtype=torch.bool, device=promoter_ids.device)
+        for t in range(L_conv_pr):
+            s = t
+            e = min(t + CNN_KERNEL_SIZE - 1, promoter_ids.size(1) - 1)
+            conv_mask_pr[:, t] = pad_pr[:, s:e+1].all(dim=-1)
+        h_pr = self.promoter_pool(h_pr, conv_mask_pr)
+        h_pr = self.promoter_bn(h_pr)
+        h_pr = self.promoter_dropout(h_pr)
+        promoters_output = h_pr
         
         # 记录CNN后的序列长度
         cnn_seq_length = enhancers_output.size(2)  # CNN处理后的增强子序列长度L_cnn
