@@ -42,7 +42,7 @@ def load_pairs_data(pairs_file: Path) -> pd.DataFrame:
     从配对文件中加载增强子-启动子配对数据
     
     Args:
-        pairs_file: 配对文件路径(pairs_hg38.csv)
+        pairs_file: 配对文件路径(pairs_hg19.csv)
         
     Returns:
         包含enhancer_name, promoter_name和label的数据框
@@ -63,7 +63,7 @@ def prepare_cell_data(cell_line: str, data_type: str) -> Tuple[np.ndarray, np.nd
     """
     # 构建文件路径
     cell_dir = DATA_DIR / data_type / cell_line
-    pairs_file = cell_dir / "pairs_hg38.csv"
+    pairs_file = cell_dir / "pairs_hg19.csv"
     e_seq_file = cell_dir / "e_seq.csv"
     p_seq_file = cell_dir / "p_seq.csv"
     
@@ -109,7 +109,7 @@ def get_available_cells() -> List[str]:
     
     if test_dir.exists():
         for item in test_dir.iterdir():
-            if item.is_dir() and (item / "pairs_hg38.csv").exists():
+            if item.is_dir() and (item / "pairs_hg19.csv").exists():
                 available_cells.append(item.name)
     
     return sorted(available_cells)
