@@ -76,18 +76,6 @@ class FusionGate(nn.Module):
         return g * f1 + (1.0 - g) * f2
 
 class PRISMModel(nn.Module):
-    """
-    PRISM预训练模型 - BERT风格的DNA序列预训练
-    
-    架构流程 (与EPIModel对齐):
-    1. DNA Embedding (6-mer tokenization) - 6-mer重叠DNA序列标记化
-    2. CNN特征提取 - 提取局部序列模式和motif
-    3. Pre-CBAT Self-Attention (RoPE) - 位置编码增强的自注意力
-    4. CBAT Transformer Encoder Layers - 基于卷积的注意力Transformer层
-    5. Cross-Attention (Enhancer query Promoter) - 增强子查询启动子
-    6. MLM Head (预测masked tokens) - 掩码语言模型预测头
-    """
-    
     def __init__(self):
         super(PRISMModel, self).__init__()
         

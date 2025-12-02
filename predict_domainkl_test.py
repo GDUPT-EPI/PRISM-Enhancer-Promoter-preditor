@@ -124,7 +124,8 @@ def evaluate():
     f1 = f1_score(all_labels, bin_preds)
     rec = recall_score(all_labels, bin_preds)
     prec = precision_score(all_labels, bin_preds)
-    out_dir = os.path.join(SAVE_MODEL_DIR, "domainkl_test_plots")
+    # 修改输出目录为compete目录
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compete")
     os.makedirs(out_dir, exist_ok=True)
     pr_p, pr_r, _ = precision_recall_curve(all_labels, all_preds)
     plt.figure()
@@ -169,6 +170,11 @@ def evaluate():
 if __name__ == "__main__":
     res = evaluate()
     if res is not None:
+        # 修改输出目录为compete目录
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compete")
+        os.makedirs(out_dir, exist_ok=True)
+        
+        # 打印结果到控制台
         print("domain-kl/test overall")
         print(f"AUPR: {res['aupr']:.4f}")
         print(f"AUC: {res['auc']:.4f}")
@@ -178,3 +184,16 @@ if __name__ == "__main__":
         print(f"Samples: {res['n']}")
         for c, m in res["per_cell"].items():
             print(f"{c}: AUPR={m['aupr']:.4f} AUC={m['auc']:.4f} F1={m['f1']:.4f} Recall={m['recall']:.4f} Precision={m['precision']:.4f} N={m['n']}")
+        
+        # 保存结果到文件
+        with open(os.path.join(out_dir, "results.txt"), "w") as f:
+            f.write("domain-kl/test overall\n")
+            f.write(f"AUPR: {res['aupr']:.4f}\n")
+            f.write(f"AUC: {res['auc']:.4f}\n")
+            f.write(f"F1: {res['f1']:.4f}\n")
+            f.write(f"Recall: {res['recall']:.4f}\n")
+            f.write(f"Precision: {res['precision']:.4f}\n")
+            f.write(f"Samples: {res['n']}\n")
+            f.write("\nPer-cell results:\n")
+            for c, m in res["per_cell"].items():
+                f.write(f"{c}: AUPR={m['aupr']:.4f} AUC={m['auc']:.4f} F1={m['f1']:.4f} Recall={m['recall']:.4f} Precision={m['precision']:.4f} N={m['n']}\n")
