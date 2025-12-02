@@ -38,14 +38,14 @@ PERSISTENT_WORKERS = True  # 避免worker重复创建
 NUMBER_WORDS = 4097
 NUMBER_POS = 70
 EMBEDDING_DIM = 768
-CNN_KERNEL_SIZE = 40
+CNN_KERNEL_SIZE = 128  # 从40修改为128以匹配checkpoint
 POOL_KERNEL_SIZE = 40
 OUT_CHANNELS = 96
 
 # Transformer相关参数 - 集中管理避免冲突
 TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
-TRANSFORMER_FF_DIM = 256  # 前馈网络维度
+TRANSFORMER_FF_DIM = 256  # 前馈网络维度 (从128修改为256以匹配checkpoint)
 
 # CNN和分类头参数 - 集中管理避免冲突
 CNN_DROPOUT = 0.45      # CNN层dropout率
