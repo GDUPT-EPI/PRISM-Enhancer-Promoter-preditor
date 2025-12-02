@@ -38,6 +38,7 @@ from sklearn.manifold import TSNE
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
+import re
 
 # 使用配置文件中的参数
 # BATCH_SIZE = 32  # 已在config.py中定义
@@ -255,8 +256,11 @@ def val_forwrd(model, dataloader, cell_name=""):
             test_epoch_loss += loss.item()
             test_epoch_correct += get_num_correct(outputs, labels)
             
-            # 更新进度条显示当前损失
-            val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            # 更新进度条显示当前损失和准确率
+            batch_correct = get_num_correct(outputs, labels)
+            batch_total = labels.numel()
+            batch_acc = batch_correct / batch_total if batch_total > 0 else 0.0
+            val_pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{batch_acc:.3f}'})
                 
     test_epoch_aupr = average_precision_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
     test_epoch_auc = roc_auc_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
@@ -382,8 +386,58 @@ for cell, (enhancers_val, promoters_val, labels_val) in val_data.items():
 
 
 
+def _find_latest_epoch(save_dir: str) -> int:
+    if not os.path.exists(save_dir):
+        return 0
+    epochs = []
+    for name in os.listdir(save_dir):
+        m1 = re.match(r"epimodel_epoch_(\d+)\.pth$", name)
+        m2 = re.match(r"epimodel_full_epoch_(\d+)\.pt$", name)
+        if m1:
+            epochs.append(int(m1.group(1)))
+        elif m2:
+            epochs.append(int(m2.group(1)))
+    return max(epochs) if epochs else 0
+
+def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: MultiStepLR):
+    latest_epoch = _find_latest_epoch(save_dir)
+    if latest_epoch <= 0:
+        return 0
+    full_path = os.path.join(save_dir, f"epimodel_full_epoch_{latest_epoch}.pt")
+    model_path = os.path.join(save_dir, f"epimodel_epoch_{latest_epoch}.pth")
+    if os.path.exists(full_path):
+        state = torch.load(full_path, map_location=device)
+        if isinstance(state, dict):
+            state_epoch = int(state.get('epoch', latest_epoch) or latest_epoch)
+            latest_epoch = max(latest_epoch, state_epoch)
+            if 'model_state' in state:
+                model.load_state_dict(state['model_state'], strict=False)
+            if 'optimizer_state' in state:
+                try:
+                    saved_opt = state['optimizer_state']
+                    saved_groups = len(saved_opt.get('param_groups', []))
+                    curr_groups = len(optimizer.state_dict().get('param_groups', []))
+                    if saved_groups == curr_groups:
+                        optimizer.load_state_dict(saved_opt)
+                except Exception:
+                    pass
+            if 'scheduler_state' in state:
+                try:
+                    if scheduler is not None:
+                        scheduler.load_state_dict(state['scheduler_state'])
+                except Exception:
+                    pass
+    else:
+        if os.path.exists(model_path):
+            sd = torch.load(model_path, map_location=device)
+            if isinstance(sd, dict):
+                model.load_state_dict(sd, strict=False)
+    return latest_epoch
 # 开始训练循环
-for i in range(EPOCH):
+start_epoch = _load_resume_state(SAVE_MODEL_DIR, device, epimodel, optimizer, scheduler)
+if start_epoch > 0:
+    logger.info("resume from epoch: {}".format(start_epoch))
+for i in range(start_epoch, EPOCH):
     epimodel.train()
     train_epoch_loss = 0.0
     train_epoch_correct = 0
@@ -423,6 +477,11 @@ for i in range(EPOCH):
         
         train_epoch_loss += loss.item()
         train_epoch_correct += get_num_correct(outputs, labels)
+        
+        # 计算当前批次的准确率
+        batch_correct = get_num_correct(outputs, labels)
+        batch_total = labels.numel()
+        batch_acc = batch_correct / batch_total if batch_total > 0 else 0.0
 
         loss.backward()
         
@@ -431,27 +490,32 @@ for i in range(EPOCH):
         epimodel.optimizer.step()
         epimodel.optimizer.zero_grad()
         
-        # 更新进度条显示当前损失详情
+        # 更新进度条显示当前损失详情，显示准确率而非alpha值
         train_pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'immax': f'{loss_details["immax_loss"]:.4f}',
             'adaptive': f'{loss_details["adaptive_loss"]:.4f}',
-            'alpha': f'{loss_details["alpha"]:.3f}'
+            'acc': f'{batch_acc:.3f}'
         })
         
     scheduler.step()
     logger.info("learning_rate: {}".format(scheduler.get_last_lr()))
     
-    # 记录当前epoch的损失详情和α值
-    current_alpha = epimodel.get_loss_alpha()
+    # 记录当前epoch的损失详情和准确率
     train_acc = train_epoch_correct / max(1, train_epoch_target.numel())
-    logger.info("Epoch {}: 训练完成，当前α值为: {:.4f}, train_acc: {:.4f}".format(i + 1, current_alpha, train_acc))
+    logger.info("Epoch {}: 训练完成，train_acc: {:.4f}".format(i + 1, train_acc))
     
     train_epoch_aupr = average_precision_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
     train_epoch_auc = roc_auc_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
     
 
-    torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_{cell}_{i+1}.pth"))
+    torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_epoch_{i+1}.pth"))
+    torch.save({
+        'epoch': i + 1,
+        'model_state': epimodel.state_dict(),
+        'optimizer_state': epimodel.optimizer.state_dict(),
+        'scheduler_state': scheduler.state_dict(),
+    }, os.path.join(SAVE_MODEL_DIR, f"epimodel_full_epoch_{i+1}.pt"))
 
     if i % VALIDATION_INTERVAL == 0 or i == EPOCH - 1:
         for cell, loader in val_loaders.items():
