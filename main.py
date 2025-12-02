@@ -286,8 +286,16 @@ def val_forwrd(model, dataloader, cell_name=""):
             batch_acc = batch_correct / batch_total if batch_total > 0 else 0.0
             val_pbar.set_postfix({'loss': f'{loss.item():.4f}', 'acc': f'{batch_acc:.3f}'})
                 
-    test_epoch_aupr = average_precision_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
-    test_epoch_auc = roc_auc_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
+    y_true = test_epoch_target.detach().cpu().numpy().reshape(-1)
+    y_score = test_epoch_preds.detach().cpu().numpy().reshape(-1)
+    try:
+        test_epoch_aupr = average_precision_score(y_true, y_score)
+    except Exception:
+        test_epoch_aupr = float('nan')
+    try:
+        test_epoch_auc = roc_auc_score(y_true, y_score)
+    except Exception:
+        test_epoch_auc = float('nan')
     test_epoch_acc = test_epoch_correct / max(1, test_epoch_target.numel())
     return test_epoch_loss, test_epoch_aupr, test_epoch_auc, test_epoch_acc
 
@@ -555,8 +563,16 @@ for i in range(start_epoch, EPOCH):
     train_acc = train_epoch_correct / max(1, train_epoch_target.numel())
     logger.info("Epoch {}: 训练完成，train_acc: {:.4f}".format(i + 1, train_acc))
     
-    train_epoch_aupr = average_precision_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
-    train_epoch_auc = roc_auc_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
+    y_true = train_epoch_target.detach().cpu().numpy().reshape(-1)
+    y_score = train_epoch_preds.detach().cpu().numpy().reshape(-1)
+    try:
+        train_epoch_aupr = average_precision_score(y_true, y_score)
+    except Exception:
+        train_epoch_aupr = float('nan')
+    try:
+        train_epoch_auc = roc_auc_score(y_true, y_score)
+    except Exception:
+        train_epoch_auc = float('nan')
     
 
     torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_epoch_{i+1}.pth"))
