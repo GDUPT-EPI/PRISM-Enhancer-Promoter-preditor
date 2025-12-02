@@ -14,7 +14,7 @@ DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目�
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
-PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/251202-EP")
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/251202")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
@@ -26,10 +26,8 @@ BATCH_SIZE = 32  # 从8增加到32，提高GPU利用率
 PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4
-VALIDATION_INTERVAL = 3
-TRAIN_EXPERT_ONLY = False
-TRAIN_EP_ONLY = True
-USE_RANDOM_EP_DATALOADER = True
+VALIDATION_INTERVAL = 3  # 每隔多少个epoch进行一次验证
+TRAIN_EXPERT_ONLY = True
 
 # 数据加载器配置
 NUM_WORKERS = 4  # 从16减少到4，降低CPU上下文切换开销
@@ -133,6 +131,6 @@ PRISM_POOLING_TYPE = "mean"  # 池化方式: "mean", "max", "cls"
 PRISM_IMG_SIZE = 16
 PRISM_CELL_LOSS_WEIGHT = 0.35
 PRISM_EP_LOSS_WEIGHT = 0.65
-PRISM_RANDOM_MASK_PROB = 0.05
+PRISM_RANDOM_MASK_PROB = 0.13
 PRISM_RANDOM_MASK_PAD_ID = DNA_EMBEDDING_PADDING_IDX
 PRISM_CLASS_CBATS = 8
