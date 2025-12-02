@@ -22,7 +22,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
-BATCH_SIZE = 128  # 从8增加到32，提高GPU利用率
+BATCH_SIZE = 256  # 从8增加到32，提高GPU利用率
 PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4
@@ -43,9 +43,9 @@ POOL_KERNEL_SIZE = 40
 OUT_CHANNELS = 96
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 8  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
-TRANSFORMER_FF_DIM = 256  # 前馈网络维度
+TRANSFORMER_FF_DIM = 128  # 前馈网络维度
 
 # CNN和分类头参数 - 集中管理避免冲突
 CNN_DROPOUT = 0.45      # CNN层dropout率
