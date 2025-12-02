@@ -263,15 +263,16 @@ class EPIModel(nn.Module):
         )
     
     def forward(self, enhancer_ids, promoter_ids, enhancer_features, promoter_features):
-        min_required_length = 59
+        K = CNN_KERNEL_SIZE
+        P = POOL_KERNEL_SIZE
+        min_required_length = K + P - 1
         
-        # 填充短序列
         if enhancer_ids.size(1) < min_required_length:
             padding_size = min_required_length - enhancer_ids.size(1)
-            enhancer_ids = torch.nn.functional.pad(enhancer_ids, (0, padding_size), value=0)
+            enhancer_ids = torch.nn.functional.pad(enhancer_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
         if promoter_ids.size(1) < min_required_length:
             padding_size = min_required_length - promoter_ids.size(1)
-            promoter_ids = torch.nn.functional.pad(promoter_ids, (0, padding_size), value=0)
+            promoter_ids = torch.nn.functional.pad(promoter_ids, (0, padding_size), value=DNA_EMBEDDING_PADDING_IDX)
         
         # DNA嵌入 - 使用6-mer overlapping tokenization
         enhancer_embedding = self.embedding_en(enhancer_ids)

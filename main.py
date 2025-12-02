@@ -134,50 +134,58 @@ def load_labels(file_path):
 
 
 def simple_collate_fn(batch):
-    """
-    简化的collate函数，因为数据已在Dataset中预处理
-    
-    Args:
-        batch: 包含多个样本的列表，每个样本是一个元组
-              (enhancer_sequence, promoter_sequence, enhancer_features, promoter_features, label)
-              
-    Returns:
-        tuple: 包含五个元素的元组
-            - enhancer_sequences: 填充后的增强子序列张量
-            - promoter_sequences: 填充后的启动子序列张量
-            - enhancer_features: 增强子特征张量
-            - promoter_features: 启动子特征张量
-            - labels: 标签张量
-    """
-    # 分离各个组件
     enhancer_sequences = [item[0] for item in batch]
     promoter_sequences = [item[1] for item in batch]
     enhancer_features = [item[2] for item in batch]
     promoter_features = [item[3] for item in batch]
     labels = [item[4] for item in batch]
-    
-    # 使用pad_sequence填充序列
-    padded_enhancer_sequences = pad_sequence(enhancer_sequences, batch_first=True, padding_value=0)
-    padded_promoter_sequences = pad_sequence(promoter_sequences, batch_first=True, padding_value=0)
-    
-    # 如果填充后长度仍小于最大长度，继续填充
-    if padded_enhancer_sequences.size(1) < MAX_ENHANCER_LENGTH:
-        padding_size = MAX_ENHANCER_LENGTH - padded_enhancer_sequences.size(1)
+
+    K = CNN_KERNEL_SIZE
+    P = POOL_KERNEL_SIZE
+    pad_id = DNA_EMBEDDING_PADDING_IDX
+    min_req = K + P - 1
+
+    max_len_en = max(int(x.size(0)) for x in enhancer_sequences) if enhancer_sequences else min_req
+    max_len_pr = max(int(x.size(0)) for x in promoter_sequences) if promoter_sequences else min_req
+
+    adj_base_en = max(1, max_len_en - (K - 1))
+    adj_base_pr = max(1, max_len_pr - (K - 1))
+    target_len_en = (K - 1) + ((adj_base_en + P - 1) // P) * P
+    target_len_pr = (K - 1) + ((adj_base_pr + P - 1) // P) * P
+    target_len_en = max(min_req, min(target_len_en, MAX_ENHANCER_LENGTH))
+    target_len_pr = max(min_req, min(target_len_pr, MAX_PROMOTER_LENGTH))
+
+    processed_en = []
+    for ids in enhancer_sequences:
+        L = int(ids.size(0))
+        if L > target_len_en:
+            s = (L - target_len_en) // 2
+            ids = ids[s:s + target_len_en]
+        processed_en.append(ids)
+    processed_pr = []
+    for ids in promoter_sequences:
+        L = int(ids.size(0))
+        if L > target_len_pr:
+            s = (L - target_len_pr) // 2
+            ids = ids[s:s + target_len_pr]
+        processed_pr.append(ids)
+
+    padded_enhancer_sequences = pad_sequence(processed_en, batch_first=True, padding_value=pad_id)
+    padded_promoter_sequences = pad_sequence(processed_pr, batch_first=True, padding_value=pad_id)
+
+    if padded_enhancer_sequences.size(1) < target_len_en:
         padded_enhancer_sequences = torch.nn.functional.pad(
-            padded_enhancer_sequences, (0, padding_size), mode='constant', value=0
+            padded_enhancer_sequences, (0, target_len_en - padded_enhancer_sequences.size(1)), value=pad_id
         )
-    
-    if padded_promoter_sequences.size(1) < MAX_PROMOTER_LENGTH:
-        padding_size = MAX_PROMOTER_LENGTH - padded_promoter_sequences.size(1)
+    if padded_promoter_sequences.size(1) < target_len_pr:
         padded_promoter_sequences = torch.nn.functional.pad(
-            padded_promoter_sequences, (0, padding_size), mode='constant', value=0
+            padded_promoter_sequences, (0, target_len_pr - padded_promoter_sequences.size(1)), value=pad_id
         )
-    
-    # 直接堆叠特征张量和标签
+
     padded_enhancer_features = torch.stack(enhancer_features)
     padded_promoter_features = torch.stack(promoter_features)
     labels = torch.tensor(labels, dtype=torch.float)
-    
+
     return padded_enhancer_sequences, padded_promoter_sequences, padded_enhancer_features, padded_promoter_features, labels
 
 
@@ -252,7 +260,8 @@ def val_forwrd(model, dataloader, cell_name=""):
                 
     test_epoch_aupr = average_precision_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
     test_epoch_auc = roc_auc_score(test_epoch_target.cpu().detach().numpy(), test_epoch_preds.cpu().detach().numpy())
-    return test_epoch_loss, test_epoch_aupr, test_epoch_auc
+    test_epoch_acc = test_epoch_correct / max(1, test_epoch_target.numel())
+    return test_epoch_loss, test_epoch_aupr, test_epoch_auc, test_epoch_acc
 
 
 #得到的是序列数据
@@ -435,7 +444,8 @@ for i in range(EPOCH):
     
     # 记录当前epoch的损失详情和α值
     current_alpha = epimodel.get_loss_alpha()
-    logger.info("Epoch {}: 训练完成，当前α值为: {:.4f}".format(i + 1, current_alpha))
+    train_acc = train_epoch_correct / max(1, train_epoch_target.numel())
+    logger.info("Epoch {}: 训练完成，当前α值为: {:.4f}, train_acc: {:.4f}".format(i + 1, current_alpha, train_acc))
     
     train_epoch_aupr = average_precision_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
     train_epoch_auc = roc_auc_score(train_epoch_target.cpu().detach().numpy(), train_epoch_preds.cpu().detach().numpy())
@@ -445,10 +455,10 @@ for i in range(EPOCH):
 
     if i % VALIDATION_INTERVAL == 0 or i == EPOCH - 1:
         for cell, loader in val_loaders.items():
-            val_loss, val_aupr, val_auc = val_forwrd(epimodel, loader, cell)
+            val_loss, val_aupr, val_auc, val_acc = val_forwrd(epimodel, loader, cell)
             logger.info(
-                "validate {} epoch: {}, val_loss：{}, val_aupr：{}, val_auc:{}".format(
-                    cell, i + 1, val_loss, val_aupr, val_auc
+                "validate {} epoch: {}, val_loss：{}, val_aupr：{}, val_auc:{}, val_acc:{}".format(
+                    cell, i + 1, val_loss, val_aupr, val_auc, val_acc
                 )
             )
         # 保存模型
