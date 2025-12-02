@@ -386,26 +386,42 @@ for cell, (enhancers_val, promoters_val, labels_val) in val_data.items():
 
 
 
-def _find_latest_epoch(save_dir: str) -> int:
+def _find_latest_checkpoint(save_dir: str):
     if not os.path.exists(save_dir):
-        return 0
-    epochs = []
+        return 0, None, None
+    latest_full_epoch = 0
+    latest_full_path = None
+    latest_model_epoch = 0
+    latest_model_path = None
     for name in os.listdir(save_dir):
-        m1 = re.match(r"epimodel_epoch_(\d+)\.pth$", name)
-        m2 = re.match(r"epimodel_full_epoch_(\d+)\.pt$", name)
-        if m1:
-            epochs.append(int(m1.group(1)))
-        elif m2:
-            epochs.append(int(m2.group(1)))
-    return max(epochs) if epochs else 0
+        m_full = re.match(r"epimodel_full_epoch_(\d+)\.pt$", name)
+        if m_full:
+            e = int(m_full.group(1))
+            if e > latest_full_epoch:
+                latest_full_epoch = e
+                latest_full_path = os.path.join(save_dir, name)
+        m_model = re.match(r"epimodel_epoch_(\d+)\.pth$", name)
+        if m_model:
+            e = int(m_model.group(1))
+            if e > latest_model_epoch:
+                latest_model_epoch = e
+                latest_model_path = os.path.join(save_dir, name)
+        m_old = re.match(r"epimodel_[A-Za-z0-9\-]+_(\d+)\.pth$", name)
+        if m_old:
+            e = int(m_old.group(1))
+            if e > latest_model_epoch:
+                latest_model_epoch = e
+                latest_model_path = os.path.join(save_dir, name)
+    epoch = max(latest_full_epoch, latest_model_epoch)
+    chosen_full = latest_full_path if latest_full_epoch == epoch and latest_full_path else None
+    chosen_model = latest_model_path if latest_model_epoch == epoch and latest_model_path else None
+    return epoch, chosen_full, chosen_model
 
 def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: MultiStepLR):
-    latest_epoch = _find_latest_epoch(save_dir)
+    latest_epoch, full_path, model_path = _find_latest_checkpoint(save_dir)
     if latest_epoch <= 0:
         return 0
-    full_path = os.path.join(save_dir, f"epimodel_full_epoch_{latest_epoch}.pt")
-    model_path = os.path.join(save_dir, f"epimodel_epoch_{latest_epoch}.pth")
-    if os.path.exists(full_path):
+    if full_path and os.path.exists(full_path):
         state = torch.load(full_path, map_location=device)
         if isinstance(state, dict):
             state_epoch = int(state.get('epoch', latest_epoch) or latest_epoch)
@@ -427,16 +443,20 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                         scheduler.load_state_dict(state['scheduler_state'])
                 except Exception:
                     pass
-    else:
-        if os.path.exists(model_path):
-            sd = torch.load(model_path, map_location=device)
-            if isinstance(sd, dict):
-                model.load_state_dict(sd, strict=False)
+            logger.info("resume checkpoint: full {} (epoch {})".format(os.path.basename(full_path), latest_epoch))
+    elif model_path and os.path.exists(model_path):
+        sd = torch.load(model_path, map_location=device)
+        if isinstance(sd, dict):
+            model.load_state_dict(sd, strict=False)
+        logger.info("resume checkpoint: model {} (epoch {})".format(os.path.basename(model_path), latest_epoch))
     return latest_epoch
 # 开始训练循环
 start_epoch = _load_resume_state(SAVE_MODEL_DIR, device, epimodel, optimizer, scheduler)
 if start_epoch > 0:
     logger.info("resume from epoch: {}".format(start_epoch))
+    if start_epoch >= EPOCH:
+        logger.info("latest checkpoint epoch ({}) >= configured EPOCH ({}), nothing to train".format(start_epoch, EPOCH))
+        exit(0)
 for i in range(start_epoch, EPOCH):
     epimodel.train()
     train_epoch_loss = 0.0
