@@ -586,7 +586,7 @@ def main():
             labels = labels.to(device)
             cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
 
-            cell_logits = cell_expert(enh_ids, pr_ids)
+            cell_logits, cell_vec = cell_expert(enh_ids, pr_ids)
             if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
                 cell_logits = cell_logits.squeeze(1)
             cell_loss = F.cross_entropy(cell_logits, cell_targets)
@@ -598,7 +598,7 @@ def main():
                 optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
                 ep_acc = 0.0
             else:
-                ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_logits)
+                ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_vec)
                 ep_outputs = ep_outputs.squeeze(-1)
                 ep_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss)
                 with torch.no_grad():

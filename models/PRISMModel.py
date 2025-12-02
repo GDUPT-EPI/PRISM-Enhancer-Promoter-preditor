@@ -61,6 +61,20 @@ class AttnPool1dWindow(nn.Module):
             return x.new_zeros(B, C, 0)
         return torch.cat(outs, dim=-1)
 
+class FusionGate(nn.Module):
+    def __init__(self, d: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(4 * d, 2 * d),
+            nn.GELU(),
+            nn.Linear(2 * d, d),
+            nn.Sigmoid(),
+        )
+    def forward(self, f1: torch.Tensor, f2: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([f1, f2, f1 - f2, f1 * f2], dim=-1)
+        g = self.net(x)
+        return g * f1 + (1.0 - g) * f2
+
 class PRISMModel(nn.Module):
     """
     PRISM预训练模型 - BERT风格的DNA序列预训练
@@ -462,30 +476,60 @@ class PRISMBackbone(nn.Module):
     def __init__(self, num_classes: int = None):
         super().__init__()
         self.num_transformer_layers = TRANSFORMER_LAYERS
-        self.embedding = create_dna_embedding_layer(
+        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
+        img_size = PRISM_IMG_SIZE
+
+        self.enh_embedding = create_dna_embedding_layer(
             vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
             embed_dim=DNA_EMBEDDING_DIM,
             padding_idx=DNA_EMBEDDING_PADDING_IDX,
             init_std=DNA_EMBEDDING_INIT_STD
         )
-        self.sequential = nn.Sequential(
+        self.pr_embedding = create_dna_embedding_layer(
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
+            embed_dim=DNA_EMBEDDING_DIM,
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,
+            init_std=DNA_EMBEDDING_INIT_STD
+        )
+        self.enh_cnn = nn.Sequential(
             nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
             nn.BatchNorm1d(OUT_CHANNELS),
             nn.Dropout(p=CNN_DROPOUT)
         )
-        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
-        img_size = PRISM_IMG_SIZE
-        self.transformer_layers = nn.ModuleList([
+        self.pr_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
+            nn.BatchNorm1d(OUT_CHANNELS),
+            nn.Dropout(p=CNN_DROPOUT)
+        )
+        self.pre_enh_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        self.pre_pr_attn = RoPEAttention(
+            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        )
+        self.cross_attn_1 = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        self.cbat_layers = nn.ModuleList([
             CBATTransformerEncoderLayer(
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
                 dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
                 img_size=img_size
             ) for _ in range(self.num_transformer_layers)
         ])
-        self.pre_self_attn = RoPEAttention(
-            d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
+        self.cross_attn_2 = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
+        self.post_cbat = CBAT(
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=TRANSFORMER_DROPOUT,
         )
         self.attn_pool_en = AttnPool1d(OUT_CHANNELS)
         self.attn_pool_pr = AttnPool1d(OUT_CHANNELS)
@@ -496,8 +540,8 @@ class PRISMBackbone(nn.Module):
             width=2 * (OUT_CHANNELS * 2) + 1,
         )
         self.cell_inject_proj = nn.Sequential(
-            nn.LayerNorm(num_classes or 1),
-            nn.Linear(num_classes or 1, OUT_CHANNELS * 2),
+            nn.LayerNorm(OUT_CHANNELS * 2),
+            nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS * 2),
             nn.GELU()
         )
         self.cell_alpha = nn.Parameter(torch.tensor(0.0))
@@ -507,15 +551,17 @@ class PRISMBackbone(nn.Module):
             lr=LEARNING_RATE,
             weight_decay=WEIGHT_DECAY
         )
-        self.mask_builder = SegmentMaskBuilder(
-            kernel_size=CNN_KERNEL_SIZE,
-            pool_size=POOL_KERNEL_SIZE,
-            pad_id=DNA_EMBEDDING_PADDING_IDX,
-            cls_id=BERT_CLS_TOKEN_ID,
-            sep_id=BERT_SEP_TOKEN_ID,
+        self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)
+        self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)
+        self.fusion_gate = FusionGate(OUT_CHANNELS)
+        self.inj_proj = nn.Sequential(
+            nn.LayerNorm(OUT_CHANNELS),
+            nn.Linear(OUT_CHANNELS, OUT_CHANNELS),
+            nn.GELU()
         )
+        self.alpha = nn.Parameter(torch.tensor(0.5))
 
-    def forward(self, enhancer_ids, promoter_ids, cell_logits=None):
+    def forward(self, enhancer_ids, promoter_ids, cell_vec=None):
         K = CNN_KERNEL_SIZE
         P = POOL_KERNEL_SIZE
         min_required_length = K + P - 1
@@ -523,28 +569,48 @@ class PRISMBackbone(nn.Module):
             enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
         if promoter_ids.size(1) < min_required_length:
             promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
-        concat_ids, meta = self.mask_builder.concat_with_specials(enhancer_ids, promoter_ids)
-        embedding = self.embedding(concat_ids)
-        seq_features = self.sequential(embedding.permute(0, 2, 1))
-        seq_features = seq_features.permute(2, 0, 1)
-        L_pool = seq_features.size(0)
-        attn_mask = self.mask_builder.build_segment_attention_mask(meta, pooled_len=L_pool)
-        seq_features = self.pre_self_attn(seq_features.permute(1, 0, 2), attention_mask=attn_mask)
-        seq_features = seq_features.permute(1, 0, 2)
+
+        embed_en = self.enh_embedding(enhancer_ids)
+        embed_pr = self.pr_embedding(promoter_ids)
+        enh = self.enh_cnn(embed_en.permute(0, 2, 1))
+        pr = self.pr_cnn(embed_pr.permute(0, 2, 1))
+        enh = enh.permute(2, 0, 1)
+        pr = pr.permute(2, 0, 1)
+
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2))
+        enh_for_fp = enh_pre
+        _, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)
+        enh = enh_pre.permute(1, 0, 2)
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2))
+        pr = pr_pre.permute(1, 0, 2)
+
+        att1, _ = self.cross_attn_1(enh, pr, pr)
+        enh = enh + att1
+        enh_cross = enh.permute(1, 0, 2)
+        _, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)
+        fused = self.fusion_gate(fp1_vec, fp2_vec)
+        proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)
+        enh = enh + self.alpha * proj
+        residual_proj = proj
+
         total_adaptive_loss = 0.0
-        for layer in self.transformer_layers:
-            seq_features, layer_loss = layer(seq_features, src_mask=attn_mask)
+        for layer in self.cbat_layers:
+            enh, layer_loss = layer(enh)
             total_adaptive_loss += layer_loss
-        L_pool = seq_features.size(0)
-        enh_mask, pr_mask = self.mask_builder.build_pooled_segment_masks(meta, pooled_len=L_pool)
-        feats_for_pool = seq_features.permute(1, 0, 2)
-        enh_vec = self.attn_pool_en(feats_for_pool, enh_mask)
-        pr_vec = self.attn_pool_pr(feats_for_pool, pr_mask)
-        combined = torch.cat([enh_vec, pr_vec], dim=1)
+
+        att2, _ = self.cross_attn_2(enh, pr, pr)
+        enh = enh + att2 + self.alpha * residual_proj
+
+        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)
+        total_adaptive_loss += post_loss
+        enh = post_out.permute(1, 0, 2)
+
+        enh_pooled = nn.AdaptiveAvgPool1d(1)(enh.permute(1, 2, 0)).squeeze(-1)
+        pr_pooled = nn.AdaptiveAvgPool1d(1)(pr.permute(1, 2, 0)).squeeze(-1)
+        combined = torch.cat([enh_pooled, pr_pooled], dim=1)
         combined = F.layer_norm(combined, combined.shape[-1:])
-        if cell_logits is not None:
-            cell_probs = F.softmax(cell_logits, dim=-1)
-            inj = self.cell_inject_proj(cell_probs)
+        if cell_vec is not None:
+            inj = self.cell_inject_proj(cell_vec)
             combined = combined + self.cell_alpha * F.layer_norm(inj, inj.shape[-1:])
         result = self.classifier(combined)
         return torch.sigmoid(result), total_adaptive_loss
@@ -587,10 +653,7 @@ class CellClassificationExpert(nn.Module):
         self.pre_pr_attn = RoPEAttention(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=RoPEConfig.ROPE_DROPOUT)
         self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)
         self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS),
-            nn.Sigmoid()
-        )
+        self.fusion_gate = FusionGate(OUT_CHANNELS)
         self.inj_proj = nn.Sequential(
             nn.LayerNorm(OUT_CHANNELS),
             nn.Linear(OUT_CHANNELS, OUT_CHANNELS),
@@ -603,7 +666,7 @@ class CellClassificationExpert(nn.Module):
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
                 dim_feedforward=TRANSFORMER_FF_DIM, dropout=RoPEConfig.ROPE_DROPOUT,
                 img_size=img_size
-            ) for _ in range(PRISM_CLASS_CBATS)
+            ) for _ in range(4)
         ])
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
@@ -640,8 +703,7 @@ class CellClassificationExpert(nn.Module):
         enh = enh + att1
         enh_cross = enh.permute(1, 0, 2)
         fp2_seq, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)
-        gate = self.fusion_gate(torch.cat([fp1_vec, fp2_vec], dim=-1))
-        fused = gate * fp1_vec + (1 - gate) * fp2_vec
+        fused = self.fusion_gate(fp1_vec, fp2_vec)
         proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)
         enh = enh + self.alpha * proj
         residual_proj = proj
@@ -655,4 +717,4 @@ class CellClassificationExpert(nn.Module):
         pr_pooled = self.pool(pr.permute(1, 2, 0)).squeeze(-1)
         combined = torch.cat([enh_pooled, pr_pooled], dim=1)
         logits = self.classifier(combined)
-        return logits
+        return logits, combined
