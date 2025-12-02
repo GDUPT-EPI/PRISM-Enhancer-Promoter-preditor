@@ -123,6 +123,11 @@ def load_all_test_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
         细胞系名称到测试数据(enhancers, promoters, labels)的映射字典
     """
     test_data = {}
+    # 首先加载 ALL 数据（如果存在）
+    if (DATA_DIR / "test" / "ALL").exists():
+        test_data["ALL"] = prepare_cell_data("ALL", "test")
+    
+    # 然后加载其他细胞系数据
     for cell_line in CELL_LINES:
         if (DATA_DIR / "test" / cell_line).exists():
             test_data[cell_line] = prepare_cell_data(cell_line, "test")
@@ -137,6 +142,11 @@ def load_all_val_data() -> Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         细胞系名称到验证数据(enhancers, promoters, labels)的映射字典
     """
     val_data = {}
+    # 首先加载 ALL 数据（如果存在）
+    if (DATA_DIR / "val" / "ALL").exists():
+        val_data["ALL"] = prepare_cell_data("ALL", "val")
+    
+    # 然后加载其他细胞系数据
     for cell_line in CELL_LINES:
         if (DATA_DIR / "val" / cell_line).exists():
             val_data[cell_line] = prepare_cell_data(cell_line, "val")

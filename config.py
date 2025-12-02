@@ -22,7 +22,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
-BATCH_SIZE = 128  # 从8增加到32，提高GPU利用率
+BATCH_SIZE = 16  # 从8增加到32，提高GPU利用率
 PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4

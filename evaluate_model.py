@@ -11,15 +11,36 @@ import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score, f1_score, recall_score, accuracy_score
 from tqdm import tqdm
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 # 导入项目模块
 from config import *
-from data_loader import load_all_test_data
+from data_loader import load_all_test_data, load_all_val_data
 from models.pleat.embedding import KMerTokenizer, DNAEmbedding
 from models.pleat.optimized_pre import sequence_to_tokens_fast, tokens_to_ids_fast, OptimizedSequenceDataset
 from models.EPIModel import EPIModel
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+
+def load_cell_types_from_xml(xml_path):
+    """
+    从XML文件中加载细胞类型列表
+    
+    Args:
+        xml_path: XML文件路径
+        
+    Returns:
+        list: 细胞类型名称列表
+    """
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        cell_types = [cell.get('name') for cell in root.findall('type')]
+        return cell_types
+    except Exception as e:
+        print(f"警告: 无法从 {xml_path} 加载细胞类型: {e}")
+        print("使用默认细胞系列表")
+        return TEST_CELL_LINES
 
 def simple_collate_fn(batch):
     """
@@ -133,6 +154,157 @@ def evaluate_model(model, dataloader, device, cell_name):
     }
 
 
+def evaluate_model_on_all_data(model, device, cell_lines_to_eval):
+    """
+    在ALL数据上评估模型，并按细胞系分组计算指标
+    
+    Args:
+        model: 要评估的模型
+        device: 设备(cpu/cuda)
+        cell_lines_to_eval: 要评估的细胞系列表
+        
+    Returns:
+        list: 每个细胞系的评估结果列表
+    """
+    # 加载ALL测试数据
+    test_data = load_all_test_data()
+    if "ALL" not in test_data:
+        print("警告: ALL测试数据不存在")
+        return []
+    
+    enhancers_all, promoters_all, labels_all = test_data["ALL"]
+    
+    # 创建优化的测试数据集
+    optimized_test_dataset = OptimizedSequenceDataset(
+        enhancers=enhancers_all,
+        promoters=promoters_all,
+        labels=labels_all,
+        cache_dir=os.path.join(CACHE_DIR, "ALL_test_cache"),
+        use_cache=True
+    )
+    
+    # 创建数据加载器
+    test_loader = DataLoader(
+        dataset=optimized_test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        collate_fn=simple_collate_fn
+    )
+    
+    # 获取ALL数据中的细胞系信息
+    pairs_df = pd.read_csv(os.path.join(DATA_DIR, "test", "ALL", "pairs_hg19.csv"))
+    cell_lines_in_data = pairs_df['cell_line'].unique()
+    
+    # 为每个要评估的细胞系创建结果存储
+    results = []
+    
+    # 对每个细胞系进行评估
+    for cell_line in cell_lines_to_eval:
+        if cell_line == "ALL":
+            continue  # 跳过ALL，因为我们要按具体细胞系评估
+            
+        # 检查该细胞系是否在数据中
+        if cell_line not in cell_lines_in_data:
+            print(f"警告: {cell_line} 不在ALL测试数据中，跳过")
+            continue
+        
+        print(f"在ALL数据中评估 {cell_line} 细胞系...")
+        
+        # 获取该细胞系的样本索引
+        cell_indices = pairs_df[pairs_df['cell_line'] == cell_line].index.tolist()
+        
+        # 如果没有该细胞系的样本，跳过
+        if len(cell_indices) == 0:
+            print(f"警告: {cell_line} 在ALL测试数据中没有样本，跳过")
+            continue
+        
+        model.eval()
+        all_preds = []
+        all_labels = []
+        
+        # 遍历数据加载器，只收集该细胞系的预测结果
+        with torch.no_grad():
+            batch_start_idx = 0
+            for data in tqdm(test_loader, desc=f"Evaluating {cell_line} in ALL"):
+                enhancer_ids, promoter_ids, enhancer_features, promoter_features, labels = data
+                enhancer_ids = enhancer_ids.to(device)
+                promoter_ids = promoter_ids.to(device)
+                enhancer_features = enhancer_features.to(device)
+                promoter_features = promoter_features.to(device)
+                labels = labels.to(device)
+                
+                outputs, _, _ = model(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
+                
+                # 获取当前批次中的样本在原始数据中的索引范围
+                batch_end_idx = batch_start_idx + len(labels)
+                batch_indices = list(range(batch_start_idx, batch_end_idx))
+                
+                # 找出当前批次中属于目标细胞系的样本
+                for i, idx in enumerate(batch_indices):
+                    if idx in cell_indices:
+                        all_preds.append(outputs[i].cpu().numpy())
+                        all_labels.append(labels[i].cpu().numpy())
+                
+                batch_start_idx = batch_end_idx
+        
+        if len(all_preds) == 0:
+            print(f"警告: {cell_line} 在ALL测试数据中没有有效样本，跳过")
+            continue
+        
+        all_preds = np.array(all_preds).flatten()
+        all_labels = np.array(all_labels)
+        
+        # 计算各种指标
+        try:
+            aupr = average_precision_score(all_labels, all_preds)
+            auc = roc_auc_score(all_labels, all_preds)
+            
+            # 使用0.5作为阈值计算其他指标
+            binary_preds = (all_preds >= 0.5).astype(int)
+            accuracy = accuracy_score(all_labels, binary_preds)
+            f1 = f1_score(all_labels, binary_preds)
+            recall = recall_score(all_labels, binary_preds)
+            
+            # 计算正样本的平均概率
+            positive_mask = all_labels == 1
+            if np.sum(positive_mask) > 0:
+                positive_avg_prob = np.mean(all_preds[positive_mask])
+            else:
+                positive_avg_prob = 0.0
+            
+            results.append({
+                'cell_line': cell_line,
+                'aupr': aupr,
+                'auc': auc,
+                'accuracy': accuracy,
+                'f1': f1,
+                'recall': recall,
+                'positive_avg_prob': positive_avg_prob,
+                'total_samples': len(all_labels),
+                'positive_samples': np.sum(positive_mask),
+                'negative_samples': np.sum(all_labels == 0)
+            })
+            
+            # 打印结果
+            print(f"\n{cell_line} 评估结果 (来自ALL数据):")
+            print(f"  AUPR: {aupr:.4f}")
+            print(f"  AUC: {auc:.4f}")
+            print(f"  准确率: {accuracy:.4f}")
+            print(f"  F1分数: {f1:.4f}")
+            print(f"  召回率: {recall:.4f}")
+            print(f"  正样本平均概率: {positive_avg_prob:.4f}")
+            print(f"  总样本数: {len(all_labels)}")
+            print(f"  正样本数: {np.sum(positive_mask)}")
+            print(f"  负样本数: {np.sum(all_labels == 0)}")
+        except Exception as e:
+            print(f"评估 {cell_line} 时出错: {str(e)}")
+            continue
+    
+    return results
+
+
 def main():
     """
     主函数：加载模型和数据，进行评估，并保存结果
@@ -142,7 +314,7 @@ def main():
     print(f"使用设备: {device}")
     
     # 加载预训练模型
-    model_path = os.path.join(PROJECT_ROOT, "save_model/CBAT/DNABERT1_pgd_genes_ALL_train_model_lr0.0002_epoch0.pt")
+    model_path = os.path.join(PROJECT_ROOT, "save_model/CBAT/epimodel_epoch_2.pth")
     print(f"加载模型: {model_path}")
     
     # 检查模型文件是否存在
@@ -151,62 +323,77 @@ def main():
         print("请检查模型路径是否正确")
         return
     
-    # 使用weights_only=False加载模型，因为模型包含自定义类
-    model = torch.load(model_path, map_location=device, weights_only=False)
+    # 创建模型实例
+    model = EPIModel()
+    
+    # 使用weights_only=False加载模型状态字典，因为模型包含自定义类
+    state_dict = torch.load(model_path, map_location=device, weights_only=False)
+    # 使用strict=False来忽略不匹配的键
+    model.load_state_dict(state_dict, strict=False)
     model = model.to(device)
     
-    # 加载所有测试数据
-    test_data = load_all_test_data()
+    # 从XML文件加载细胞类型列表
+    cell_type_xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
+    cell_lines_from_xml = load_cell_types_from_xml(cell_type_xml_path)
     
-    # 排除ALL细胞系
-    cell_lines_to_evaluate = [cell for cell in TEST_CELL_LINES if cell != "ALL"]
-    print(f"评估细胞系: {', '.join(cell_lines_to_evaluate)}")
+    # 添加ALL细胞系到评估列表中（如果存在）
+    all_cell_lines = list(cell_lines_from_xml)
+    if "ALL" not in all_cell_lines:
+        all_cell_lines.append("ALL")
+    
+    print(f"评估细胞系: {', '.join(all_cell_lines)}")
     
     # 存储所有结果
     all_results = []
     
-    # 对每个细胞系进行评估
-    for cell_line in cell_lines_to_evaluate:
-        if cell_line not in test_data:
-            print(f"警告: {cell_line} 的测试数据不存在，跳过")
-            continue
+    # 首先在ALL数据上评估各个细胞系
+    all_results.extend(evaluate_model_on_all_data(model, device, all_cell_lines))
+    
+    # 然后尝试加载各个细胞系的独立测试数据（如果存在）
+    test_data = load_all_test_data()
+    for cell_line in all_cell_lines:
+        if cell_line == "ALL":
+            continue  # 已经在上面处理过了
             
-        enhancers_test, promoters_test, labels_test = test_data[cell_line]
-        
-        # 创建优化的测试数据集
-        optimized_test_dataset = OptimizedSequenceDataset(
-            enhancers=enhancers_test,
-            promoters=promoters_test,
-            labels=labels_test,
-            cache_dir=os.path.join(CACHE_DIR, f"{cell_line}_test_cache"),
-            use_cache=True
-        )
-        
-        # 创建数据加载器
-        test_loader = DataLoader(
-            dataset=optimized_test_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-            num_workers=NUM_WORKERS,
-            pin_memory=True,
-            collate_fn=simple_collate_fn
-        )
-        
-        # 评估模型
-        results = evaluate_model(model, test_loader, device, cell_line)
-        all_results.append(results)
-        
-        # 打印结果
-        print(f"\n{cell_line} 评估结果:")
-        print(f"  AUPR: {results['aupr']:.4f}")
-        print(f"  AUC: {results['auc']:.4f}")
-        print(f"  准确率: {results['accuracy']:.4f}")
-        print(f"  F1分数: {results['f1']:.4f}")
-        print(f"  召回率: {results['recall']:.4f}")
-        print(f"  正样本平均概率: {results['positive_avg_prob']:.4f}")
-        print(f"  总样本数: {results['total_samples']}")
-        print(f"  正样本数: {results['positive_samples']}")
-        print(f"  负样本数: {results['negative_samples']}")
+        # 检查是否有独立的测试数据
+        if cell_line in test_data:
+            enhancers_test, promoters_test, labels_test = test_data[cell_line]
+            
+            # 创建优化的测试数据集
+            optimized_test_dataset = OptimizedSequenceDataset(
+                enhancers=enhancers_test,
+                promoters=promoters_test,
+                labels=labels_test,
+                cache_dir=os.path.join(CACHE_DIR, f"{cell_line}_test_cache"),
+                use_cache=True
+            )
+            
+            # 创建数据加载器
+            test_loader = DataLoader(
+                dataset=optimized_test_dataset,
+                batch_size=BATCH_SIZE,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+                pin_memory=True,
+                collate_fn=simple_collate_fn
+            )
+            
+            # 评估模型
+            results = evaluate_model(model, test_loader, device, cell_line)
+            results['cell_line'] = f"{cell_line}_independent"  # 标记为独立数据
+            all_results.append(results)
+            
+            # 打印结果
+            print(f"\n{cell_line} 独立测试数据评估结果:")
+            print(f"  AUPR: {results['aupr']:.4f}")
+            print(f"  AUC: {results['auc']:.4f}")
+            print(f"  准确率: {results['accuracy']:.4f}")
+            print(f"  F1分数: {results['f1']:.4f}")
+            print(f"  召回率: {results['recall']:.4f}")
+            print(f"  正样本平均概率: {results['positive_avg_prob']:.4f}")
+            print(f"  总样本数: {results['total_samples']}")
+            print(f"  正样本数: {results['positive_samples']}")
+            print(f"  负样本数: {results['negative_samples']}")
     
     # 将结果转换为DataFrame
     results_df = pd.DataFrame(all_results)

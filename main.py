@@ -39,6 +39,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 import re
+import fnmatch
 
 # 使用配置文件中的参数
 # BATCH_SIZE = 32  # 已在config.py中定义
@@ -482,6 +483,30 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
             model.load_state_dict(sd, strict=False)
         logger.info("resume checkpoint: model {} (epoch {})".format(os.path.basename(model_path), latest_epoch))
     return latest_epoch
+
+def _rotate_checkpoints(save_dir: str, pattern: str, keep: int = 3):
+    files = [f for f in os.listdir(save_dir) if fnmatch.fnmatch(f, pattern)]
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(save_dir, x)))
+    if len(files) > keep:
+        for f in files[:-keep]:
+            try:
+                os.remove(os.path.join(save_dir, f))
+            except Exception:
+                pass
+
+def _atomic_save(obj, path: str, use_zip: bool = True) -> bool:
+    tmp = path + ".tmp"
+    try:
+        torch.save(obj, tmp, _use_new_zipfile_serialization=use_zip)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
 # 开始训练循环
 start_epoch = _load_resume_state(SAVE_MODEL_DIR, device, epimodel, optimizer, scheduler)
 if start_epoch > 0:
@@ -575,13 +600,24 @@ for i in range(start_epoch, EPOCH):
         train_epoch_auc = float('nan')
     
 
-    torch.save(epimodel.state_dict(), os.path.join(SAVE_MODEL_DIR, f"epimodel_epoch_{i+1}.pth"))
-    torch.save({
+    _rotate_checkpoints(SAVE_MODEL_DIR, "epimodel_epoch_*.pth", keep=3)
+    _rotate_checkpoints(SAVE_MODEL_DIR, "epimodel_full_epoch_*.pt", keep=3)
+
+    _model_path = os.path.join(SAVE_MODEL_DIR, f"epimodel_epoch_{i+1}.pth")
+    if not _atomic_save(epimodel.state_dict(), _model_path, use_zip=True):
+        if not _atomic_save(epimodel.state_dict(), _model_path, use_zip=False):
+            logger.error("保存模型失败: {}".format(_model_path))
+
+    _full_state = {
         'epoch': i + 1,
         'model_state': epimodel.state_dict(),
         'optimizer_state': epimodel.optimizer.state_dict(),
         'scheduler_state': scheduler.state_dict(),
-    }, os.path.join(SAVE_MODEL_DIR, f"epimodel_full_epoch_{i+1}.pt"))
+    }
+    _full_path = os.path.join(SAVE_MODEL_DIR, f"epimodel_full_epoch_{i+1}.pt")
+    if not _atomic_save(_full_state, _full_path, use_zip=True):
+        if not _atomic_save(_full_state, _full_path, use_zip=False):
+            logger.error("保存完整状态失败: {}".format(_full_path))
 
     if i % VALIDATION_INTERVAL == 0 or i == EPOCH - 1:
         for cell, loader in val_loaders.items():
