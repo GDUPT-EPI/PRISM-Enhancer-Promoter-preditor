@@ -45,7 +45,7 @@ OUT_CHANNELS = 96
 # Transformer相关参数 - 集中管理避免冲突
 TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
-TRANSFORMER_FF_DIM = 128  # 前馈网络维度
+TRANSFORMER_FF_DIM = 256  # 前馈网络维度
 
 # CNN和分类头参数 - 集中管理避免冲突
 CNN_DROPOUT = 0.45      # CNN层dropout率
