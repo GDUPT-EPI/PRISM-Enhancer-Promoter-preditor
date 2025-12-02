@@ -88,6 +88,22 @@ def get_num_correct(preds, labels):
     Returns:
         预测正确的样本数量
     """
+    # 确保preds和labels形状一致
+    if preds.shape != labels.shape:
+        # 如果preds是(batch, 1)而labels是(batch,)，则压缩preds
+        if preds.dim() == 2 and preds.size(1) == 1 and labels.dim() == 1:
+            preds = preds.squeeze(1)
+        # 如果labels是(batch, 1)而preds是(batch,)，则压缩labels
+        elif labels.dim() == 2 and labels.size(1) == 1 and preds.dim() == 1:
+            labels = labels.squeeze(1)
+    
+    # 确保两者都是1维张量
+    if preds.dim() > 1:
+        preds = preds.view(-1)
+    if labels.dim() > 1:
+        labels = labels.view(-1)
+    
+    # 计算预测正确的样本数
     predictions = (preds >= 0.5).float()
     return (predictions == labels).sum().item()
 
@@ -245,14 +261,22 @@ def val_forwrd(model, dataloader, cell_name=""):
             labels = labels.to(device, non_blocking=True)
                 
             outputs, _, _ = model(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
-            labels = labels.unsqueeze(1).float()
-            test_epoch_target = torch.cat((test_epoch_target, labels.view(-1)))
-
-            if labels.shape == torch.Size([1, 1]):
-                labels = torch.reshape(labels, (1,))
+            
+            # 确保outputs和labels形状一致
+            if outputs.dim() == 2 and outputs.size(1) == 1:
+                outputs = outputs.squeeze(1)
+            
+            # 确保labels是1维张量
+            labels = labels.float()
+            if labels.dim() == 2 and labels.size(1) == 1:
+                labels = labels.squeeze(1)
+            elif labels.dim() > 2:
+                labels = labels.view(-1)
+                
+            test_epoch_target = torch.cat((test_epoch_target, labels))
                 
             loss = model.criterion(outputs, labels)
-            test_epoch_preds = torch.cat((test_epoch_preds, outputs.view(-1)))
+            test_epoch_preds = torch.cat((test_epoch_preds, outputs))
             test_epoch_loss += loss.item()
             test_epoch_correct += get_num_correct(outputs, labels)
             
@@ -478,13 +502,19 @@ for i in range(start_epoch, EPOCH):
         
         outputs, emd, total_adaptive_loss = epimodel(enhancer_ids, promoter_ids, enhancer_features, promoter_features)
         
-        labels = labels.unsqueeze(1).float()
+        # 确保outputs和labels形状一致
+        if outputs.dim() == 2 and outputs.size(1) == 1:
+            outputs = outputs.squeeze(1)
         
-        train_epoch_preds = torch.cat((train_epoch_preds, outputs.view(-1)))
-        train_epoch_target = torch.cat((train_epoch_target, labels.view(-1)))
+        # 确保labels是1维张量
+        labels = labels.float()
+        if labels.dim() == 2 and labels.size(1) == 1:
+            labels = labels.squeeze(1)
+        elif labels.dim() > 2:
+            labels = labels.view(-1)
         
-        if labels.shape == torch.Size([1, 1]):
-            labels = torch.reshape(labels, (1,))
+        train_epoch_preds = torch.cat((train_epoch_preds, outputs))
+        train_epoch_target = torch.cat((train_epoch_target, labels))
 
         # 确保adaptive_loss是一个标量
         if isinstance(total_adaptive_loss, torch.Tensor) and total_adaptive_loss.numel() == 1:
