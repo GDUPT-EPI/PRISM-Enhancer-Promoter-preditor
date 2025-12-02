@@ -131,157 +131,6 @@ def apply_random_mask(x_ids: torch.Tensor, mask_prob: float = PRISM_RANDOM_MASK_
     x_masked[sel] = pad_id
     return x_masked
 
-
-def train_epoch(model, dataloader, optimizer, scheduler, epoch_idx, cell_label_map, ema_mu_com, proj_params, kb, loss_weights):
-    """训练一个epoch"""
-    model.train()
-    total_loss = 0.0
-    total_accuracy = 0.0
-    total_spec_acc = 0.0
-    num_batches = 0
-    
-    train_pbar = tqdm(dataloader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", 
-                      leave=True, dynamic_ncols=True)
-    
-    for data in train_pbar:
-        enhancer_ids, promoter_ids, cell_lines, labels = data
-        enhancer_ids = enhancer_ids.to(device, non_blocking=True)
-        promoter_ids = promoter_ids.to(device, non_blocking=True)
-        
-        # 创建MLM mask - BERT风格的掩码预测
-        masked_enhancer_ids, mask_positions, original_enhancer_ids = create_mlm_mask(
-            enhancer_ids,
-            mask_prob=BERT_MASK_PROB,  # 掩码概率，平衡预测难度与信息保留
-            mask_token_id=BERT_MASK_TOKEN_ID,
-            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-            pad_token_id=BERT_PAD_TOKEN_ID,
-            block_mask=True,  # 块级掩码，提高预测难度
-            block_size=KMER_SIZE
-        )
-        
-        # 前向传播
-        mlm_logits, enhancer_final, _, seq_length_mapping, fused_footprint = model(masked_enhancer_ids, promoter_ids, mask_positions)
-
-        v = fused_footprint
-        z_com = model.current_z_com
-        z_spec = model.current_z_spec
-
-        B = enhancer_ids.size(0)  # batch大小
-        V = mlm_logits.size(-1)   # 词汇表大小
-        D_com = z_com.size(-1)    # 公共子空间维度 d_com
-
-        unique_cells = []
-        for c in cell_lines:
-            if c not in unique_cells:
-                unique_cells.append(c)
-
-        g_com_list = []  # 收集细胞级公共特征 g^com_c
-        g_spec_list = []  # 收集细胞级特异特征 g^spec_c
-        cell_label_list = []  # 收集细胞标签用于分类损失
-        for c in unique_cells:
-            idx = [i for i in range(B) if cell_lines[i] == c]  # 找到属于细胞c的所有样本索引
-            if len(idx) == 0:
-                continue
-            idx_t = torch.tensor(idx, device=device)
-            g_c_com = z_com.index_select(0, idx_t).mean(dim=0)  # g^com_c = (1/K)∑z^com_{c,i} - 细胞级公共特征均值
-            g_c_spec = z_spec.index_select(0, idx_t).mean(dim=0)  # g^spec_c = (1/K)∑z^spec_{c,i} - 细胞级特异特征均值
-            g_com_list.append(g_c_com)
-            g_spec_list.append(g_c_spec)
-            cell_label_list.append(cell_label_map.get(c, 0))  # 映射细胞名称到标签索引
-
-        kb_beta = proj_params['ema_beta']  # EMA更新系数β，用于知识库中心点平滑更新
-        if isinstance(kb, dict):
-            kb.setdefault('spec_centers', {})  # 初始化特异特征中心点缓存
-            kb.setdefault('com_centers', {})   # 初始化公共特征中心点缓存
-            
-            # 确保所有需要的键都在
-            if 'model_state' not in kb:
-                kb['model_state'] = None
-                
-            for i, c in enumerate(unique_cells):
-                g_c_spec = g_spec_list[i]
-                g_c_com = g_com_list[i]
-                if c in kb['spec_centers']:
-                    kb['spec_centers'][c] = kb['spec_centers'][c] * (1 - kb_beta) + g_c_spec.detach().cpu() * kb_beta  # 指数移动平均
-                else:
-                    kb['spec_centers'][c] = g_c_spec.detach().cpu()
-                if c in kb['com_centers']:
-                    kb['com_centers'][c] = kb['com_centers'][c] * (1 - kb_beta) + g_c_com.detach().cpu() * kb_beta  # 指数移动平均
-                else:
-                    kb['com_centers'][c] = g_c_com.detach().cpu()
-        
-        
-        
-        bert_loss, accuracy = model.compute_mlm_loss(mlm_logits, original_enhancer_ids, mask_positions, seq_length_mapping)  # L_BERT - BERT掩码预测损失
-
-        g_com_stack = torch.stack(g_com_list) if len(g_com_list) > 0 else torch.zeros(1, D_com, device=device, dtype=v.dtype)  # [C, d_com] - 细胞级公共特征矩阵
-        g_spec_stack = torch.stack(g_spec_list) if len(g_spec_list) > 0 else torch.zeros(1, z_spec.size(-1), device=device, dtype=v.dtype)  # [C, d_spec] - 细胞级特异特征矩阵
-
-        loss_invar = proj_params['lambda_invar'] * ((g_com_stack - ema_mu_com).pow(2).mean())  # L_invar = λ_invar * ||g^com_c - μ_com||^2 - 跨细胞公共一致性损失
-        ema_mu_com.mul_(1 - proj_params['ema_beta']).add_(g_com_stack.detach().mean(dim=0) * proj_params['ema_beta'])  # μ_com ← (1-β)μ_com + β·mean(g^com_c) - EMA更新全局均值
-
-        zc_center = z_com - z_com.mean(dim=0)  # 中心化处理，计算协方差矩阵
-        var = zc_center.pow(2).mean(dim=0)     # 各维度方差 (d_com维度的方差向量)
-        loss_var = proj_params['lambda_var'] * ((proj_params['gamma'] - torch.sqrt(var + 1e-8)).clamp(min=0).pow(2).sum())  # L_var = λ_var * Σ max(0, γ-√Var)^2 - 公共空间维度方差约束，确保每个维度都有信息
-        normed = zc_center / (torch.sqrt(var + 1e-8))  # 标准化处理，用于计算协方差
-        cov = (normed.T @ normed) / max(B, 1)          # 协方差矩阵 (d_com × d_com)
-        off = cov - torch.diag(torch.diag(cov))        # 去掉对角线元素，得到非对角协方差
-        loss_cov = proj_params['lambda_var'] * (off.pow(2).sum())  # L_cov = λ_var * ||off-diagonal(C_com)||_F^2 - 公共空间去相关约束
-
-        if g_spec_stack.size(0) > 0:
-            centers = g_spec_stack  # 特异特征中心点（细胞级均值）
-            centers_norm = F.normalize(centers, dim=-1)  # 归一化中心点，用于对比学习
-            z_spec_norm = F.normalize(z_spec, dim=-1)    # 归一化样本级特异特征
-            logits = z_spec_norm @ centers_norm.T        # 计算相似度分数矩阵 [B, C]
-            logits = logits / max(loss_weights.get('tau', 0.07), 1e-6)  # 温度参数τ，控制分布锐度
-            local_labels = torch.tensor([unique_cells.index(cell_lines[i]) for i in range(B)], device=device)  # 样本对应的细胞索引标签
-            loss_cell = F.cross_entropy(logits, local_labels)  # L_cell - 特异空间细胞分类/对比损失
-            spec_acc_batch = (logits.argmax(dim=1) == local_labels).float().mean()
-        else:
-            loss_cell = torch.tensor(0.0, device=device)
-            spec_acc_batch = torch.tensor(0.0, device=device)
-
-        loss_spec_reg = proj_params['lambda_spec'] * (g_spec_stack.abs().mean() + g_spec_stack.pow(2).mean())  # L_spec_reg = λ_spec * (||g^spec_c||_1 + ||g^spec_c||_2^2) - 特异空间稀疏正则化，鼓励使用少量维度
-
-        g_spec_map = {}  # 构建细胞到特异特征中心的映射
-        for i, c in enumerate(unique_cells):
-            g_spec_map[c] = g_spec_list[i]
-        g_per_sample = torch.stack([g_spec_map.get(cell_lines[i], torch.zeros_like(z_spec[0])) for i in range(B)]).to(device)  # [B, d_spec] - 每个样本对应的细胞中心
-        loss_within = proj_params['lambda_spec'] * ((z_spec - g_per_sample).pow(2).mean())  # L_within = λ_spec * ||z^spec_{c,i} - g^spec_c||^2 - 细胞内一致性约束，防止噪声主导
-
-        w_ortho = model.enhancer_footprint.w_com.weight @ model.enhancer_footprint.w_spec.weight.t()
-        loss_ortho = proj_params['lambda_ortho'] * (w_ortho.pow(2).sum())  # L_ortho = λ_ortho * ||W_com · W_spec^T||_F^2 - 子空间正交约束，避免特征污染
-
-        total_loss_batch = loss_weights.get('w_cell', 1.0) * loss_cell + loss_weights.get('w_mlm', 0.1) * bert_loss + loss_invar + loss_var + loss_cov + loss_spec_reg + loss_within + loss_ortho  # 总损失: L = w_cell*L_cell + w_mlm*L_BERT + L_invar + L_var + L_cov + L_spec_reg + L_within + L_ortho
-        
-        # 反向传播
-        optimizer.zero_grad()
-        total_loss_batch.backward()
-        
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(model.parameters(), BERT_MAX_GRAD_NORM)
-        
-        optimizer.step()
-        
-        # 统计
-        total_loss += total_loss_batch.item()
-        total_accuracy += accuracy
-        total_spec_acc += spec_acc_batch.item()
-        num_batches += 1
-        
-        # 更新进度条
-        train_pbar.set_postfix({
-            'loss': f'{total_loss_batch.item():.4f}',
-            'acc': f'{accuracy:.4f}',
-            'spec_acc': f'{spec_acc_batch.item():.4f}'
-        })
-    
-    avg_loss = total_loss / num_batches
-    avg_accuracy = total_accuracy / num_batches
-    
-    avg_spec_acc = total_spec_acc / num_batches
-    return avg_loss, avg_accuracy, avg_spec_acc
-
 def _find_latest_epoch(save_dir: str) -> int:
     if not os.path.exists(save_dir):
         return 0
@@ -322,8 +171,15 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                     saved_opt = state['optimizer_state']
                     saved_groups = len(saved_opt.get('param_groups', []))
                     curr_groups = len(optimizer.state_dict().get('param_groups', []))
-                    saved_mode = bool(state.get('train_expert_only', False))
-                    if saved_groups == curr_groups and saved_mode == TRAIN_EXPERT_ONLY:
+                    saved_expert_only = bool(state.get('train_expert_only', False))
+                    saved_ep_only = bool(state.get('train_ep_only', False))
+                    saved_mode_str = state.get('training_mode', None)
+                    mode_match = (
+                        saved_expert_only == TRAIN_EXPERT_ONLY and
+                        saved_ep_only == TRAIN_EP_ONLY and
+                        (saved_mode_str is None or saved_mode_str in ("expert_only" if TRAIN_EXPERT_ONLY else ("ep_only" if TRAIN_EP_ONLY else "joint")))
+                    )
+                    if saved_groups == curr_groups and mode_match:
                         optimizer.load_state_dict(saved_opt)
                         logger.info("优化器状态已恢复")
                     else:
@@ -585,11 +441,11 @@ def main():
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
         if TRAIN_EXPERT_ONLY:
-            logger.info("模式: 仅训练细胞专家头")
+            logger.info("模式: 仅训练细胞专家头 (交叉熵)")
         elif TRAIN_EP_ONLY:
-            logger.info("模式: 仅训练EP互作主干")
+            logger.info("模式: 仅训练EP互作主干 (AdaptiveIMMAX + RoPE_AdaptAttention自适应损失)")
         else:
-            logger.info("模式: 联合训练 (cell=0.35, ep=0.65)")
+            logger.info("模式: 联合训练 (cell交叉熵×0.35 + EP AdaptiveIMMAX×0.65 + 自适应损失)")
         model.train(); cell_expert.train()
         total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
