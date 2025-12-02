@@ -48,9 +48,9 @@ TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 64  # 前馈网络维度 (从128修改为256以匹配checkpoint)
 
 # CNN和分类头参数 - 集中管理避免冲突
-CNN_DROPOUT = 0.45      # CNN层dropout率
+CNN_DROPOUT = 0.35      # CNN层dropout率
 CLASSIFIER_HIDDEN_SIZE = 128  # 分类头中间层大小
-CLASSIFIER_DROPOUT = 0.33     # 分类头dropout率
+CLASSIFIER_DROPOUT = 0.5     # 分类头dropout率
 
 # 优化器配置
 WEIGHT_DECAY = 0.001
