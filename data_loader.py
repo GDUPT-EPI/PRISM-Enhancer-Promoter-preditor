@@ -371,32 +371,98 @@ class CellBatchSampler(Sampler):
         self.shuffle = shuffle
         self.cell_lines = dataset.cell_lines
         self.cell_line_groups = {c: g.copy() for c, g in dataset.cell_line_groups.items()}
+        # 按标签划分索引池
+        self.label_groups = {}
+        for c, idxs in self.cell_line_groups.items():
+            pos = []
+            neg = []
+            for i in idxs:
+                lab = int(self.dataset.pairs_df.iloc[i]['label'])
+                if lab == 1:
+                    pos.append(i)
+                else:
+                    neg.append(i)
+            self.label_groups[c] = {
+                'pos_full': pos[:],
+                'neg_full': neg[:],
+            }
+        # 仅选取同时包含正负样本的细胞系作为首选
+        self.eligible_cells = [c for c in self.cell_lines if len(self.label_groups[c]['pos_full']) > 0 and len(self.label_groups[c]['neg_full']) > 0] or self.cell_lines
         self.total_samples = len(dataset)
         self.num_batches = max(1, self.total_samples // max(1, batch_size))
 
     def __iter__(self):
-        cell_line_indices = {}
-        for cell_line, indices in self.cell_line_groups.items():
-            indices = indices.copy()
+        # 初始化每个细胞系的正负索引池
+        pos_pools = {}
+        neg_pools = {}
+        for c in self.cell_lines:
+            pos = self.label_groups[c]['pos_full'][:]
+            neg = self.label_groups[c]['neg_full'][:]
             if self.shuffle:
-                random.shuffle(indices)
-            cell_line_indices[cell_line] = indices
+                random.shuffle(pos)
+                random.shuffle(neg)
+            pos_pools[c] = pos
+            neg_pools[c] = neg
 
-        # 轮询细胞系，生成纯细胞批次
         cell_idx = 0
         for _ in range(self.num_batches):
-            cell = self.cell_lines[cell_idx % len(self.cell_lines)]
-            pool = cell_line_indices[cell]
-            batch = []
-            while len(batch) < self.batch_size:
-                if len(pool) == 0:
-                    pool = self.cell_line_groups[cell].copy()
-                    if self.shuffle:
-                        random.shuffle(pool)
-                    cell_line_indices[cell] = pool
-                batch.append(pool.pop())
+            # 选择细胞系（优先含有正负样本的细胞）
+            cell = self.eligible_cells[cell_idx % len(self.eligible_cells)]
             cell_idx += 1
-            yield batch
+
+            pos_min = int((0.45 * self.batch_size + 0.9999) // 1)
+            pos_max = int((0.55 * self.batch_size) // 1)
+            if pos_min > pos_max:
+                pos_min = pos_max
+            pos_target = random.randint(pos_min, pos_max)
+            neg_target = self.batch_size - pos_target
+
+            # 当前批次已选索引，避免重复
+            batch_used = set()
+
+            def take_from_pool(pool, full_list, needed):
+                taken = []
+                # 先从当前池取，不足则补充并打乱
+                while len(taken) < needed:
+                    if len(pool) == 0:
+                        pool[:] = full_list[:]
+                        if self.shuffle:
+                            random.shuffle(pool)
+                    x = pool.pop()
+                    if x in batch_used:
+                        continue
+                    taken.append(x)
+                    batch_used.add(x)
+                    # 防止无限循环：若全量样本过少，允许重复以满足批量大小
+                    if len(batch_used) >= len(full_list) and len(taken) < needed and len(full_list) > 0:
+                        # 放宽去重，直接补齐
+                        while len(taken) < needed:
+                            taken.append(random.choice(full_list))
+                        break
+                return taken
+
+            pos_idxs = take_from_pool(pos_pools[cell], self.label_groups[cell]['pos_full'], pos_target)
+            neg_idxs = take_from_pool(neg_pools[cell], self.label_groups[cell]['neg_full'], neg_target)
+
+            # 保障至少包含一个正样本和一个负样本（若存在）
+            if len(pos_idxs) == 0 and len(self.label_groups[cell]['pos_full']) > 0:
+                pos_idxs = take_from_pool(pos_pools[cell], self.label_groups[cell]['pos_full'], 1)
+            if len(neg_idxs) == 0 and len(self.label_groups[cell]['neg_full']) > 0:
+                neg_idxs = take_from_pool(neg_pools[cell], self.label_groups[cell]['neg_full'], 1)
+
+            batch_indices = pos_idxs + neg_idxs
+            # 若因样本极端不足导致数量不够，尽量补齐
+            if len(batch_indices) < self.batch_size:
+                pool_all = self.cell_line_groups[cell][:]
+                if self.shuffle:
+                    random.shuffle(pool_all)
+                while len(batch_indices) < self.batch_size and len(pool_all) > 0:
+                    x = pool_all.pop()
+                    batch_indices.append(x)
+
+            if self.shuffle:
+                random.shuffle(batch_indices)
+            yield batch_indices
 
     def __len__(self):
         return self.num_batches
