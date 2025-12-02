@@ -286,13 +286,43 @@ class EPIModel(nn.Module):
         enhancers_output = enhancers_output.permute(2, 0, 1)
         promoters_output = promoters_output.permute(2, 0, 1)
         
-        # 早期自注意力 (Pre-CBAT) - 使用RoPEAttention
+        # 构造padding掩码（映射到CNN/Pool后的长度）
+        B = enhancer_ids.size(0)
+        L_en_orig = enhancer_ids.size(1)
+        L_pr_orig = promoter_ids.size(1)
+        L_en_cnn = enhancers_output.size(0)
+        L_pr_cnn = promoters_output.size(0)
+        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
+        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        enh_pad_mask = torch.zeros(B, L_en_cnn, dtype=torch.bool, device=enhancer_ids.device)
+        pr_pad_mask = torch.zeros(B, L_pr_cnn, dtype=torch.bool, device=promoter_ids.device)
+        for j in range(L_en_cnn):
+            s = j * P
+            e = min(s + P + K - 2, L_en_orig - 1)
+            enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)
+        for j in range(L_pr_cnn):
+            s = j * P
+            e = min(s + P + K - 2, L_pr_orig - 1)
+            pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)
+
+        # 早期自注意力 (Pre-CBAT) - 使用RoPEAttention并传入padding掩码
         # RoPEAttention需要 (batch, seq_len, d_model) 格式
         enhancers_output = enhancers_output.permute(1, 0, 2)
         promoters_output = promoters_output.permute(1, 0, 2)
-        
-        enhancers_output = self.pre_enhancer_self_attn(enhancers_output)
-        promoters_output = self.pre_promoter_self_attn(promoters_output)
+        enh_attn_mask = torch.zeros(B, 1, L_en_cnn, L_en_cnn, device=enhancer_ids.device, dtype=torch.float32)
+        pr_attn_mask = torch.zeros(B, 1, L_pr_cnn, L_pr_cnn, device=promoter_ids.device, dtype=torch.float32)
+        if enh_pad_mask.any():
+            for b in range(B):
+                cols = enh_pad_mask[b]
+                if cols.any():
+                    enh_attn_mask[b, 0, :, cols] = float('-inf')
+        if pr_pad_mask.any():
+            for b in range(B):
+                cols = pr_pad_mask[b]
+                if cols.any():
+                    pr_attn_mask[b, 0, :, cols] = float('-inf')
+        enhancers_output = self.pre_enhancer_self_attn(enhancers_output, attention_mask=enh_attn_mask)
+        promoters_output = self.pre_promoter_self_attn(promoters_output, attention_mask=pr_attn_mask)
         
         # ============================================================================
         # LCWnet Footprint集成点 1: 保存早期自注意力输出
@@ -311,18 +341,18 @@ class EPIModel(nn.Module):
         # Transformer编码 - 使用CBAT模块
         # CBAT模块内部会自动处理位置编码和自适应注意力
         for layer in self.enhancer_transformer_layers:
-            enhancers_output, layer_adaptive_loss = layer(enhancers_output)
+            enhancers_output, layer_adaptive_loss = layer(enhancers_output, src_mask=enh_attn_mask)
             total_adaptive_loss += layer_adaptive_loss
 
         for layer in self.promoter_transformer_layers:
-            promoters_output, layer_adaptive_loss = layer(promoters_output)
+            promoters_output, layer_adaptive_loss = layer(promoters_output, src_mask=pr_attn_mask)
             total_adaptive_loss += layer_adaptive_loss
         
         # 交叉注意力 1: 增强子查询启动子 (新增)
         # 注意: MultiheadAttention 默认 batch_first=False，即 (seq_len, batch, embed_dim)
         # query=enhancers, key=promoters, value=promoters
         enhancers_attended_1, _ = self.cross_attention_1(
-            enhancers_output, promoters_output, promoters_output
+            enhancers_output, promoters_output, promoters_output, key_padding_mask=pr_pad_mask
         )
         
         # 残差连接 1
@@ -353,7 +383,7 @@ class EPIModel(nn.Module):
         
         # 交叉注意力 2: 增强子查询启动子 (原有)
         enhancers_attended_2, _ = self.cross_attention_2(
-            enhancers_output, promoters_output, promoters_output
+            enhancers_output, promoters_output, promoters_output, key_padding_mask=pr_pad_mask
         )
         
         # 残差连接 2 (原有代码没有显式残差，这里按照需求添加与新的交叉连接残差连接)
@@ -377,8 +407,16 @@ class EPIModel(nn.Module):
         promoters_final = promoters_final_cbat.permute(1, 0, 2)
         
         # 全局池化降维为固定大小 (seq_len, batch, 64) -> (batch, 64)
-        enhancers_pooled = self.adaptive_pool(enhancers_final.permute(1, 2, 0)).squeeze(-1)
-        promoters_pooled = self.adaptive_pool(promoters_final.permute(1, 2, 0)).squeeze(-1)
+        x_en = enhancers_final.permute(1, 0, 2)
+        w_en = (~enh_pad_mask).float()
+        s_en = (x_en * w_en.unsqueeze(-1)).sum(dim=1)
+        d_en = w_en.sum(dim=1).clamp(min=1e-6)
+        enhancers_pooled = s_en / d_en.unsqueeze(-1)
+        x_pr = promoters_final.permute(1, 0, 2)
+        w_pr = (~pr_pad_mask).float()
+        s_pr = (x_pr * w_pr.unsqueeze(-1)).sum(dim=1)
+        d_pr = w_pr.sum(dim=1).clamp(min=1e-6)
+        promoters_pooled = s_pr / d_pr.unsqueeze(-1)
         
         # 拼接增强子和启动子表示
         combined = torch.cat([enhancers_pooled, promoters_pooled], dim=1)  # (batch, 128)

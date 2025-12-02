@@ -126,6 +126,13 @@ class PRISMBackbone(nn.Module):
                 img_size=img_size
             ) for _ in range(self.num_transformer_layers)
         ])
+        self.pr_cbat_layers = nn.ModuleList([
+            CBATTransformerEncoderLayer(
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
+                img_size=img_size
+            ) for _ in range(self.num_transformer_layers)
+        ])
         self.cross_attn_2 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )
@@ -182,14 +189,45 @@ class PRISMBackbone(nn.Module):
         enh = enh.permute(2, 0, 1)
         pr = pr.permute(2, 0, 1)
 
-        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2))
+        B_en = enhancer_ids.size(0)
+        L_en_orig = enhancer_ids.size(1)
+        L_en = enh.size(0)
+        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
+        enh_pad_mask = torch.zeros(B_en, L_en, dtype=torch.bool, device=enhancer_ids.device)
+        for j in range(L_en):
+            s = j * POOL_KERNEL_SIZE
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_en_orig - 1)
+            enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)
+        enh_attn_mask = torch.zeros(B_en, 1, L_en, L_en, device=enhancer_ids.device, dtype=torch.float32)
+        if enh_pad_mask.any():
+            mask_cols = enh_pad_mask
+            for b in range(B_en):
+                cols = mask_cols[b]
+                if cols.any():
+                    enh_attn_mask[b, 0, :, cols] = float('-inf')
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)
         enh_for_fp = enh_pre
         _, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)
         enh = enh_pre.permute(1, 0, 2)
-        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2))
+        B_pr = promoter_ids.size(0)
+        L_pr_orig = promoter_ids.size(1)
+        L_pr = pr.size(0)
+        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        pr_pad_mask = torch.zeros(B_pr, L_pr, dtype=torch.bool, device=promoter_ids.device)
+        for j in range(L_pr):
+            s = j * POOL_KERNEL_SIZE
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_pr_orig - 1)
+            pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)
+        pr_attn_mask = torch.zeros(B_pr, 1, L_pr, L_pr, device=promoter_ids.device, dtype=torch.float32)
+        if pr_pad_mask.any():
+            for b in range(B_pr):
+                cols = pr_pad_mask[b]
+                if cols.any():
+                    pr_attn_mask[b, 0, :, cols] = float('-inf')
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)
         pr = pr_pre.permute(1, 0, 2)
 
-        att1, _ = self.cross_attn_1(enh, pr, pr)
+        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
         enh = enh + att1
         enh_cross = enh.permute(1, 0, 2)
         _, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)
@@ -200,18 +238,29 @@ class PRISMBackbone(nn.Module):
 
         total_adaptive_loss = 0.0
         for layer in self.cbat_layers:
-            enh, layer_loss = layer(enh)
+            enh, layer_loss = layer(enh, src_mask=enh_attn_mask)
             total_adaptive_loss += layer_loss
+        for layer in self.pr_cbat_layers:
+            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)
+            total_adaptive_loss += layer_loss_pr
 
-        att2, _ = self.cross_attn_2(enh, pr, pr)
-        enh = enh + att2 + self.alpha * residual_proj
+        att2, _ = self.cross_attn_2(enh, pr, pr, key_padding_mask=pr_pad_mask)
+        enh = enh + att2
 
         post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)
         total_adaptive_loss += post_loss
         enh = post_out.permute(1, 0, 2)
 
-        enh_pooled = nn.AdaptiveAvgPool1d(1)(enh.permute(1, 2, 0)).squeeze(-1)
-        pr_pooled = nn.AdaptiveAvgPool1d(1)(pr.permute(1, 2, 0)).squeeze(-1)
+        x_en = enh.permute(1, 0, 2)
+        w_en = (~enh_pad_mask).float()
+        s_en = (x_en * w_en.unsqueeze(-1)).sum(dim=1)
+        d_en = w_en.sum(dim=1).clamp(min=1e-6)
+        enh_pooled = s_en / d_en.unsqueeze(-1)
+        x_pr = pr.permute(1, 0, 2)
+        w_pr = (~pr_pad_mask).float()
+        s_pr = (x_pr * w_pr.unsqueeze(-1)).sum(dim=1)
+        d_pr = w_pr.sum(dim=1).clamp(min=1e-6)
+        pr_pooled = s_pr / d_pr.unsqueeze(-1)
         combined = torch.cat([enh_pooled, pr_pooled], dim=1)
         combined = F.layer_norm(combined, combined.shape[-1:])
         if cell_vec is not None:
