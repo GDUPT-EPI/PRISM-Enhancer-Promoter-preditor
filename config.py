@@ -26,7 +26,7 @@ BATCH_SIZE = 128  # 从8增加到32，提高GPU利用率
 PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4
-VALIDATION_INTERVAL = 3  # 每隔多少个epoch进行一次验证
+VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
 TRAIN_EXPERT_ONLY = True
 
 # 数据加载器配置
@@ -43,7 +43,7 @@ POOL_KERNEL_SIZE = 40
 OUT_CHANNELS = 96
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 8  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
 TRANSFORMER_FF_DIM = 256  # 前馈网络维度
 
