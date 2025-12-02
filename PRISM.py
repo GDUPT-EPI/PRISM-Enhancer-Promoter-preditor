@@ -446,16 +446,22 @@ def main():
             logger.info("模式: 仅训练EP互作主干 (AdaptiveIMMAX + RoPE_AdaptAttention自适应损失)")
         else:
             logger.info("模式: 联合训练 (cell交叉熵×0.35 + EP AdaptiveIMMAX×0.65 + 自适应损失)")
-        model.train(); cell_expert.train()
+        model.train()
+        if TRAIN_EP_ONLY:
+            cell_expert.eval()
+        else:
+            cell_expert.train()
         total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
         for batch in pbar:
             enh_ids, pr_ids, cell_lines, labels = batch
             enh_ids = enh_ids.to(device); pr_ids = pr_ids.to(device)
-            enh_ids = apply_random_mask(enh_ids)
-            pr_ids = apply_random_mask(pr_ids)
+            if not TRAIN_EP_ONLY:
+                enh_ids = apply_random_mask(enh_ids)
+                pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)
-            cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
+            if not TRAIN_EP_ONLY:
+                cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
 
             if TRAIN_EXPERT_ONLY:
                 cell_logits = cell_expert(enh_ids, pr_ids)
