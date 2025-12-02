@@ -356,17 +356,12 @@ class LCWnetFootprint(nn.Module):
         # 这里 D_v 设为 d_model 以便与主干融合
         
         self.footprint_compressor = nn.Sequential(
-            # 第一层Conv: 压缩尺度维 S -> S/2
             nn.Conv2d(in_channels=1, out_channels=8, kernel_size=(3, 3), padding=(1, 1)),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 2)),  # [B, 8, S/2, L/2]
-            
-            # 第二层Conv: 进一步提取特征
             nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3, 3), padding=(1, 1)),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 8)),  # 压缩到固定大小 [B, 16, 4, 8]
-            
-            nn.Flatten(),  # [B, 16*4*8 = 512]
+            nn.AdaptiveAvgPool2d((4, 8)),
+            nn.Flatten(),
             nn.Linear(512, d_model),
             nn.LayerNorm(d_model),
             nn.GELU()
