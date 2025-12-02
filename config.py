@@ -27,7 +27,7 @@ PRISM_BATCH_SIZE = 128
 EPOCH = 20
 LEARNING_RATE = 2e-4
 VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
-TRAIN_EXPERT_ONLY = True
+TRAIN_EXPERT_ONLY = False
 
 # 数据加载器配置
 NUM_WORKERS = 4  # 从16减少到4，降低CPU上下文切换开销
