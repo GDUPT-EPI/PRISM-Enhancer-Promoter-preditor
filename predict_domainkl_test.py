@@ -91,7 +91,7 @@ def evaluate():
     sampler = CellBatchSampler(dataset, batch_size=bs, shuffle=False)
     loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn)
     model = EPIModel().to(device)
-    ckpt = os.path.join(SAVE_MODEL_DIR, "prism_epoch_2.pth")
+    ckpt = os.path.join(SAVE_MODEL_DIR, "prism_epoch_1.pth")
     _ = load_checkpoint(model, ckpt, device)
     model.eval()
     all_preds = []
