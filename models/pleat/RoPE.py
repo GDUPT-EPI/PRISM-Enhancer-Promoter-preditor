@@ -9,12 +9,12 @@ from config import MAX_PROMOTER_LENGTH, MAX_ENHANCER_LENGTH
 class RoPEConfig:
     # 基础配置 - 使用配置文件中的参数
     # 位置编码配置
-    POS_ENCODING_MAX_LEN = max(8192, MAX_PROMOTER_LENGTH, MAX_ENHANCER_LENGTH)
+    POS_ENCODING_MAX_LEN = max(4096, MAX_PROMOTER_LENGTH, MAX_ENHANCER_LENGTH)
     ROPE_MAX_SEQ_LEN = POS_ENCODING_MAX_LEN  # 使用相同的位置编码最大长度
     ROPE_BASE = 10000.0  # RoPE基础频率
     ROPE_SCALING_TYPE = "linear"  # 线性缩放类型
     ROPE_TRAINING_LENGTH = 4096  # 模型预训练时的上下文长度
-    ROPE_DROPOUT = 0.1  # RoPE注意力层的dropout率
+    ROPE_DROPOUT = 0.35  # RoPE注意力层的dropout率
     
     # RoPE_AdaptAttention 特有配置
     ADAPTIVE_USE_ADAPTIVE = False  # 是否使用自适应注意力

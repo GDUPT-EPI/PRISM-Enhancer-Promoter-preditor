@@ -39,13 +39,13 @@ NUMBER_WORDS = 4097
 NUMBER_POS = 70
 EMBEDDING_DIM = 768
 CNN_KERNEL_SIZE = 40  # 从40修改为128以匹配checkpoint
-POOL_KERNEL_SIZE = 40
-OUT_CHANNELS = 96
+POOL_KERNEL_SIZE = 20
+OUT_CHANNELS = 64
 
 # Transformer相关参数 - 集中管理避免冲突
 TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
 TRANSFORMER_HEADS = 8   # 多头注意力头数
-TRANSFORMER_FF_DIM = 64  # 前馈网络维度 (从128修改为256以匹配checkpoint)
+TRANSFORMER_FF_DIM = 128  # 前馈网络维度 (从128修改为256以匹配checkpoint)
 
 # CNN和分类头参数 - 集中管理避免冲突
 CNN_DROPOUT = 0.35      # CNN层dropout率
@@ -128,9 +128,9 @@ PRISM_USE_CROSS_ATTENTION = True  # 是否使用交叉注意力
 PRISM_POOLING_TYPE = "mean"  # 池化方式: "mean", "max", "cls"
 
 # PRISM训练与分类配置
-PRISM_IMG_SIZE = 64
+PRISM_IMG_SIZE = 16
 PRISM_CELL_LOSS_WEIGHT = 0.35
 PRISM_EP_LOSS_WEIGHT = 0.65
 PRISM_RANDOM_MASK_PROB = 0.08
 PRISM_RANDOM_MASK_PAD_ID = DNA_EMBEDDING_PADDING_IDX
-PRISM_CLASS_CBATS = 8
+PRISM_CLASS_CBATS = 4
