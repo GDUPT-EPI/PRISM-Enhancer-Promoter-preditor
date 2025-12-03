@@ -125,7 +125,7 @@ class SpeculationPenaltyLoss(nn.Module):
         if neg_mask.any():
             p_neg = pred[neg_mask]
             margin = p_neg - self.threshold
-            fp_term = torch.nn.functional.softplus(self.slope * margin).mean()
+            fp_term = torch.nn.functional.relu(self.slope * margin).pow(2).mean()
         else:
             fp_term = pred.new_tensor(0.0)
 
@@ -328,7 +328,12 @@ class PRISMBackbone(nn.Module):
         result = self.classifier(combined)
         return torch.sigmoid(result), total_adaptive_loss
 
-    def compute_loss(self, outputs, labels, adaptive_loss=0.0):
+    def compute_loss(
+        self,
+        outputs: torch.Tensor,
+        labels: torch.Tensor,
+        adaptive_loss: torch.Tensor | float = 0.0,
+    ) -> torch.Tensor:
         """
         计算总损失：自适应IMMAX + 自适应层损失 + 投机惩罚
 
