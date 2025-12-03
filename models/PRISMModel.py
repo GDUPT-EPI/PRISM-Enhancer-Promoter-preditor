@@ -1,5 +1,11 @@
 """
-PRISM 组件：主干与细胞系分类专家
+PRISM组件
+
+概述:
+- 主干网络(`PRISMBackbone`)用于EP互作概率预测
+- 细胞系分类专家(`CellClassificationExpert`)用于细胞类型特征提取
+
+本模块遵循项目代码规范，所有公开接口提供完整类型注解与Google风格文档字符串。
 """
 
 from torch import nn
@@ -15,8 +21,7 @@ from models.layers.masking import SegmentMaskBuilder
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.layers.footprint import FootprintExpert
 from models.EPIModel import CBATTransformerEncoderLayer
-from config import *
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class AttnPool1d(nn.Module):
@@ -75,7 +80,7 @@ class FusionGate(nn.Module):
         g = self.net(x)
         return g * f1 + (1.0 - g) * f2
 
-# 移除旧版PRISMModel（MLM预训练）及其相关函数，统一由PRISMBackbone和CellClassificationExpert组成
+# 统一由PRISMBackbone和CellClassificationExpert组成
 
 
 class SpeculationPenaltyLoss(nn.Module):
@@ -136,6 +141,13 @@ class SpeculationPenaltyLoss(nn.Module):
         return self.fp_weight * fp_term + self.prior_weight * prior_term
 
 class PRISMBackbone(nn.Module):
+    """PRISM主干网络
+
+    负责对增强子-启动子对进行编码、交叉注意力建模与CBAT增强，输出互作概率。
+
+    Args:
+        num_classes: 可选，细胞系数量，仅用于与专家模块对齐时的构造兼容。
+    """
     def __init__(self, num_classes: int = None):
         super().__init__()
         self.num_transformer_layers = TRANSFORMER_LAYERS
@@ -220,7 +232,7 @@ class PRISMBackbone(nn.Module):
         self.optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY
+            weight_decay=WEIGHT_DECAY,
         )
         self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)
         self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)
@@ -232,7 +244,25 @@ class PRISMBackbone(nn.Module):
         )
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
-    def forward(self, enhancer_ids, promoter_ids, cell_vec=None):
+    def forward(
+        self,
+        enhancer_ids: torch.Tensor,
+        promoter_ids: torch.Tensor,
+        cell_vec: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """前向传播
+
+        将DNA序列ID输入编码，经过CNN、RoPE注意力、交叉注意力与CBAT增强，输出互作概率。
+
+        Args:
+            enhancer_ids: 增强子序列ID，形状 `[B, L_en]`
+            promoter_ids: 启动子序列ID，形状 `[B, L_pr]`
+            cell_vec: 可选，细胞系特征向量，形状 `[B, 2*OUT_CHANNELS]`
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: `(prob, adaptive_loss)`，其中
+            `prob` 为 `[B, 1]` 的互作概率，`adaptive_loss` 为自适应注意力损失标量。
+        """
         K = CNN_KERNEL_SIZE
         P = POOL_KERNEL_SIZE
         min_required_length = K + P - 1
@@ -333,24 +363,41 @@ class PRISMBackbone(nn.Module):
         outputs: torch.Tensor,
         labels: torch.Tensor,
         adaptive_loss: torch.Tensor | float = 0.0,
-    ) -> torch.Tensor:
-        """
-        计算总损失：自适应IMMAX + 自适应层损失 + 投机惩罚
+        return_details: bool = False,
+    ) -> torch.Tensor | Tuple[torch.Tensor, dict]:
+        """计算总损失
+
+        组成：`AdaptiveIMMAX`基础损失 + 自适应注意力损失 + 投机惩罚损失。
 
         Args:
-            outputs (torch.Tensor): 预测概率，形状 [B] 或 [B,1]
-            labels (torch.Tensor): 二分类标签，形状 [B]
-            adaptive_loss (float | torch.Tensor): 由注意力/CBAT模块返回的自适应损失标量
+            outputs: 预测概率，形状 `[B]` 或 `[B,1]`
+            labels: 二分类标签，形状 `[B]`
+            adaptive_loss: 自适应注意力损失标量
+            return_details: 若为True，返回损失细节字典
 
         Returns:
-            torch.Tensor: 标量总损失
+            总损失标量；或当`return_details=True`时，返回 `(loss, details)`
         """
         base_loss = self.criterion(outputs, labels)
         penalty_loss = self.spec_penalty(outputs, labels)
-        return base_loss + adaptive_loss + penalty_loss
+        total = base_loss + adaptive_loss + penalty_loss
+        if return_details:
+            return total, {
+                'base': float(base_loss.detach().item()),
+                'adaptive': float((adaptive_loss.detach().item() if isinstance(adaptive_loss, torch.Tensor) else adaptive_loss)),
+                'penalty': float(penalty_loss.detach().item()),
+            }
+        return total
 
 
 class CellClassificationExpert(nn.Module):
+    """细胞系分类专家
+
+    编码EP对并进行细胞类型分类，同时输出组合特征向量供主干注入。
+
+    Args:
+        num_classes: 细胞类型类别数
+    """
     def __init__(self, num_classes: int):
         super().__init__()
         self.enh_embedding = create_dna_embedding_layer(
@@ -409,7 +456,17 @@ class CellClassificationExpert(nn.Module):
             width=2 * (OUT_CHANNELS * 2) + 1,
         )
 
-    def forward(self, enh_ids, pr_ids):
+    def forward(self, enh_ids: torch.Tensor, pr_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """前向传播
+
+        Args:
+            enh_ids: 增强子序列ID，形状 `[B, L_en]`
+            pr_ids: 启动子序列ID，形状 `[B, L_pr]`
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: `(logits, combined)`，其中
+            `logits` 为细胞分类logits，`combined` 为 `[B, 2*OUT_CHANNELS]` 的组合特征。
+        """
         min_required_length = 59
         if enh_ids.size(1) < min_required_length:
             padding_size = min_required_length - enh_ids.size(1)
