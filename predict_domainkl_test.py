@@ -80,6 +80,7 @@ def _find_latest_checkpoint(save_dir: str):
             if e > latest_model_epoch:
                 latest_model_epoch = e
                 latest_model_path = os.path.join(save_dir, name)
+    print(f"Latest full epoch: {latest_full_epoch}, latest model epoch: {latest_model_epoch}")
     epoch = max(latest_full_epoch, latest_model_epoch)
     chosen_full = latest_full_path if latest_full_epoch == epoch and latest_full_path else None
     chosen_model = latest_model_path if latest_model_epoch == epoch and latest_model_path else None
