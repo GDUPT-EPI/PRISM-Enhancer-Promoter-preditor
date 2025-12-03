@@ -1,13 +1,14 @@
 import os
+import re
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import average_precision_score, roc_auc_score, f1_score, recall_score, precision_score, precision_recall_curve, roc_curve
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from config import DEVICE, SAVE_MODEL_DIR, NUM_WORKERS, BATCH_SIZE, PRISM_BATCH_SIZE, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, DNA_EMBEDDING_PADDING_IDX, MAX_ENHANCER_LENGTH, MAX_PROMOTER_LENGTH, ENHANCER_FEATURE_DIM, PROMOTER_FEATURE_DIM
+from config import DEVICE, PRISM_SAVE_MODEL_DIR, NUM_WORKERS, BATCH_SIZE, PRISM_BATCH_SIZE, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, DNA_EMBEDDING_PADDING_IDX, MAX_ENHANCER_LENGTH, MAX_PROMOTER_LENGTH
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler
-from models.EPIModel import EPIModel
+from models.PRISMModel import PRISMBackbone, CellClassificationExpert
 from models.pleat.embedding import KMerTokenizer
 from torch.nn.utils.rnn import pad_sequence
 
@@ -55,28 +56,72 @@ def collate_fn(batch):
         enh_ids = torch.nn.functional.pad(enh_ids, (0, target_len_en - enh_ids.size(1)), value=pad_id)
     if pr_ids.size(1) < target_len_pr:
         pr_ids = torch.nn.functional.pad(pr_ids, (0, target_len_pr - pr_ids.size(1)), value=pad_id)
-    enh_feat = [torch.zeros(*ENHANCER_FEATURE_DIM) for _ in labels]
-    pr_feat = [torch.zeros(*PROMOTER_FEATURE_DIM) for _ in labels]
-    enh_feat = torch.stack(enh_feat)
-    pr_feat = torch.stack(pr_feat)
     labels_t = torch.tensor(labels, dtype=torch.long)
-    return enh_ids, pr_ids, enh_feat, pr_feat, labels_t, cells
+    return enh_ids, pr_ids, labels_t, cells
 
 
-def load_checkpoint(model, path, device):
-    if not os.path.exists(path):
+def _find_latest_checkpoint(save_dir: str):
+    if not os.path.exists(save_dir):
+        return 0, None, None
+    latest_full_epoch = 0
+    latest_full_path = None
+    latest_model_epoch = 0
+    latest_model_path = None
+    for name in os.listdir(save_dir):
+        m_full = re.match(r"prism_full_epoch_(\d+)\.pt$", name)
+        if m_full:
+            e = int(m_full.group(1))
+            if e > latest_full_epoch:
+                latest_full_epoch = e
+                latest_full_path = os.path.join(save_dir, name)
+        m_model = re.match(r"prism_epoch_(\d+)\.pth$", name)
+        if m_model:
+            e = int(m_model.group(1))
+            if e > latest_model_epoch:
+                latest_model_epoch = e
+                latest_model_path = os.path.join(save_dir, name)
+    epoch = max(latest_full_epoch, latest_model_epoch)
+    chosen_full = latest_full_path if latest_full_epoch == epoch and latest_full_path else None
+    chosen_model = latest_model_path if latest_model_epoch == epoch and latest_model_path else None
+    return epoch, chosen_full, chosen_model
+
+def load_prism_checkpoint(backbone: PRISMBackbone, cell_expert: CellClassificationExpert, save_dir: str, device: torch.device):
+    epoch, full_path, model_path = _find_latest_checkpoint(save_dir)
+    if epoch <= 0:
         return False
-    sd = torch.load(path, map_location=device)
-    if isinstance(sd, dict):
-        for key in ["backbone", "model_state", "state_dict"]:
-            if key in sd and isinstance(sd[key], dict):
+    if full_path and os.path.exists(full_path):
+        sd = torch.load(full_path, map_location=device)
+        if isinstance(sd, dict):
+            if 'model_state' in sd:
                 try:
-                    model.load_state_dict(sd[key], strict=False)
-                    return True
+                    backbone.load_state_dict(sd['model_state'], strict=False)
+                except Exception:
+                    return False
+            if 'cell_expert_state' in sd:
+                try:
+                    cell_expert.load_state_dict(sd['cell_expert_state'], strict=False)
                 except Exception:
                     pass
+            return True
+        return False
+    if model_path and os.path.exists(model_path):
+        sd = torch.load(model_path, map_location=device)
+        if isinstance(sd, dict):
+            ok = False
+            if 'backbone' in sd and isinstance(sd['backbone'], dict):
+                try:
+                    backbone.load_state_dict(sd['backbone'], strict=False)
+                    ok = True
+                except Exception:
+                    pass
+            if 'cell_expert' in sd and isinstance(sd['cell_expert'], dict):
+                try:
+                    cell_expert.load_state_dict(sd['cell_expert'], strict=False)
+                except Exception:
+                    pass
+            return ok
         try:
-            model.load_state_dict(sd, strict=False)
+            backbone.load_state_dict(sd, strict=False)
             return True
         except Exception:
             return False
@@ -90,23 +135,24 @@ def evaluate():
     bs = PRISM_BATCH_SIZE if PRISM_BATCH_SIZE else BATCH_SIZE
     sampler = CellBatchSampler(dataset, batch_size=bs, shuffle=False)
     loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn)
-    model = EPIModel().to(device)
-    ckpt = os.path.join(SAVE_MODEL_DIR, "prism_epoch_2.pth")
-    _ = load_checkpoint(model, ckpt, device)
-    model.eval()
+    num_cells = len(dataset.cell_lines) if hasattr(dataset, 'cell_lines') else len(sorted(df['cell_line'].unique()))
+    cell_expert = CellClassificationExpert(num_classes=num_cells).to(device)
+    backbone = PRISMBackbone().to(device)
+    _ = load_prism_checkpoint(backbone, cell_expert, PRISM_SAVE_MODEL_DIR, device)
+    backbone.eval(); cell_expert.eval()
     all_preds = []
     all_labels = []
     per_cell = {}
     with torch.no_grad():
         for batch in tqdm(loader, desc="Predict domain-kl/test"):
-            enh_ids, pr_ids, enh_feat, pr_feat, labels, cells = batch
+            enh_ids, pr_ids, labels, cells = batch
             enh_ids = enh_ids.to(device)
             pr_ids = pr_ids.to(device)
-            enh_feat = enh_feat.to(device)
-            pr_feat = pr_feat.to(device)
-            outputs, _, _ = model(enh_ids, pr_ids, enh_feat, pr_feat)
+            labels_t = labels.to(device)
+            cell_logits, cell_vec = cell_expert(enh_ids, pr_ids)
+            outputs, _ = backbone(enh_ids, pr_ids, cell_vec)
             preds = outputs.squeeze(-1).detach().cpu().numpy()
-            labs = labels.numpy()
+            labs = labels_t.cpu().numpy()
             all_preds.append(preds)
             all_labels.append(labs)
             cell = cells[0] if len(cells) > 0 else "UNKNOWN"
@@ -124,7 +170,6 @@ def evaluate():
     f1 = f1_score(all_labels, bin_preds)
     rec = recall_score(all_labels, bin_preds)
     prec = precision_score(all_labels, bin_preds)
-    # 修改输出目录为compete目录
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "compete")
     os.makedirs(out_dir, exist_ok=True)
     pr_p, pr_r, _ = precision_recall_curve(all_labels, all_preds)
