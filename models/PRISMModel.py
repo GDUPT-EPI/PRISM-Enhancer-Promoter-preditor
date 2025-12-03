@@ -16,6 +16,7 @@ from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.layers.footprint import FootprintExpert
 from models.EPIModel import CBATTransformerEncoderLayer
 from config import *
+from typing import Optional
 
 
 class AttnPool1d(nn.Module):
@@ -76,6 +77,63 @@ class FusionGate(nn.Module):
 
 # 移除旧版PRISMModel（MLM预训练）及其相关函数，统一由PRISMBackbone和CellClassificationExpert组成
 
+
+class SpeculationPenaltyLoss(nn.Module):
+    """
+    显式投机惩罚损失，用于抑制模型在类别不平衡时的“全预测为正类”的投机行为。
+
+    组成部分：
+    - 负类高置信度惩罚：当 `y=0` 且 `p` 高于阈值时进行平滑惩罚
+    - 先验匹配惩罚：约束批次预测均值接近标签均值，避免整体偏置
+
+    Args:
+        fp_weight (float): 负类投机惩罚权重
+        threshold (float): 惩罚触发阈值（通常为0.5）
+        slope (float): 平滑惩罚的斜率（越大越接近硬阈值）
+        prior_weight (float): 先验匹配项权重
+
+    Returns:
+        torch.Tensor: 标量惩罚损失
+    """
+    def __init__(
+        self,
+        fp_weight: float = 0.5,
+        threshold: float = 0.5,
+        slope: float = 6.0,
+        prior_weight: float = 0.2,
+    ):
+        super().__init__()
+        self.fp_weight = fp_weight
+        self.threshold = threshold
+        self.slope = slope
+        self.prior_weight = prior_weight
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pred: 概率预测 `[B]` 或 `[B,1]`（已sigmoid）
+            target: 二分类标签 `[B]`，取值 {0,1}
+
+        Returns:
+            标量惩罚损失
+        """
+        if pred.dim() == 2 and pred.size(1) == 1:
+            pred = pred.squeeze(1)
+        target = target.float()
+
+        neg_mask = (target == 0)
+        if neg_mask.any():
+            p_neg = pred[neg_mask]
+            margin = p_neg - self.threshold
+            fp_term = torch.nn.functional.softplus(self.slope * margin).mean()
+        else:
+            fp_term = pred.new_tensor(0.0)
+
+        mean_pred = pred.mean()
+        mean_target = target.mean()
+        prior_term = (mean_pred - mean_target).pow(2)
+
+        return self.fp_weight * fp_term + self.prior_weight * prior_term
 
 class PRISMBackbone(nn.Module):
     def __init__(self, num_classes: int = None):
@@ -158,6 +216,7 @@ class PRISMBackbone(nn.Module):
         )
         self.cell_alpha = nn.Parameter(torch.tensor(0.0))
         self.criterion = AdaptiveIMMAXLoss()
+        self.spec_penalty = SpeculationPenaltyLoss()
         self.optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=LEARNING_RATE,
@@ -270,8 +329,20 @@ class PRISMBackbone(nn.Module):
         return torch.sigmoid(result), total_adaptive_loss
 
     def compute_loss(self, outputs, labels, adaptive_loss=0.0):
-        loss = self.criterion(outputs, labels)
-        return loss + adaptive_loss
+        """
+        计算总损失：自适应IMMAX + 自适应层损失 + 投机惩罚
+
+        Args:
+            outputs (torch.Tensor): 预测概率，形状 [B] 或 [B,1]
+            labels (torch.Tensor): 二分类标签，形状 [B]
+            adaptive_loss (float | torch.Tensor): 由注意力/CBAT模块返回的自适应损失标量
+
+        Returns:
+            torch.Tensor: 标量总损失
+        """
+        base_loss = self.criterion(outputs, labels)
+        penalty_loss = self.spec_penalty(outputs, labels)
+        return base_loss + adaptive_loss + penalty_loss
 
 
 class CellClassificationExpert(nn.Module):

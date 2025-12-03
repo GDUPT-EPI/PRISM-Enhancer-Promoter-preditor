@@ -576,6 +576,7 @@ def main():
             logger.info("Loss Weights: cell=0.35, ep=0.65")
         model.train(); cell_expert.train()
         total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
+        total_tp = 0; total_fp = 0; total_fn = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
         for batch in pbar:
             enh_ids, pr_ids, cell_lines, labels = batch
@@ -593,6 +594,7 @@ def main():
             with torch.no_grad():
                 cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
 
+            precision = 0.0; recall = 0.0; f1 = 0.0
             if TRAIN_EXPERT_ONLY:
                 loss = cell_loss
                 optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
@@ -604,6 +606,13 @@ def main():
                 with torch.no_grad():
                     ep_preds = (ep_outputs >= 0.5).long()
                     ep_acc = (ep_preds == labels.long()).float().mean().item()
+                    tp = int(((ep_preds == 1) & (labels.long() == 1)).sum().item())
+                    fp = int(((ep_preds == 1) & (labels.long() == 0)).sum().item())
+                    fn = int(((ep_preds == 0) & (labels.long() == 1)).sum().item())
+                    total_tp += tp; total_fp += fp; total_fn += fn
+                    precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0
+                    recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0
+                    f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0
                 loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
                 optimizer.zero_grad();
                 loss.backward();
@@ -611,12 +620,15 @@ def main():
                 optimizer.step()
 
             total_loss += loss.item(); total_cell_acc += cell_acc; total_ep_acc += ep_acc; n_batches += 1
-            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'cell_acc': f'{cell_acc:.4f}', 'ep_acc': f'{ep_acc:.4f}'})
+            pbar.set_postfix({'loss': f'{loss.item():.4f}', 'cell_acc': f'{cell_acc:.4f}', 'ep_acc': f'{ep_acc:.4f}', 'prec': f'{precision:.4f}', 'rec': f'{recall:.4f}', 'f1': f'{f1:.4f}'})
 
         avg_loss = total_loss / max(n_batches, 1)
         avg_cell_acc = total_cell_acc / max(n_batches, 1)
         avg_ep_acc = total_ep_acc / max(n_batches, 1)
-        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, Cell Acc: {avg_cell_acc:.4f}, EP Acc: {avg_ep_acc:.4f}")
+        epoch_precision = (total_tp / max(total_tp + total_fp, 1)) if (total_tp + total_fp) > 0 else 0.0
+        epoch_recall = (total_tp / max(total_tp + total_fn, 1)) if (total_tp + total_fn) > 0 else 0.0
+        epoch_f1 = (2 * epoch_precision * epoch_recall / max(epoch_precision + epoch_recall, 1e-6)) if (epoch_precision + epoch_recall) > 0 else 0.0
+        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, Cell Acc: {avg_cell_acc:.4f}, EP Acc: {avg_ep_acc:.4f}, Prec: {epoch_precision:.4f}, Rec: {epoch_recall:.4f}, F1: {epoch_f1:.4f}")
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
