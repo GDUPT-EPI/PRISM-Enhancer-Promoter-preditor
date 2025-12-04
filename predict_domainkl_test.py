@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from config import DEVICE, PRISM_SAVE_MODEL_DIR, NUM_WORKERS, BATCH_SIZE, PRISM_BATCH_SIZE, CNN_KERNEL_SIZE, POOL_KERNEL_SIZE, DNA_EMBEDDING_PADDING_IDX, MAX_ENHANCER_LENGTH, MAX_PROMOTER_LENGTH
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler
-from models.PRISMModel import PRISMBackbone, CellClassificationExpert
+from models.PRISMModel import PRISMBackbone
 from models.pleat.embedding import KMerTokenizer
 from torch.nn.utils.rnn import pad_sequence
 
@@ -86,7 +86,7 @@ def _find_latest_checkpoint(save_dir: str):
     chosen_model = latest_model_path if latest_model_epoch == epoch and latest_model_path else None
     return epoch, chosen_full, chosen_model
 
-def load_prism_checkpoint(backbone: PRISMBackbone, cell_expert: CellClassificationExpert, save_dir: str, device: torch.device):
+def load_prism_checkpoint(backbone: PRISMBackbone, save_dir: str, device: torch.device):
     epoch, full_path, model_path = _find_latest_checkpoint(save_dir)
     if epoch <= 0:
         return False
@@ -98,11 +98,6 @@ def load_prism_checkpoint(backbone: PRISMBackbone, cell_expert: CellClassificati
                     backbone.load_state_dict(sd['model_state'], strict=False)
                 except Exception:
                     return False
-            if 'cell_expert_state' in sd:
-                try:
-                    cell_expert.load_state_dict(sd['cell_expert_state'], strict=False)
-                except Exception:
-                    pass
             return True
         return False
     if model_path and os.path.exists(model_path):
@@ -113,11 +108,6 @@ def load_prism_checkpoint(backbone: PRISMBackbone, cell_expert: CellClassificati
                 try:
                     backbone.load_state_dict(sd['backbone'], strict=False)
                     ok = True
-                except Exception:
-                    pass
-            if 'cell_expert' in sd and isinstance(sd['cell_expert'], dict):
-                try:
-                    cell_expert.load_state_dict(sd['cell_expert'], strict=False)
                 except Exception:
                     pass
             return ok
@@ -136,11 +126,9 @@ def evaluate():
     bs = PRISM_BATCH_SIZE if PRISM_BATCH_SIZE else BATCH_SIZE
     sampler = CellBatchSampler(dataset, batch_size=bs, shuffle=False)
     loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=NUM_WORKERS, pin_memory=True, collate_fn=collate_fn)
-    num_cells = len(dataset.cell_lines) if hasattr(dataset, 'cell_lines') else len(sorted(df['cell_line'].unique()))
-    cell_expert = CellClassificationExpert(num_classes=num_cells).to(device)
     backbone = PRISMBackbone().to(device)
-    _ = load_prism_checkpoint(backbone, cell_expert, PRISM_SAVE_MODEL_DIR, device)
-    backbone.eval(); cell_expert.eval()
+    _ = load_prism_checkpoint(backbone, PRISM_SAVE_MODEL_DIR, device)
+    backbone.eval()
     all_preds = []
     all_labels = []
     per_cell = {}
@@ -150,8 +138,7 @@ def evaluate():
             enh_ids = enh_ids.to(device)
             pr_ids = pr_ids.to(device)
             labels_t = labels.to(device)
-            cell_logits, cell_vec = cell_expert(enh_ids, pr_ids)
-            outputs, _ = backbone(enh_ids, pr_ids, cell_vec)
+            outputs, _ = backbone(enh_ids, pr_ids)
             preds = outputs.squeeze(-1).detach().cpu().numpy()
             labs = labels_t.cpu().numpy()
             all_preds.append(preds)

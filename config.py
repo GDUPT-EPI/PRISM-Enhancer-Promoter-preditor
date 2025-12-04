@@ -22,12 +22,11 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
-BATCH_SIZE = 256  # 从8增加到32，提高GPU利用率
-PRISM_BATCH_SIZE = 128  # PRISM模型的批量大小
-EPOCH = 20
-LEARNING_RATE = 1e-4
-VALIDATION_INTERVAL = 1  # 每隔多少个epoch进行一次验证
-TRAIN_EXPERT_ONLY = False
+BATCH_SIZE = 256  # 默认训练批量大小
+PRISM_BATCH_SIZE = 128  # PRISM模型批量大小
+EPOCH = 20  # 训练轮数
+LEARNING_RATE = 1e-4  # 学习率
+GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪上限
 
 # 数据加载器配置
 NUM_WORKERS = 4  # 从16减少到4，降低CPU上下文切换开销
@@ -35,12 +34,10 @@ PREFETCH_FACTOR = 2  # 从32减少到2，降低内存占用
 PERSISTENT_WORKERS = True  # 避免worker重复创建
 
 # 模型参数配置
-NUMBER_WORDS = 4097
-NUMBER_POS = 70
-EMBEDDING_DIM = 768
-CNN_KERNEL_SIZE = 40  # 从40修改为128以匹配checkpoint
-POOL_KERNEL_SIZE = 20
-OUT_CHANNELS = 64
+EMBEDDING_DIM = 768  # 嵌入维度
+CNN_KERNEL_SIZE = 40  # 卷积核大小
+POOL_KERNEL_SIZE = 20  # 池化核大小
+OUT_CHANNELS = 64  # 卷积输出通道数
 
 # Transformer相关参数 - 集中管理避免冲突
 TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
@@ -49,8 +46,6 @@ TRANSFORMER_FF_DIM = 128  # 前馈网络维度 (从128修改为256以匹配check
 
 # CNN和分类头参数 - 集中管理避免冲突
 CNN_DROPOUT = 0.35      # CNN层dropout率
-CLASSIFIER_HIDDEN_SIZE = 128  # 分类头中间层大小
-CLASSIFIER_DROPOUT = 0.5     # 分类头dropout率
 
 # 优化器配置
 WEIGHT_DECAY = 0.001
@@ -81,7 +76,6 @@ SAVE_ATTENTION_OUTPUTS = False
 
 # K-mer配置
 KMER_SIZE = 6  # 6-mer tokenization
-KMER_OVERLAP = 5  # overlapping k-mer (k-1)
 
 # DNA嵌入层配置
 DNA_EMBEDDING_VOCAB_SIZE = 4097  # 6-mer词汇表大小 (4^6 + 1 null token)
@@ -94,7 +88,7 @@ PREPROCESS_NUM_WORKERS = max(1, os.cpu_count() - 1)  # 使用所有核心-1
 PREPROCESS_BATCH_SIZE = 2000  # 批处理大小，根据内存调整
 USE_LAZY_LOADING = False  # 是否使用懒加载模式
 
-PREPROCESS_NUM_THREADS = 12  # 根据你的CPU调整
+PREPROCESS_NUM_THREADS = 12  # 根据CPU调整
 
 # 批处理大小（用于进度显示，不影响内存）
 PREPROCESS_BATCH_SIZE = 2000
@@ -105,32 +99,6 @@ ENABLE_FAST_PREPROCESSING = True
 # 预处理配置信息将通过日志系统输出（在main文件中初始化）
 
 # ============================================================================
-# BERT预训练配置
+# PRISM模型配置
 # ============================================================================
-BERT_MASK_PROB = 0.15  # 15%的token被mask
-BERT_MASK_TOKEN_PROB = 0.8  # 80%替换为[MASK]
-BERT_RANDOM_TOKEN_PROB = 0.1  # 10%替换为随机token
-BERT_UNCHANGED_PROB = 0.1  # 10%保持不变
-
-# BERT特殊token - 注意vocab_size=4097，有效索引是0-4096
-BERT_MASK_TOKEN_ID = 4096  # [MASK] token ID (vocab最后一个位置)
-BERT_PAD_TOKEN_ID = 0  # [PAD] token ID
-BERT_CLS_TOKEN_ID = 4095  # [CLS] token ID (可选)
-BERT_SEP_TOKEN_ID = 4094  # [SEP] token ID (可选)
-
-# BERT训练参数
-BERT_LEARNING_RATE = 1e-3
-BERT_WARMUP_STEPS = 1000
-BERT_MAX_GRAD_NORM = 1.0
-
-# PRISM模型配置（简化版本）
-PRISM_USE_CROSS_ATTENTION = True  # 是否使用交叉注意力
-PRISM_POOLING_TYPE = "mean"  # 池化方式: "mean", "max", "cls"
-
-# PRISM训练与分类配置
-PRISM_IMG_SIZE = 16
-PRISM_CELL_LOSS_WEIGHT = 0.35
-PRISM_EP_LOSS_WEIGHT = 0.65
-PRISM_RANDOM_MASK_PROB = 0.08
-PRISM_RANDOM_MASK_PAD_ID = DNA_EMBEDDING_PADDING_IDX
-PRISM_CLASS_CBATS = 4
+PRISM_IMG_SIZE = 16  # CBAT模块图像尺寸

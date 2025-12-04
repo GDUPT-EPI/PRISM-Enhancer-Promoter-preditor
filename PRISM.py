@@ -4,9 +4,10 @@ PRISM训练脚本
 
 用途:
 - 使用`PRISMBackbone`进行EP互作概率预测训练
-- 搭配`CellClassificationExpert`注入细胞系特征
 
-已移除过时的MLM相关逻辑，简化损失与训练流程。
+说明:
+- 已彻底移除专家网络（CellClassificationExpert）相关逻辑
+- 已移除过时的MLM相关逻辑，简化损失与训练流程
 """
 
 from config import *
@@ -16,7 +17,7 @@ from data_loader import load_prism_data, PRISMDataset, CellBatchSampler
 import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
-from models.PRISMModel import PRISMBackbone, CellClassificationExpert
+from models.PRISMModel import PRISMBackbone
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 import torch
@@ -32,25 +33,24 @@ device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
 # 配置日志系统
 def setup_logging():
     """配置日志系统"""
-    log_filename = os.path.join(LOG_DIR, f"prism_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    
+    log_filename = os.path.join(LOG_DIR, f"prism_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")  # 日志文件路径
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'  # 日志格式
     logging.basicConfig(
-        level=logging.INFO,
-        format=log_format,
+        level=logging.INFO,  # 设置日志级别
+        format=log_format,  # 设置日志格式
         handlers=[
-            logging.FileHandler(log_filename, encoding='utf-8'),
-            logging.StreamHandler()
+            logging.FileHandler(log_filename, encoding='utf-8'),  # 写入文件
+            logging.StreamHandler()  # 同时输出到控制台
         ]
     )
     
-    return logging.getLogger(__name__)
+    return logging.getLogger(__name__)  # 返回logger实例
 
 
-logger = setup_logging()
-logger.info("PRISM预训练日志系统已初始化")
-logger.info(f"日志文件: {LOG_DIR}")
-logger.info(f"预处理线程数: {PREPROCESS_NUM_THREADS}")
+logger = setup_logging()  # 初始化日志
+logger.info("PRISM预训练日志系统已初始化")  # 输出初始化信息
+logger.info(f"日志文件: {LOG_DIR}")  # 日志目录
+logger.info(f"预处理线程数: {PREPROCESS_NUM_THREADS}")  # 预处理线程数
 
 
 def prism_collate_fn(batch):
@@ -63,10 +63,10 @@ def prism_collate_fn(batch):
     """
     from models.pleat.embedding import KMerTokenizer
     
-    enhancer_seqs = [item[0] for item in batch]
-    promoter_seqs = [item[1] for item in batch]
-    cell_lines = [item[2] for item in batch]
-    labels = [item[3] for item in batch]
+    enhancer_seqs = [item[0] for item in batch]  # 增强子序列
+    promoter_seqs = [item[1] for item in batch]  # 启动子序列
+    cell_lines = [item[2] for item in batch]  # 细胞系名称
+    labels = [item[3] for item in batch]  # 标签
     
     # 创建tokenizer (只创建一次)
     if not hasattr(prism_collate_fn, 'tokenizer'):
@@ -75,12 +75,12 @@ def prism_collate_fn(batch):
     tokenizer = prism_collate_fn.tokenizer
     
     # 将DNA序列转换为token IDs
-    enhancer_ids_list = [tokenizer.encode(seq) for seq in enhancer_seqs]
-    promoter_ids_list = [tokenizer.encode(seq) for seq in promoter_seqs]
+    enhancer_ids_list = [tokenizer.encode(seq) for seq in enhancer_seqs]  # 编码增强子
+    promoter_ids_list = [tokenizer.encode(seq) for seq in promoter_seqs]  # 编码启动子
 
     K = CNN_KERNEL_SIZE
     P = POOL_KERNEL_SIZE
-    pad_id = DNA_EMBEDDING_PADDING_IDX
+    pad_id = DNA_EMBEDDING_PADDING_IDX  # PAD索引
     min_req = K + P - 1
 
     max_len_en = max(int(x.size(0)) for x in enhancer_ids_list) if enhancer_ids_list else min_req
@@ -93,14 +93,14 @@ def prism_collate_fn(batch):
     target_len_en = max(min_req, min(target_len_en, MAX_ENHANCER_LENGTH))
     target_len_pr = max(min_req, min(target_len_pr, MAX_PROMOTER_LENGTH))
 
-    processed_en = []
+    processed_en = []  # 处理后的增强子序列
     for ids in enhancer_ids_list:
         L = int(ids.size(0))
         if L > target_len_en:
             s = (L - target_len_en) // 2
             ids = ids[s:s + target_len_en]
         processed_en.append(ids)
-    processed_pr = []
+    processed_pr = []  # 处理后的启动子序列
     for ids in promoter_ids_list:
         L = int(ids.size(0))
         if L > target_len_pr:
@@ -116,7 +116,7 @@ def prism_collate_fn(batch):
     if padded_promoter_ids.size(1) < target_len_pr:
         padded_promoter_ids = torch.nn.functional.pad(padded_promoter_ids, (0, target_len_pr - padded_promoter_ids.size(1)), value=pad_id)
     
-    labels_tensor = torch.tensor(labels, dtype=torch.float)
+    labels_tensor = torch.tensor(labels, dtype=torch.float)  # 标签张量
     
     return padded_enhancer_ids, padded_promoter_ids, cell_lines, labels_tensor
 
@@ -139,7 +139,7 @@ def _find_latest_epoch(save_dir: str) -> int:
             epochs.append(int(m2.group(1)))
     return max(epochs) if epochs else 0
 
-def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau, cell_expert: torch.nn.Module | None = None):
+def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):
     latest_epoch = _find_latest_epoch(save_dir)
     if latest_epoch <= 0:
         return 0, {}, torch.zeros(OUT_CHANNELS, device=device)
@@ -156,18 +156,12 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
             logger.info(f"加载完整状态: {full_path} (epoch={state_epoch})")
             if 'model_state' in state:
                 model.load_state_dict(state['model_state'], strict=False)
-            if cell_expert is not None and 'cell_expert_state' in state:
-                try:
-                    cell_expert.load_state_dict(state['cell_expert_state'], strict=False)
-                except Exception:
-                    pass
             if 'optimizer_state' in state:
                 try:
                     saved_opt = state['optimizer_state']
                     saved_groups = len(saved_opt.get('param_groups', []))
                     curr_groups = len(optimizer.state_dict().get('param_groups', []))
-                    saved_mode = bool(state.get('train_expert_only', False))
-                    if saved_groups == curr_groups and saved_mode == TRAIN_EXPERT_ONLY:
+                    if saved_groups == curr_groups:
                         optimizer.load_state_dict(saved_opt)
                         logger.info("优化器状态已恢复")
                     else:
@@ -193,11 +187,6 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                     model.load_state_dict(sd['backbone'], strict=False)
                 else:
                     model.load_state_dict(sd, strict=False)
-                if cell_expert is not None and 'cell_expert' in sd:
-                    try:
-                        cell_expert.load_state_dict(sd['cell_expert'], strict=False)
-                    except Exception:
-                        pass
             logger.info(f"加载模型检查点: {model_path} (epoch={latest_epoch})")
         if os.path.exists(kb_path):
             kb = torch.load(kb_path, map_location='cpu')
@@ -244,29 +233,28 @@ def main():
     
     # 创建模型
     logger.info("创建PRISM模型...")
-    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
+    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")  # 细胞系列表XML路径
     def load_cell_types(path: str):
         if os.path.exists(path):
             try:
-                root = ET.parse(path).getroot()
+                root = ET.parse(path).getroot()  # 解析XML
                 names = []
                 for node in root.findall(".//type"):
-                    name = node.get("name")
+                    name = node.get("name")  # 读取name属性
                     if name:
-                        names.append(name.strip())
+                        names.append(name.strip())  # 去除空白并收集
                 names = [n for n in names if n]
                 if names:
                     return names
             except Exception:
                 pass
-        return []
+        return []  # 文件不存在或解析失败时返回空列表
     fixed_cells = load_cell_types(xml_path)
     if not fixed_cells:
         fixed_cells = unique_cells_train
     label_map = {c: i for i, c in enumerate(fixed_cells)}
     other_id = label_map.get("OTHER", None)
     num_cells = len(fixed_cells)
-    cell_expert = CellClassificationExpert(num_classes=num_cells).to(device)
     model = PRISMBackbone(num_classes=num_cells).to(device)
     model = model.to(device)
     
@@ -283,12 +271,7 @@ def main():
 
     start_epoch = 0
 
-    if TRAIN_EXPERT_ONLY:
-        for p in model.parameters():
-            p.requires_grad = False
-        optimizer = torch.optim.AdamW(list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    else:
-        optimizer = torch.optim.AdamW(list(model.parameters()) + list(cell_expert.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(list(model.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     total_steps = len(train_loader) * EPOCH
     scheduler = None
     
@@ -303,7 +286,7 @@ def main():
     logger.info("=" * 80)
     
     os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)
-    start_epoch, _kb, _ema_mu = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler, cell_expert)
+    start_epoch, _kb, _ema_mu = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)
     if start_epoch > 0:
         logger.info(f"从最近权重恢复: epoch {start_epoch}")
     else:
@@ -312,12 +295,9 @@ def main():
         logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")
     for epoch_idx in range(start_epoch, EPOCH):
         # 训练
-        if TRAIN_EXPERT_ONLY:
-            logger.info("Expert-only training: optimizing CellClassificationExpert only")
-        else:
-            logger.info("Loss Weights: cell=0.35, ep=0.65")
-        model.train(); cell_expert.train()
-        total_loss = 0.0; total_cell_acc = 0.0; total_ep_acc = 0.0; n_batches = 0
+        logger.info("Loss Weights: ep=1.0")
+        model.train()
+        total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0
         total_tp = 0; total_fp = 0; total_fn = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
         for batch in pbar:
@@ -327,47 +307,32 @@ def main():
             # enh_ids = apply_random_mask(enh_ids)
             # pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)
-            cell_targets = torch.tensor([cell_label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device, dtype=torch.long)
-
-            cell_logits, cell_vec = cell_expert(enh_ids, pr_ids)
-            if cell_logits.dim() == 3 and cell_logits.size(1) == 1:
-                cell_logits = cell_logits.squeeze(1)
-            cell_loss = F.cross_entropy(cell_logits, cell_targets)
-            with torch.no_grad():
-                cell_acc = (cell_logits.argmax(dim=-1) == cell_targets).float().mean().item()
-
             precision = 0.0; recall = 0.0; f1 = 0.0
-            if TRAIN_EXPERT_ONLY:
-                loss = cell_loss
-                optimizer.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(list(cell_expert.parameters()), BERT_MAX_GRAD_NORM); optimizer.step()
-                ep_acc = 0.0
-            else:
-                ep_outputs, adaptive_loss = model(enh_ids, pr_ids, cell_vec)
-                ep_outputs = ep_outputs.squeeze(-1)
-                ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)
-                with torch.no_grad():
-                    ep_preds = (ep_outputs >= 0.5).long()
-                    ep_acc = (ep_preds == labels.long()).float().mean().item()
-                    tp = int(((ep_preds == 1) & (labels.long() == 1)).sum().item())
-                    fp = int(((ep_preds == 1) & (labels.long() == 0)).sum().item())
-                    fn = int(((ep_preds == 0) & (labels.long() == 1)).sum().item())
-                    total_tp += tp; total_fp += fp; total_fn += fn
-                    precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0
-                    recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0
-                    f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0
-                loss = PRISM_CELL_LOSS_WEIGHT * cell_loss + PRISM_EP_LOSS_WEIGHT * ep_loss
-                optimizer.zero_grad();
-                loss.backward();
-                torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(cell_expert.parameters()), max_norm=BERT_MAX_GRAD_NORM/2);
-                optimizer.step()
+            ep_outputs, adaptive_loss = model(enh_ids, pr_ids)
+            ep_outputs = ep_outputs.squeeze(-1)
+            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)
+            with torch.no_grad():
+                ep_preds = (ep_outputs >= 0.5).long()
+                ep_acc = (ep_preds == labels.long()).float().mean().item()
+                tp = int(((ep_preds == 1) & (labels.long() == 1)).sum().item())
+                fp = int(((ep_preds == 1) & (labels.long() == 0)).sum().item())
+                fn = int(((ep_preds == 0) & (labels.long() == 1)).sum().item())
+                total_tp += tp; total_fp += fp; total_fn += fn
+                precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0
+                recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0
+                f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0
+            loss = ep_loss
+            optimizer.zero_grad();
+            loss.backward();
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()), max_norm=GRAD_CLIP_MAX_NORM);
+            optimizer.step()
 
-            total_loss += loss.item(); total_cell_acc += cell_acc; total_ep_acc += ep_acc; n_batches += 1
+            total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'base': f"{loss_details['base']:.4f}" if not TRAIN_EXPERT_ONLY else 'n/a',
-                'adaptive': f"{loss_details['adaptive']:.4f}" if not TRAIN_EXPERT_ONLY else 'n/a',
-                'penalty': f"{loss_details['penalty']:.4f}" if not TRAIN_EXPERT_ONLY else 'n/a',
-                'cell_acc': f'{cell_acc:.4f}',
+                'base': f"{loss_details['base']:.4f}",
+                'adaptive': f"{loss_details['adaptive']:.4f}",
+                'penalty': f"{loss_details['penalty']:.4f}",
                 'ep_acc': f'{ep_acc:.4f}',
                 'prec': f'{precision:.4f}',
                 'rec': f'{recall:.4f}',
@@ -375,24 +340,21 @@ def main():
             })
 
         avg_loss = total_loss / max(n_batches, 1)
-        avg_cell_acc = total_cell_acc / max(n_batches, 1)
         avg_ep_acc = total_ep_acc / max(n_batches, 1)
         epoch_precision = (total_tp / max(total_tp + total_fp, 1)) if (total_tp + total_fp) > 0 else 0.0
         epoch_recall = (total_tp / max(total_tp + total_fn, 1)) if (total_tp + total_fn) > 0 else 0.0
         epoch_f1 = (2 * epoch_precision * epoch_recall / max(epoch_precision + epoch_recall, 1e-6)) if (epoch_precision + epoch_recall) > 0 else 0.0
-        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, Cell Acc: {avg_cell_acc:.4f}, EP Acc: {avg_ep_acc:.4f}, Prec: {epoch_precision:.4f}, Rec: {epoch_recall:.4f}, F1: {epoch_f1:.4f}")
+        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, EP Acc: {avg_ep_acc:.4f}, Prec: {epoch_precision:.4f}, Rec: {epoch_recall:.4f}, F1: {epoch_f1:.4f}")
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")
-        torch.save({'backbone': model.state_dict(), 'cell_expert': cell_expert.state_dict()}, checkpoint_path)
+        torch.save({'backbone': model.state_dict()}, checkpoint_path)
         logger.info(f"保存检查点: {checkpoint_path}")
         full_state_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")
         full_state = {
             'model_state': model.state_dict(),
-            'cell_expert_state': cell_expert.state_dict(),
             'optimizer_state': optimizer.state_dict(),
             'epoch': epoch_idx + 1,
-            'train_expert_only': TRAIN_EXPERT_ONLY,
         }
         if scheduler is not None:
             full_state['scheduler_state'] = scheduler.state_dict()

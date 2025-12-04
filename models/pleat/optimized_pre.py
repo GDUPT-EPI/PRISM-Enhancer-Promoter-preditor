@@ -22,8 +22,7 @@ from config import (
     ENHANCER_FEATURE_DIM,
     PROMOTER_FEATURE_DIM,
     PROJECT_ROOT,
-    KMER_SIZE,
-    KMER_OVERLAP
+    KMER_SIZE
 )
 
 # 导入词表管理模块
