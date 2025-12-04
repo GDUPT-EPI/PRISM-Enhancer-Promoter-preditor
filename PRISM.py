@@ -129,56 +129,47 @@ def _find_latest_epoch(save_dir: str) -> int:  # 查找最新epoch
 
 def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):  # 加载恢复状态
     latest_epoch = _find_latest_epoch(save_dir)  # 查找最新epoch
-    if latest_epoch <= 0:  # 如果没有找到epoch
-        return 0, {}, torch.zeros(OUT_CHANNELS, device=device)  # 返回初始状态
-    full_path = os.path.join(save_dir, f"prism_full_epoch_{latest_epoch}.pt")  # 完整状态路径
-    kb_path = os.path.join(save_dir, f"footprint_kb_epoch_{latest_epoch}.pt")  # 知识库路径
-    model_path = os.path.join(save_dir, f"prism_epoch_{latest_epoch}.pth")  # 模型路径
-    ema_mu = torch.zeros(OUT_CHANNELS, device=device)  # EMA参数
-    kb = {}  # 知识库
-    if os.path.exists(full_path):  # 如果完整状态文件存在
-        state = torch.load(full_path, map_location=device)  # 加载状态
-        if isinstance(state, dict):  # 如果是字典
-            state_epoch = int(state.get('epoch', latest_epoch) or latest_epoch)  # 获取状态epoch
-            latest_epoch = max(latest_epoch, state_epoch)  # 更新最新epoch
-            logger.info(f"加载完整状态: {full_path} (epoch={state_epoch})")  # 记录日志
-            if 'model_state' in state:  # 如果有模型状态
-                model.load_state_dict(state['model_state'], strict=False)  # 加载模型状态
-            if 'optimizer_state' in state:  # 如果有优化器状态
-                try:  # 尝试加载
-                    saved_opt = state['optimizer_state']  # 获取保存的优化器状态
-                    saved_groups = len(saved_opt.get('param_groups', []))  # 获取参数组数
-                    curr_groups = len(optimizer.state_dict().get('param_groups', []))  # 获取当前参数组数
-                    if saved_groups == curr_groups:  # 如果参数组数相同
-                        optimizer.load_state_dict(saved_opt)  # 加载优化器状态
-                        logger.info("优化器状态已恢复")  # 记录日志
-                    else:  # 如果参数组数不同
-                        logger.info("优化器状态未加载：参数组或训练模式不匹配")  # 记录日志
-                except Exception:  # 捕获异常
-                    pass  # 忽略
-            if 'scheduler_state' in state:  # 如果有调度器状态
-                try:  # 尝试加载
-                    if scheduler is not None:  # 如果调度器不为空
-                        scheduler.load_state_dict(state['scheduler_state'])  # 加载调度器状态
-                        logger.info("调度器状态已恢复")  # 记录日志
-                except Exception:  # 捕获异常
-                    pass  # 忽略
-            if 'ema_mu_com' in state:  # 如果有EMA参数
-                ema_vals = state['ema_mu_com']  # 获取EMA值
-                ema_mu = ema_vals.to(device) if isinstance(ema_vals, torch.Tensor) else torch.tensor(ema_vals, device=device)  # 转换为张量
-            kb = state.get('kb', {}) or {}  # 获取知识库
-    else:  # 如果完整状态文件不存在
-        if os.path.exists(model_path):  # 如果模型文件存在
-            sd = torch.load(model_path, map_location=device)  # 加载模型
-            if isinstance(sd, dict):  # 如果是字典
-                if 'backbone' in sd:  # 如果有backbone键
-                    model.load_state_dict(sd['backbone'], strict=False)  # 加载backbone
-                else:  # 如果没有backbone键
-                    model.load_state_dict(sd, strict=False)  # 直接加载
-            logger.info(f"加载模型检查点: {model_path} (epoch={latest_epoch})")  # 记录日志
-        if os.path.exists(kb_path):  # 如果知识库文件存在
-            kb = torch.load(kb_path, map_location='cpu')  # 加载知识库
-    return latest_epoch, kb, ema_mu  # 返回最新epoch、知识库和EMA参数
+    if latest_epoch <= 0:
+        return 0
+    full_path = os.path.join(save_dir, f"prism_full_epoch_{latest_epoch}.pt")
+    model_path = os.path.join(save_dir, f"prism_epoch_{latest_epoch}.pth")
+    if os.path.exists(full_path):
+        state = torch.load(full_path, map_location=device)
+        if isinstance(state, dict):
+            state_epoch = int(state.get('epoch', latest_epoch) or latest_epoch)
+            latest_epoch = max(latest_epoch, state_epoch)
+            logger.info(f"加载完整状态: {full_path} (epoch={state_epoch})")
+            if 'model_state' in state:
+                model.load_state_dict(state['model_state'], strict=False)
+            if 'optimizer_state' in state:
+                try:
+                    saved_opt = state['optimizer_state']
+                    saved_groups = len(saved_opt.get('param_groups', []))
+                    curr_groups = len(optimizer.state_dict().get('param_groups', []))
+                    if saved_groups == curr_groups:
+                        optimizer.load_state_dict(saved_opt)
+                        logger.info("优化器状态已恢复")
+                    else:
+                        logger.info("优化器状态未加载：参数组或训练模式不匹配")
+                except Exception:
+                    pass
+            if 'scheduler_state' in state:
+                try:
+                    if scheduler is not None:
+                        scheduler.load_state_dict(state['scheduler_state'])
+                        logger.info("调度器状态已恢复")
+                except Exception:
+                    pass
+    else:
+        if os.path.exists(model_path):
+            sd = torch.load(model_path, map_location=device)
+            if isinstance(sd, dict):
+                if 'backbone' in sd:
+                    model.load_state_dict(sd['backbone'], strict=False)
+                else:
+                    model.load_state_dict(sd, strict=False)
+            logger.info(f"加载模型检查点: {model_path} (epoch={latest_epoch})")
+    return latest_epoch
 
 
 # 过时的MLM验证流程已移除
@@ -274,7 +265,7 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     
     os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)  # 创建模型保存目录
-    start_epoch, _kb, _ema_mu = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)  # 加载恢复状态
+    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)  # 加载恢复状态
     if start_epoch > 0:  # 如果有起始epoch
         logger.info(f"从最近权重恢复: epoch {start_epoch}")  # 记录日志
     else:  # 如果没有起始epoch
@@ -349,15 +340,7 @@ def main():  # 主函数
         torch.save(full_state, full_state_path)  # 保存完整状态
         logger.info(f"保存完整状态: {full_state_path}")  # 记录日志
 
-        # 保存知识库 (包含中心点和模型状态)
-        # 移除验证流程
-            
-            # # 保存最佳模型
-            # if val_loss < best_val_loss:
-            #     best_val_loss = val_loss
-            #     save_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_best.pth")
-            #     torch.save(model.state_dict(), save_path)
-            #     logger.info(f"保存最佳模型: {save_path}")
+        # 移除验证与知识库保存流程
     
     logger.info("=" * 80)  # 分隔线
     logger.info("PRISM预训练完成")  # 记录日志

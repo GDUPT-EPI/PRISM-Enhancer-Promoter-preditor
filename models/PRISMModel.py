@@ -1,11 +1,7 @@
 """
 PRISM组件
 
-概述:
-- 主干网络(`PRISMBackbone`)用于EP互作概率预测
-
-说明:
-- 已移除专家网络（CellClassificationExpert）的具体实现，后续重构留空
+主干网络(`PRISMBackbone`)用于EP互作概率预测
 """
 
 from torch import nn
@@ -14,13 +10,10 @@ import torch.nn.functional as F
 from config import *
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
-from models.layers.footprint import FootprintExpert
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
-from models.pleat.masking import SegmentMaskBuilder
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.pleat.SpeculationPenalty import SpeculationPenaltyLoss
-from models.layers.footprint import FootprintExpert
 from typing import Optional, Tuple
 
 
@@ -131,26 +124,12 @@ class AttnPool1dWindow(nn.Module):  # 定义滑窗注意力池化类
             return x.new_zeros(B, C, 0)  # 无输出返回空
         return torch.cat(outs, dim=-1)  # 拼接
 
-class FusionGate(nn.Module):  # 定义融合门控类
-    def __init__(self, d: int):  # 双分支融合门控初始化
-        super().__init__()  # 调用父类初始化
-        self.net = nn.Sequential(  # 定义网络序列
-            nn.Linear(4 * d, 2 * d),  # 组合特征
-            nn.GELU(),  # 激活
-            nn.Linear(2 * d, d),  # 回投影
-            nn.Sigmoid(),  # 门控权重
-        )
-    def forward(self, f1: torch.Tensor, f2: torch.Tensor) -> torch.Tensor:  # 前向传播
-        x = torch.cat([f1, f2, f1 - f2, f1 * f2], dim=-1)  # 组合
-        g = self.net(x)  # 门控
-        return g * f1 + (1.0 - g) * f2  # 融合
-
-# 统一由PRISMBackbone和CellClassificationExpert组成
+# 统一由PRISMBackbone组成
 
 class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
     """PRISM主干网络
     
-    编码E/P序列、建模跨序列注意力、融合足迹特征，输出互作概率。
+    编码E/P序列、建模跨序列注意力，输出互作概率。
     
     Args:
         num_classes: 预留参数，当前未使用。
@@ -235,15 +214,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             lr=LEARNING_RATE,  # 学习率
             weight_decay=WEIGHT_DECAY,  # 权重衰减
         )
-        self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)  # 增强子足迹
-        self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)  # 启动子足迹
-        self.fusion_gate = FusionGate(OUT_CHANNELS)  # 融合门控
-        self.inj_proj = nn.Sequential(  # 投影序列
-            nn.LayerNorm(OUT_CHANNELS),  # 归一化
-            nn.Linear(OUT_CHANNELS, OUT_CHANNELS),  # 投影
-            nn.GELU()  # 激活
-        )
-        self.alpha = nn.Parameter(torch.tensor(0.5))  # 可学习参数
+
 
     def forward(  # 前向传播
         self,
@@ -293,8 +264,6 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 if cols.any():  # 如果有掩码
                     enh_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
         enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)  # 增强子预注意力
-        enh_for_fp = enh_pre  # 用于足迹的增强子
-        _, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)  # 增强子足迹向量
         enh = enh_pre.permute(1, 0, 2)  # 转置维度
         B_pr = promoter_ids.size(0)  # 启动子批次大小
         L_pr_orig = promoter_ids.size(1)  # 启动子原始长度
@@ -316,12 +285,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
 
         att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第一次跨注意力
         enh = enh + att1  # 残差连接
-        enh_cross = enh.permute(1, 0, 2)  # 转置维度
-        _, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)  # 增强子足迹向量2
-        fused = self.fusion_gate(fp1_vec, fp2_vec)  # 融合门控
-        proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)  # 投影
-        enh = enh + self.alpha * proj  # 增强子加投影
-        residual_proj = proj  # 残差投影
+
 
         total_adaptive_loss = 0.0  # 总自适应损失
         for layer in self.cbat_layers:  # 遍历CBAT层
