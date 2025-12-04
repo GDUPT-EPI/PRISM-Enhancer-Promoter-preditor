@@ -330,9 +330,9 @@ def main():
             total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'base': f"{loss_details['base']:.4f}",
-                'adaptive': f"{loss_details['adaptive']:.4f}",
-                'penalty': f"{loss_details['penalty']:.4f}",
+                # 'base': f"{loss_details['base']:.4f}",
+                # 'adaptive': f"{loss_details['adaptive']:.4f}",
+                # 'penalty': f"{loss_details['penalty']:.4f}",
                 'ep_acc': f'{ep_acc:.4f}',
                 'prec': f'{precision:.4f}',
                 'rec': f'{recall:.4f}',
