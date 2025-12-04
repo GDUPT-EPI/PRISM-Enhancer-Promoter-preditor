@@ -383,7 +383,3 @@ class PRISMBackbone(nn.Module):
                 'penalty': float(penalty_loss.detach().item()),
             }
         return total
-
-
-class CellClassificationExpert(nn.Module):
-    pass
