@@ -12,6 +12,7 @@ from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
+from models.layers.ISAB import ISAB
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.pleat.SpeculationPenalty import SpeculationPenaltyLoss
 from typing import Optional, Tuple
@@ -199,13 +200,34 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
             dropout=TRANSFORMER_DROPOUT,  # Dropout
         )  # 末端CBAT
-        self.attn_pool_en = AttnPool1d(OUT_CHANNELS)  # 增强子池化
-        self.attn_pool_pr = AttnPool1d(OUT_CHANNELS)  # 启动子池化
+        self.isab = ISAB(  # ISAB模块
+            d_model=OUT_CHANNELS,  # 维度
+            num_heads=TRANSFORMER_HEADS,  # 头数
+            num_inducing=ISAB_NUM_INDUCING,  # 诱导点数
+            dropout=ISAB_DROPOUT,  # Dropout
+        )  # ISAB模块
+        self.post_refine_cbat_layers = nn.ModuleList([
+            CBAT(  # CBAT精修层1
+                d_model=OUT_CHANNELS,
+                num_heads=TRANSFORMER_HEADS,
+                img_size=img_size,
+                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+                dropout=TRANSFORMER_DROPOUT,
+            ),
+            CBAT(  # CBAT精修层2
+                d_model=OUT_CHANNELS,
+                num_heads=TRANSFORMER_HEADS,
+                img_size=img_size,
+                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+                dropout=TRANSFORMER_DROPOUT,
+            ),
+        ])  # 两层CBAT精修
+        self.attn_pool_en = AttnPool1d(OUT_CHANNELS)  # 注意力池化
         self.classifier = FourierKAN(  # KAN分类头
-            in_features=OUT_CHANNELS * 2,  # 输入特征数
+            in_features=OUT_CHANNELS,  # 输入特征数
             out_features=1,  # 输出特征数
             grid_size=5,  # 网格大小
-            width=2 * (OUT_CHANNELS * 2) + 1,  # 宽度
+            width=2 * OUT_CHANNELS + 1,  # 宽度
         )  # KAN分类头
         self.criterion = AdaptiveIMMAXLoss()  # 基础损失
         self.spec_penalty = SpeculationPenaltyLoss()  # 投机惩罚
@@ -300,21 +322,18 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
 
         post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)  # 后CBAT
         total_adaptive_loss += post_loss  # 累加损失
-        enh = post_out.permute(1, 0, 2)  # 转置维度
+        enh = post_out.permute(1, 0, 2)  # [L, B, D]
 
-        x_en = enh.permute(1, 0, 2)  # 转置维度
-        w_en = (~enh_pad_mask).float()  # 权重
-        s_en = (x_en * w_en.unsqueeze(-1)).sum(dim=1)  # 加权和
-        d_en = w_en.sum(dim=1).clamp(min=1e-6)  # 归一化分母
-        enh_pooled = s_en / d_en.unsqueeze(-1)  # 增强子池化
-        x_pr = pr.permute(1, 0, 2)  # 转置维度
-        w_pr = (~pr_pad_mask).float()  # 权重
-        s_pr = (x_pr * w_pr.unsqueeze(-1)).sum(dim=1)  # 加权和
-        d_pr = w_pr.sum(dim=1).clamp(min=1e-6)  # 归一化分母
-        pr_pooled = s_pr / d_pr.unsqueeze(-1)  # 启动子池化
-        combined = torch.cat([enh_pooled, pr_pooled], dim=1)  # 拼接池化向量
-        combined = F.layer_norm(combined, combined.shape[-1:])  # 归一化
-        result = self.classifier(combined)  # KAN分类
+        x_seq = enh.permute(1, 0, 2)  # [B, L, D]
+        x_seq = self.isab(x_seq, key_padding_mask=enh_pad_mask)  # ISAB上下文聚合
+
+        for layer in self.post_refine_cbat_layers:  # 两层CBAT精修
+            x_seq, layer_loss_post = layer(x_seq, attention_mask=enh_attn_mask, return_loss=True)  # CBAT
+            total_adaptive_loss += layer_loss_post  # 累加损失
+
+        pooled = self.attn_pool_en(x_seq, enh_pad_mask)  # 注意力池化
+        pooled = F.layer_norm(pooled, pooled.shape[-1:])  # 归一化
+        result = self.classifier(pooled)  # KAN分类
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
     def compute_loss(  # 计算损失

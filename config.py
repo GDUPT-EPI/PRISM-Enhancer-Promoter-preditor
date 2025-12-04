@@ -14,7 +14,7 @@ DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目�
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
-PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/bbb")
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/ccc")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
@@ -98,7 +98,11 @@ ENABLE_FAST_PREPROCESSING = True
 
 # 预处理配置信息将通过日志系统输出（在main文件中初始化）
 
-# ============================================================================
+# =========================================================================
 # PRISM模型配置
-# ============================================================================
+# =========================================================================
 PRISM_IMG_SIZE = 16  # CBAT模块图像尺寸
+
+# ISAB模块配置
+ISAB_NUM_INDUCING = 32  # 诱导点数量
+ISAB_DROPOUT = 0.1      # ISAB dropout
