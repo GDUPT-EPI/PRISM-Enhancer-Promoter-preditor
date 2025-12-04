@@ -21,9 +21,83 @@ from models.pleat.masking import SegmentMaskBuilder
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.pleat.SpeculationPenalty import SpeculationPenaltyLoss
 from models.layers.footprint import FootprintExpert
-from models.EPIModel import CBATTransformerEncoderLayer
 from typing import Optional, Tuple
 
+
+class CBATTransformerEncoderLayer(nn.Module):
+    """
+    使用CBAT模块的Transformer编码器层
+    替换标准的多头自注意力为CBAT注意力机制
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, img_size=32):
+        super(CBATTransformerEncoderLayer, self).__init__()
+        
+        # 使用CBAT模块替换原有的注意力机制
+        self.self_attn = CBAT(
+            d_model=d_model,
+            num_heads=nhead,
+            img_size=img_size,
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
+            dropout=dropout
+        )
+        
+        # 前馈网络
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        # 层归一化
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # 激活函数
+        self.activation = nn.ReLU()
+    
+    def forward(self, x, src_mask=None, src_key_padding_mask=None):
+        """
+        前向传播
+        
+        Args:
+            x: 输入张量，形状 (seq_len, batch, d_model)
+            src_mask: 注意力掩码
+            src_key_padding_mask: key填充掩码
+            
+        Returns:
+            返回 (输出张量, adaptive_loss)
+            输出张量形状 (seq_len, batch, d_model)
+        """
+        # 保存原始输入用于残差连接
+        residual = x
+        
+        # 自注意力计算 (使用CBAT)
+        # 转换维度以适配CBAT: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
+        x_transposed = x.permute(1, 0, 2)
+        
+        # CBAT返回(output, adaptive_loss)
+        attn_output, adaptive_loss = self.self_attn(x_transposed, attention_mask=src_mask, return_loss=True)
+            
+        # 转回原始维度: (batch, seq_len, d_model) -> (seq_len, batch, d_model)
+        attn_output = attn_output.permute(1, 0, 2)
+        
+        # 残差连接和层归一化
+        x = residual + self.dropout1(attn_output)
+        x = self.norm1(x)
+        
+        # 保存用于第二个残差连接
+        residual = x
+        
+        # 前馈网络
+        ff_output = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        
+        # 残差连接和层归一化
+        x = residual + self.dropout2(ff_output)
+        x = self.norm2(x)
+        
+        return x, adaptive_loss
 
 class AttnPool1d(nn.Module):
     def __init__(self, d: int):
