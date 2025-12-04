@@ -24,14 +24,14 @@ from models.layers.footprint import FootprintExpert
 from typing import Optional, Tuple
 
 
-class CBATTransformerEncoderLayer(nn.Module):
+class CBATTransformerEncoderLayer(nn.Module):  # 定义CBAT Transformer编码器层类
     """
     使用CBAT模块的Transformer编码器层
     替换标准的多头自注意力为CBAT注意力机制
     """
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, img_size=32):
-        super(CBATTransformerEncoderLayer, self).__init__()
-        self.self_attn = CBAT(
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, img_size=32):  # 初始化函数
+        super(CBATTransformerEncoderLayer, self).__init__()  # 调用父类初始化
+        self.self_attn = CBAT(  # 创建CBAT注意力模块
             d_model=d_model,  # 模型维度
             num_heads=nhead,  # 注意力头数
             img_size=img_size,  # CBAT图像大小
@@ -89,14 +89,14 @@ class CBATTransformerEncoderLayer(nn.Module):
         
         return x, adaptive_loss
 
-class AttnPool1d(nn.Module):
-    def __init__(self, d: int):  # 1D注意力池化
-        super().__init__()
+class AttnPool1d(nn.Module):  # 定义1D注意力池化类
+    def __init__(self, d: int):  # 1D注意力池化初始化
+        super().__init__()  # 调用父类初始化
         self.proj = nn.Linear(d, d)  # 投影层
         self.v = nn.Parameter(torch.zeros(d))  # 注意力向量
         nn.init.normal_(self.v, mean=0.0, std=0.02)  # 初始化
         self.drop = nn.Dropout(CNN_DROPOUT)  # Dropout
-    def forward(self, x: torch.Tensor, mask: torch.Tensor):  # 前向
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):  # 前向传播
         h = torch.tanh(self.proj(self.drop(x)))  # 非线性投影
         s = (h * self.v).sum(-1)  # 注意力分数
         s = s.masked_fill(mask, -1e9)  # 掩码填充
@@ -106,13 +106,13 @@ class AttnPool1d(nn.Module):
         w = w / norm  # 归一化
         return (x * w.unsqueeze(-1)).sum(dim=1)  # 加权求和
 
-class AttnPool1dWindow(nn.Module):
-    def __init__(self, d: int, kernel_size: int, stride: int):  # 滑窗注意力池化
-        super().__init__()
+class AttnPool1dWindow(nn.Module):  # 定义滑窗注意力池化类
+    def __init__(self, d: int, kernel_size: int, stride: int):  # 滑窗注意力池化初始化
+        super().__init__()  # 调用父类初始化
         self.kernel_size = kernel_size  # 窗长
         self.stride = stride  # 步长
         self.attn = AttnPool1d(d)  # 注意力池化
-    def forward(self, x: torch.Tensor, mask: torch.Tensor):  # 前向
+    def forward(self, x: torch.Tensor, mask: torch.Tensor):  # 前向传播
         B, C, L = x.shape  # 维度
         step = self.stride  # 步长
         win = self.kernel_size  # 窗长
@@ -131,23 +131,23 @@ class AttnPool1dWindow(nn.Module):
             return x.new_zeros(B, C, 0)  # 无输出返回空
         return torch.cat(outs, dim=-1)  # 拼接
 
-class FusionGate(nn.Module):
-    def __init__(self, d: int):  # 双分支融合门控
-        super().__init__()
-        self.net = nn.Sequential(
+class FusionGate(nn.Module):  # 定义融合门控类
+    def __init__(self, d: int):  # 双分支融合门控初始化
+        super().__init__()  # 调用父类初始化
+        self.net = nn.Sequential(  # 定义网络序列
             nn.Linear(4 * d, 2 * d),  # 组合特征
             nn.GELU(),  # 激活
             nn.Linear(2 * d, d),  # 回投影
             nn.Sigmoid(),  # 门控权重
         )
-    def forward(self, f1: torch.Tensor, f2: torch.Tensor) -> torch.Tensor:  # 前向
+    def forward(self, f1: torch.Tensor, f2: torch.Tensor) -> torch.Tensor:  # 前向传播
         x = torch.cat([f1, f2, f1 - f2, f1 * f2], dim=-1)  # 组合
         g = self.net(x)  # 门控
         return g * f1 + (1.0 - g) * f2  # 融合
 
 # 统一由PRISMBackbone和CellClassificationExpert组成
 
-class PRISMBackbone(nn.Module):
+class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
     """PRISM主干网络
     
     编码E/P序列、建模跨序列注意力、融合足迹特征，输出互作概率。
@@ -155,101 +155,101 @@ class PRISMBackbone(nn.Module):
     Args:
         num_classes: 预留参数，当前未使用。
     """
-    def __init__(self, num_classes: int = None):
-        super().__init__()
-        self.num_transformer_layers = TRANSFORMER_LAYERS
-        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT
-        img_size = PRISM_IMG_SIZE
+    def __init__(self, num_classes: int = None):  # 初始化函数
+        super().__init__()  # 调用父类初始化
+        self.num_transformer_layers = TRANSFORMER_LAYERS  # Transformer层数
+        TRANSFORMER_DROPOUT = RoPEConfig.ROPE_DROPOUT  # Transformer Dropout
+        img_size = PRISM_IMG_SIZE  # PRISM图像大小
 
-        self.enh_embedding = create_dna_embedding_layer(
-            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-            embed_dim=DNA_EMBEDDING_DIM,
-            padding_idx=DNA_EMBEDDING_PADDING_IDX,
-            init_std=DNA_EMBEDDING_INIT_STD
+        self.enh_embedding = create_dna_embedding_layer(  # 创建增强子嵌入层
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,  # 词汇表大小
+            embed_dim=DNA_EMBEDDING_DIM,  # 嵌入维度
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,  # 填充索引
+            init_std=DNA_EMBEDDING_INIT_STD  # 初始化标准差
         )
-        self.pr_embedding = create_dna_embedding_layer(
-            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,
-            embed_dim=DNA_EMBEDDING_DIM,
-            padding_idx=DNA_EMBEDDING_PADDING_IDX,
-            init_std=DNA_EMBEDDING_INIT_STD
+        self.pr_embedding = create_dna_embedding_layer(  # 创建启动子嵌入层
+            vocab_size=DNA_EMBEDDING_VOCAB_SIZE,  # 词汇表大小
+            embed_dim=DNA_EMBEDDING_DIM,  # 嵌入维度
+            padding_idx=DNA_EMBEDDING_PADDING_IDX,  # 填充索引
+            init_std=DNA_EMBEDDING_INIT_STD  # 初始化标准差
         )
-        self.enh_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(OUT_CHANNELS),
-            nn.Dropout(p=CNN_DROPOUT)
+        self.enh_cnn = nn.Sequential(  # 增强子CNN序列
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),  # 卷积层
+            nn.ReLU(),  # 激活函数
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),  # 最大池化
+            nn.BatchNorm1d(OUT_CHANNELS),  # 批归一化
+            nn.Dropout(p=CNN_DROPOUT)  # Dropout
         )
-        self.pr_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),
-            nn.BatchNorm1d(OUT_CHANNELS),
-            nn.Dropout(p=CNN_DROPOUT)
+        self.pr_cnn = nn.Sequential(  # 启动子CNN序列
+            nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=OUT_CHANNELS, kernel_size=CNN_KERNEL_SIZE),  # 卷积层
+            nn.ReLU(),  # 激活函数
+            nn.MaxPool1d(kernel_size=POOL_KERNEL_SIZE, stride=POOL_KERNEL_SIZE),  # 最大池化
+            nn.BatchNorm1d(OUT_CHANNELS),  # 批归一化
+            nn.Dropout(p=CNN_DROPOUT)  # Dropout
         )
-        self.pre_enh_attn = RoPEAttention(
+        self.pre_enh_attn = RoPEAttention(  # 增强子预注意力
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )  # 增强子预注意力
-        self.pre_pr_attn = RoPEAttention(
+        self.pre_pr_attn = RoPEAttention(  # 启动子预注意力
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )  # 启动子预注意力
-        self.cross_attn_1 = nn.MultiheadAttention(
+        self.cross_attn_1 = nn.MultiheadAttention(  # 第一次跨序列注意力
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )  # 第一次跨序列注意力
-        self.cbat_layers = nn.ModuleList([
-            CBATTransformerEncoderLayer(
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
-                img_size=img_size
-            ) for _ in range(self.num_transformer_layers)
+        self.cbat_layers = nn.ModuleList([  # 增强子CBAT层列表
+            CBATTransformerEncoderLayer(  # CBAT编码器层
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,  # 模型维度和头数
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,  # 前馈维度和dropout
+                img_size=img_size  # 图像大小
+            ) for _ in range(self.num_transformer_layers)  # 创建多层
         ])  # 增强子CBAT层
-        self.pr_cbat_layers = nn.ModuleList([
-            CBATTransformerEncoderLayer(
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,
-                img_size=img_size
-            ) for _ in range(self.num_transformer_layers)
+        self.pr_cbat_layers = nn.ModuleList([  # 启动子CBAT层列表
+            CBATTransformerEncoderLayer(  # CBAT编码器层
+                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,  # 模型维度和头数
+                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,  # 前馈维度和dropout
+                img_size=img_size  # 图像大小
+            ) for _ in range(self.num_transformer_layers)  # 创建多层
         ])  # 启动子CBAT层
-        self.cross_attn_2 = nn.MultiheadAttention(
+        self.cross_attn_2 = nn.MultiheadAttention(  # 第二次跨序列注意力
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )  # 第二次跨序列注意力
-        self.post_cbat = CBAT(
-            d_model=OUT_CHANNELS,
-            num_heads=TRANSFORMER_HEADS,
-            img_size=img_size,
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-            dropout=TRANSFORMER_DROPOUT,
+        self.post_cbat = CBAT(  # 末端CBAT
+            d_model=OUT_CHANNELS,  # 模型维度
+            num_heads=TRANSFORMER_HEADS,  # 注意力头数
+            img_size=img_size,  # 图像大小
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
+            dropout=TRANSFORMER_DROPOUT,  # Dropout
         )  # 末端CBAT
         self.attn_pool_en = AttnPool1d(OUT_CHANNELS)  # 增强子池化
         self.attn_pool_pr = AttnPool1d(OUT_CHANNELS)  # 启动子池化
-        self.classifier = FourierKAN(
-            in_features=OUT_CHANNELS * 2,
-            out_features=1,
-            grid_size=5,
-            width=2 * (OUT_CHANNELS * 2) + 1,
+        self.classifier = FourierKAN(  # KAN分类头
+            in_features=OUT_CHANNELS * 2,  # 输入特征数
+            out_features=1,  # 输出特征数
+            grid_size=5,  # 网格大小
+            width=2 * (OUT_CHANNELS * 2) + 1,  # 宽度
         )  # KAN分类头
         self.criterion = AdaptiveIMMAXLoss()  # 基础损失
         self.spec_penalty = SpeculationPenaltyLoss()  # 投机惩罚
-        self.optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY,
+        self.optimizer = torch.optim.AdamW(  # 优化器
+            self.parameters(),  # 参数
+            lr=LEARNING_RATE,  # 学习率
+            weight_decay=WEIGHT_DECAY,  # 权重衰减
         )
         self.enhancer_footprint = FootprintExpert(d_model=OUT_CHANNELS)  # 增强子足迹
         self.promoter_footprint = FootprintExpert(d_model=OUT_CHANNELS)  # 启动子足迹
-        self.fusion_gate = FusionGate(OUT_CHANNELS)
-        self.inj_proj = nn.Sequential(
+        self.fusion_gate = FusionGate(OUT_CHANNELS)  # 融合门控
+        self.inj_proj = nn.Sequential(  # 投影序列
             nn.LayerNorm(OUT_CHANNELS),  # 归一化
             nn.Linear(OUT_CHANNELS, OUT_CHANNELS),  # 投影
             nn.GELU()  # 激活
         )
-        self.alpha = nn.Parameter(torch.tensor(0.5))
+        self.alpha = nn.Parameter(torch.tensor(0.5))  # 可学习参数
 
-    def forward(
+    def forward(  # 前向传播
         self,
-        enhancer_ids: torch.Tensor,
-        promoter_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        enhancer_ids: torch.Tensor,  # 增强子ID
+        promoter_ids: torch.Tensor,  # 启动子ID
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # 返回类型
         """前向传播
 
         编码E/P序列、进行跨序列交互与CBAT增强，输出互作概率。
@@ -261,105 +261,105 @@ class PRISMBackbone(nn.Module):
         Returns:
             (prob, adaptive_loss): 概率与自适应注意力损失
         """
-        K = CNN_KERNEL_SIZE
-        P = POOL_KERNEL_SIZE
-        min_required_length = K + P - 1
-        if enhancer_ids.size(1) < min_required_length:
-            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
-        if promoter_ids.size(1) < min_required_length:
-            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
+        K = CNN_KERNEL_SIZE  # 卷积核大小
+        P = POOL_KERNEL_SIZE  # 池化核大小
+        min_required_length = K + P - 1  # 最小所需长度
+        if enhancer_ids.size(1) < min_required_length:  # 检查增强子长度
+            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)  # 填充
+        if promoter_ids.size(1) < min_required_length:  # 检查启动子长度
+            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)  # 填充
 
-        embed_en = self.enh_embedding(enhancer_ids)
-        embed_pr = self.pr_embedding(promoter_ids)
-        enh = self.enh_cnn(embed_en.permute(0, 2, 1))
-        pr = self.pr_cnn(embed_pr.permute(0, 2, 1))
-        enh = enh.permute(2, 0, 1)
-        pr = pr.permute(2, 0, 1)
+        embed_en = self.enh_embedding(enhancer_ids)  # 增强子嵌入
+        embed_pr = self.pr_embedding(promoter_ids)  # 启动子嵌入
+        enh = self.enh_cnn(embed_en.permute(0, 2, 1))  # 增强子CNN
+        pr = self.pr_cnn(embed_pr.permute(0, 2, 1))  # 启动子CNN
+        enh = enh.permute(2, 0, 1)  # 转置维度
+        pr = pr.permute(2, 0, 1)  # 转置维度
 
-        B_en = enhancer_ids.size(0)
-        L_en_orig = enhancer_ids.size(1)
-        L_en = enh.size(0)
-        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
-        enh_pad_mask = torch.zeros(B_en, L_en, dtype=torch.bool, device=enhancer_ids.device)
-        for j in range(L_en):
-            s = j * POOL_KERNEL_SIZE
-            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_en_orig - 1)
-            enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)
-        enh_attn_mask = torch.zeros(B_en, 1, L_en, L_en, device=enhancer_ids.device, dtype=torch.float32)
-        if enh_pad_mask.any():
-            mask_cols = enh_pad_mask
-            for b in range(B_en):
-                cols = mask_cols[b]
-                if cols.any():
-                    enh_attn_mask[b, 0, :, cols] = float('-inf')
-        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)
-        enh_for_fp = enh_pre
-        _, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)
-        enh = enh_pre.permute(1, 0, 2)
-        B_pr = promoter_ids.size(0)
-        L_pr_orig = promoter_ids.size(1)
-        L_pr = pr.size(0)
-        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
-        pr_pad_mask = torch.zeros(B_pr, L_pr, dtype=torch.bool, device=promoter_ids.device)
-        for j in range(L_pr):
-            s = j * POOL_KERNEL_SIZE
-            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_pr_orig - 1)
-            pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)
-        pr_attn_mask = torch.zeros(B_pr, 1, L_pr, L_pr, device=promoter_ids.device, dtype=torch.float32)
-        if pr_pad_mask.any():
-            for b in range(B_pr):
-                cols = pr_pad_mask[b]
-                if cols.any():
-                    pr_attn_mask[b, 0, :, cols] = float('-inf')
-        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)
-        pr = pr_pre.permute(1, 0, 2)
+        B_en = enhancer_ids.size(0)  # 增强子批次大小
+        L_en_orig = enhancer_ids.size(1)  # 增强子原始长度
+        L_en = enh.size(0)  # 增强子处理后长度
+        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)  # 增强子填充掩码
+        enh_pad_mask = torch.zeros(B_en, L_en, dtype=torch.bool, device=enhancer_ids.device)  # 增强子填充掩码张量
+        for j in range(L_en):  # 遍历长度
+            s = j * POOL_KERNEL_SIZE  # 起点
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_en_orig - 1)  # 终点
+            enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)  # 设置掩码
+        enh_attn_mask = torch.zeros(B_en, 1, L_en, L_en, device=enhancer_ids.device, dtype=torch.float32)  # 增强子注意力掩码
+        if enh_pad_mask.any():  # 如果有填充
+            mask_cols = enh_pad_mask  # 掩码列
+            for b in range(B_en):  # 遍历批次
+                cols = mask_cols[b]  # 获取列
+                if cols.any():  # 如果有掩码
+                    enh_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)  # 增强子预注意力
+        enh_for_fp = enh_pre  # 用于足迹的增强子
+        _, fp1_vec, _, _ = self.enhancer_footprint(enh_for_fp)  # 增强子足迹向量
+        enh = enh_pre.permute(1, 0, 2)  # 转置维度
+        B_pr = promoter_ids.size(0)  # 启动子批次大小
+        L_pr_orig = promoter_ids.size(1)  # 启动子原始长度
+        L_pr = pr.size(0)  # 启动子处理后长度
+        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)  # 启动子填充掩码
+        pr_pad_mask = torch.zeros(B_pr, L_pr, dtype=torch.bool, device=promoter_ids.device)  # 启动子填充掩码张量
+        for j in range(L_pr):  # 遍历长度
+            s = j * POOL_KERNEL_SIZE  # 起点
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_pr_orig - 1)  # 终点
+            pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)  # 设置掩码
+        pr_attn_mask = torch.zeros(B_pr, 1, L_pr, L_pr, device=promoter_ids.device, dtype=torch.float32)  # 启动子注意力掩码
+        if pr_pad_mask.any():  # 如果有填充
+            for b in range(B_pr):  # 遍历批次
+                cols = pr_pad_mask[b]  # 获取列
+                if cols.any():  # 如果有掩码
+                    pr_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)  # 启动子预注意力
+        pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
-        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
-        enh = enh + att1
-        enh_cross = enh.permute(1, 0, 2)
-        _, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)
-        fused = self.fusion_gate(fp1_vec, fp2_vec)
-        proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)
-        enh = enh + self.alpha * proj
-        residual_proj = proj
+        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第一次跨注意力
+        enh = enh + att1  # 残差连接
+        enh_cross = enh.permute(1, 0, 2)  # 转置维度
+        _, fp2_vec, _, _ = self.enhancer_footprint(enh_cross)  # 增强子足迹向量2
+        fused = self.fusion_gate(fp1_vec, fp2_vec)  # 融合门控
+        proj = self.inj_proj(fused).unsqueeze(0).expand(enh.shape[0], -1, -1)  # 投影
+        enh = enh + self.alpha * proj  # 增强子加投影
+        residual_proj = proj  # 残差投影
 
-        total_adaptive_loss = 0.0
-        for layer in self.cbat_layers:
-            enh, layer_loss = layer(enh, src_mask=enh_attn_mask)
-            total_adaptive_loss += layer_loss
-        for layer in self.pr_cbat_layers:
-            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)
-            total_adaptive_loss += layer_loss_pr
+        total_adaptive_loss = 0.0  # 总自适应损失
+        for layer in self.cbat_layers:  # 遍历CBAT层
+            enh, layer_loss = layer(enh, src_mask=enh_attn_mask)  # 前向传播
+            total_adaptive_loss += layer_loss  # 累加损失
+        for layer in self.pr_cbat_layers:  # 遍历启动子CBAT层
+            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)  # 前向传播
+            total_adaptive_loss += layer_loss_pr  # 累加损失
 
-        att2, _ = self.cross_attn_2(enh, pr, pr, key_padding_mask=pr_pad_mask)
-        enh = enh + att2
+        att2, _ = self.cross_attn_2(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第二次跨注意力
+        enh = enh + att2  # 残差连接
 
-        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)
-        total_adaptive_loss += post_loss
-        enh = post_out.permute(1, 0, 2)
+        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)  # 后CBAT
+        total_adaptive_loss += post_loss  # 累加损失
+        enh = post_out.permute(1, 0, 2)  # 转置维度
 
-        x_en = enh.permute(1, 0, 2)
-        w_en = (~enh_pad_mask).float()
-        s_en = (x_en * w_en.unsqueeze(-1)).sum(dim=1)
-        d_en = w_en.sum(dim=1).clamp(min=1e-6)
-        enh_pooled = s_en / d_en.unsqueeze(-1)
-        x_pr = pr.permute(1, 0, 2)
-        w_pr = (~pr_pad_mask).float()
-        s_pr = (x_pr * w_pr.unsqueeze(-1)).sum(dim=1)
-        d_pr = w_pr.sum(dim=1).clamp(min=1e-6)
-        pr_pooled = s_pr / d_pr.unsqueeze(-1)
+        x_en = enh.permute(1, 0, 2)  # 转置维度
+        w_en = (~enh_pad_mask).float()  # 权重
+        s_en = (x_en * w_en.unsqueeze(-1)).sum(dim=1)  # 加权和
+        d_en = w_en.sum(dim=1).clamp(min=1e-6)  # 归一化分母
+        enh_pooled = s_en / d_en.unsqueeze(-1)  # 增强子池化
+        x_pr = pr.permute(1, 0, 2)  # 转置维度
+        w_pr = (~pr_pad_mask).float()  # 权重
+        s_pr = (x_pr * w_pr.unsqueeze(-1)).sum(dim=1)  # 加权和
+        d_pr = w_pr.sum(dim=1).clamp(min=1e-6)  # 归一化分母
+        pr_pooled = s_pr / d_pr.unsqueeze(-1)  # 启动子池化
         combined = torch.cat([enh_pooled, pr_pooled], dim=1)  # 拼接池化向量
         combined = F.layer_norm(combined, combined.shape[-1:])  # 归一化
         result = self.classifier(combined)  # KAN分类
-        return torch.sigmoid(result), total_adaptive_loss
+        return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
-    def compute_loss(
+    def compute_loss(  # 计算损失
         self,
-        outputs: torch.Tensor,
-        labels: torch.Tensor,
-        adaptive_loss: torch.Tensor | float = 0.0,
-        return_details: bool = False,
-    ) -> torch.Tensor | Tuple[torch.Tensor, dict]:
+        outputs: torch.Tensor,  # 输出
+        labels: torch.Tensor,  # 标签
+        adaptive_loss: torch.Tensor | float = 0.0,  # 自适应损失
+        return_details: bool = False,  # 是否返回细节
+    ) -> torch.Tensor | Tuple[torch.Tensor, dict]:  # 返回类型
         """计算总损失
 
         组成：`AdaptiveIMMAX`基础损失 + 自适应注意力损失 + 投机惩罚损失。
@@ -373,13 +373,13 @@ class PRISMBackbone(nn.Module):
         Returns:
             总损失或(损失, 细节)
         """
-        base_loss = self.criterion(outputs, labels)
-        penalty_loss = self.spec_penalty(outputs, labels)
-        total = base_loss + adaptive_loss + penalty_loss
-        if return_details:
-            return total, {
-                'base': float(base_loss.detach().item()),
-                'adaptive': float((adaptive_loss.detach().item() if isinstance(adaptive_loss, torch.Tensor) else adaptive_loss)),
-                'penalty': float(penalty_loss.detach().item()),
+        base_loss = self.criterion(outputs, labels)  # 基础损失
+        penalty_loss = self.spec_penalty(outputs, labels)  # 惩罚损失
+        total = base_loss + adaptive_loss + penalty_loss  # 总损失
+        if return_details:  # 如果需要返回细节
+            return total, {  # 返回总损失和细节
+                'base': float(base_loss.detach().item()),  # 基础损失
+                'adaptive': float((adaptive_loss.detach().item() if isinstance(adaptive_loss, torch.Tensor) else adaptive_loss)),  # 自适应损失
+                'penalty': float(penalty_loss.detach().item()),  # 惩罚损失
             }
         return total
