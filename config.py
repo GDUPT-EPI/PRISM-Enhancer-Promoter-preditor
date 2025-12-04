@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 256  # 默认训练批量大小
-PRISM_BATCH_SIZE = 128  # PRISM模型批量大小
+PRISM_BATCH_SIZE = 64  # PRISM模型批量大小
 EPOCH = 20  # 训练轮数
 LEARNING_RATE = 1e-4  # 学习率
 GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪上限

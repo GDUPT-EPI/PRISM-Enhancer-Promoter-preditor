@@ -200,28 +200,12 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
             dropout=TRANSFORMER_DROPOUT,  # Dropout
         )  # 末端CBAT
-        self.isab = ISAB(  # ISAB模块
-            d_model=OUT_CHANNELS,  # 维度
-            num_heads=TRANSFORMER_HEADS,  # 头数
-            num_inducing=ISAB_NUM_INDUCING,  # 诱导点数
-            dropout=ISAB_DROPOUT,  # Dropout
-        )  # ISAB模块
-        self.post_refine_cbat_layers = nn.ModuleList([
-            CBAT(  # CBAT精修层1
-                d_model=OUT_CHANNELS,
-                num_heads=TRANSFORMER_HEADS,
-                img_size=img_size,
-                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-                dropout=TRANSFORMER_DROPOUT,
-            ),
-            CBAT(  # CBAT精修层2
-                d_model=OUT_CHANNELS,
-                num_heads=TRANSFORMER_HEADS,
-                img_size=img_size,
-                max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
-                dropout=TRANSFORMER_DROPOUT,
-            ),
-        ])  # 两层CBAT精修
+        self.isab = ISAB(  # ISAB上下文层（批级集合）
+            d_model=OUT_CHANNELS,
+            num_heads=TRANSFORMER_HEADS,
+            num_inducing=ISAB_NUM_INDUCING,
+            dropout=ISAB_DROPOUT,
+        )
         self.attn_pool_en = AttnPool1d(OUT_CHANNELS)  # 注意力池化
         self.classifier = FourierKAN(  # KAN分类头
             in_features=OUT_CHANNELS,  # 输入特征数
@@ -320,20 +304,18 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         att2, _ = self.cross_attn_2(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第二次跨注意力
         enh = enh + att2  # 残差连接
 
-        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)  # 后CBAT
-        total_adaptive_loss += post_loss  # 累加损失
-        enh = post_out.permute(1, 0, 2)  # [L, B, D]
+        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)
+        total_adaptive_loss += post_loss
+        enh = post_out.permute(1, 0, 2)
 
-        x_seq = enh.permute(1, 0, 2)  # [B, L, D]
-        x_seq = self.isab(x_seq, key_padding_mask=enh_pad_mask)  # ISAB上下文聚合
+        x_seq = enh.permute(1, 0, 2)
+        pooled = self.attn_pool_en(x_seq, enh_pad_mask)
+        pooled = F.layer_norm(pooled, pooled.shape[-1:])
 
-        for layer in self.post_refine_cbat_layers:  # 两层CBAT精修
-            x_seq, layer_loss_post = layer(x_seq, attention_mask=enh_attn_mask, return_loss=True)  # CBAT
-            total_adaptive_loss += layer_loss_post  # 累加损失
-
-        pooled = self.attn_pool_en(x_seq, enh_pad_mask)  # 注意力池化
-        pooled = F.layer_norm(pooled, pooled.shape[-1:])  # 归一化
-        result = self.classifier(pooled)  # KAN分类
+        x_set = pooled.unsqueeze(0)
+        y_set = self.isab(x_set)
+        y = y_set.squeeze(0)
+        result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
     def compute_loss(  # 计算损失
