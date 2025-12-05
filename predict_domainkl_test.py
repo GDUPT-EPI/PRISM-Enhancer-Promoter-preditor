@@ -42,7 +42,7 @@ class EvalConfig:
     SHUFFLE = False  # 评估不打乱
 
     THRESHOLD = 0.3  # 二值化阈值
-    OUTPUT_DIR_NAME = "compete/ccc"  # 输出目录名称
+    OUTPUT_DIR_NAME = "compete/ddd"  # 输出目录名称
     PLOT_PR = True  # 是否绘制PR曲线
     PLOT_ROC = True  # 是否绘制ROC曲线
 
