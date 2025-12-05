@@ -20,9 +20,9 @@ class SpeculationPenaltyLoss(nn.Module):
     """
     def __init__(
         self,
-        fp_weight: float = 0.02,
+        fp_weight: float = 5e-4,
         threshold: float = 0.5,
-        slope: float = 2.0,
+        slope: float = 0.5,
         prior_weight: float = 0.2,
     ):
         super().__init__()
