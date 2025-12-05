@@ -231,16 +231,12 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 img_size=img_size  # 图像大小
             ) for _ in range(self.num_transformer_layers)  # 创建多层
         ])  # 启动子CBAT层
-        self.cross_attn_2 = nn.MultiheadAttention(  # 第二次跨序列注意力
+        self.cross_attn_2 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )  # 第二次跨序列注意力
-        self.post_cbat = CBAT(  # 末端CBAT
-            d_model=OUT_CHANNELS,  # 模型维度
-            num_heads=TRANSFORMER_HEADS,  # 注意力头数
-            img_size=img_size,  # 图像大小
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
-            dropout=TRANSFORMER_DROPOUT,  # Dropout
-        )  # 末端CBAT
+        )
+        self.post_cross_attn = nn.MultiheadAttention(
+            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
+        )
         self.isab = ISAB(  # ISAB上下文层（批级集合）
             d_model=OUT_CHANNELS,
             num_heads=TRANSFORMER_HEADS,
@@ -311,8 +307,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 cols = mask_cols[b]  # 获取列
                 if cols.any():  # 如果有掩码
                     enh_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
-        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)  # 增强子预注意力
-        enh = enh_pre.permute(1, 0, 2)  # 转置维度
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)
+        enh_self = enh + enh_pre.permute(1, 0, 2)
         B_pr = promoter_ids.size(0)  # 启动子批次大小
         L_pr_orig = promoter_ids.size(1)  # 启动子原始长度
         L_pr = pr.size(0)  # 启动子处理后长度
@@ -328,27 +324,25 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 cols = pr_pad_mask[b]  # 获取列
                 if cols.any():  # 如果有掩码
                     pr_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
-        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)  # 启动子预注意力
-        pr = pr_pre.permute(1, 0, 2)  # 转置维度
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)
+        pr_self = pr + pr_pre.permute(1, 0, 2)
 
-        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第一次跨注意力
-        enh = enh + att1  # 残差连接
+        att1, _ = self.cross_attn_1(enh_self, pr_self, pr_self, key_padding_mask=pr_pad_mask)
 
 
         total_adaptive_loss = 0.0  # 总自适应损失
-        for layer in self.cbat_layers:  # 遍历CBAT层
-            enh, layer_loss = layer(enh, src_mask=enh_attn_mask)  # 前向传播
-            total_adaptive_loss += layer_loss  # 累加损失
-        for layer in self.pr_cbat_layers:  # 遍历启动子CBAT层
-            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)  # 前向传播
-            total_adaptive_loss += layer_loss_pr  # 累加损失
+        for layer in self.cbat_layers:
+            enh_self, layer_loss = layer(enh_self, src_mask=enh_attn_mask)
+            total_adaptive_loss += layer_loss
+        for layer in self.pr_cbat_layers:
+            pr_self, layer_loss_pr = layer(pr_self, src_mask=pr_attn_mask)
+            total_adaptive_loss += layer_loss_pr
 
-        att2, _ = self.cross_attn_2(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第二次跨注意力
-        enh = enh + att2  # 残差连接
+        att2, _ = self.cross_attn_2(enh_self, pr_self, pr_self, key_padding_mask=pr_pad_mask)
+        enh_cross = att1 + att2
 
-        post_out, post_loss = self.post_cbat(enh.permute(1, 0, 2), return_loss=True)
-        total_adaptive_loss += post_loss
-        enh = post_out.permute(1, 0, 2)
+        att3, _ = self.post_cross_attn(enh_cross, pr_self, pr_self, key_padding_mask=pr_pad_mask)
+        enh = att3
 
         x_seq = enh.permute(1, 0, 2)
         sample_vec = self.sample_agg(x_seq, key_padding_mask=enh_pad_mask)
