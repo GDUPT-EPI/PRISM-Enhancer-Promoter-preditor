@@ -41,7 +41,7 @@ class CBATTransformerEncoderLayer(nn.Module):  # 定义CBAT Transformer编码器
         self.dropout2 = nn.Dropout(dropout)  # 残差Dropout2
         self.activation = nn.ReLU()  # 激活函数
     
-    def forward(self, x, src_mask=None, src_key_padding_mask=None):  # 编码器层前向
+    def forward(self, x, src_mask=None, src_key_padding_mask=None, residual_input: Optional[torch.Tensor] = None):  # 编码器层前向（允许外部指定残差源）
         """
         前向传播
         
@@ -54,8 +54,8 @@ class CBATTransformerEncoderLayer(nn.Module):  # 定义CBAT Transformer编码器
             返回 (输出张量, adaptive_loss)
             输出张量形状 (seq_len, batch, d_model)
         """
-        # 保存原始输入用于残差连接
-        residual = x  # 残差1
+        # 残差源修正：使用早期E/P自注意的输出作为跳跃连接（若提供），否则退化为当前输入x  # 残差1
+        residual_src = residual_input if residual_input is not None else x  # 选择残差源
         
         # 自注意力计算 (使用CBAT)
         # 转换维度以适配CBAT: (seq_len, batch, d_model) -> (batch, seq_len, d_model)
@@ -68,11 +68,11 @@ class CBATTransformerEncoderLayer(nn.Module):  # 定义CBAT Transformer编码器
         attn_output = attn_output.permute(1, 0, 2)  # 转回(seq, batch, d)
         
         # 残差连接和层归一化
-        x = residual + self.dropout1(attn_output)  # 残差加权
+        x = residual_src + self.dropout1(attn_output)  # 使用正确的残差源进行跳跃连接
         x = self.norm1(x)  # 归一化1
         
         # 保存用于第二个残差连接
-        residual = x  # 残差2
+        residual = x  # 残差2（保持标准Transformer样式）
         
         # 前馈网络
         ff_output = self.linear2(self.dropout(self.activation(self.linear1(x))))  # 前馈输出
@@ -231,12 +231,16 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 img_size=img_size  # 图像大小
             ) for _ in range(self.num_transformer_layers)  # 创建多层
         ])  # 启动子CBAT层
-        self.cross_attn_2 = nn.MultiheadAttention(
+        self.cross_attn_2 = nn.MultiheadAttention(  # 第二次跨序列注意力
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )
-        self.post_cross_attn = nn.MultiheadAttention(
-            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )
+        )  # 第二次跨序列注意力
+        self.post_cbat = CBAT(  # 末端CBAT
+            d_model=OUT_CHANNELS,  # 模型维度
+            num_heads=TRANSFORMER_HEADS,  # 注意力头数
+            img_size=img_size,  # 图像大小
+            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
+            dropout=TRANSFORMER_DROPOUT,  # Dropout
+        )  # 末端CBAT
         self.isab = ISAB(  # ISAB上下文层（批级集合）
             d_model=OUT_CHANNELS,
             num_heads=TRANSFORMER_HEADS,
@@ -307,8 +311,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 cols = mask_cols[b]  # 获取列
                 if cols.any():  # 如果有掩码
                     enh_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
-        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)
-        enh_self = enh + enh_pre.permute(1, 0, 2)
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)  # 增强子预注意力
+        enh = enh_pre.permute(1, 0, 2)  # 转置维度
         B_pr = promoter_ids.size(0)  # 启动子批次大小
         L_pr_orig = promoter_ids.size(1)  # 启动子原始长度
         L_pr = pr.size(0)  # 启动子处理后长度
@@ -324,25 +328,32 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 cols = pr_pad_mask[b]  # 获取列
                 if cols.any():  # 如果有掩码
                     pr_attn_mask[b, 0, :, cols] = float('-inf')  # 设置负无穷
-        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)
-        pr_self = pr + pr_pre.permute(1, 0, 2)
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)  # 启动子预注意力
+        pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
-        att1, _ = self.cross_attn_1(enh_self, pr_self, pr_self, key_padding_mask=pr_pad_mask)
+        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第一次跨注意力（E为Q，P为K/V）
+        enh_x1 = enh + att1  # 正确：第一次cross输出与早期E自注意形成跳跃连接
 
 
         total_adaptive_loss = 0.0  # 总自适应损失
-        for layer in self.cbat_layers:
-            enh_self, layer_loss = layer(enh_self, src_mask=enh_attn_mask)
-            total_adaptive_loss += layer_loss
-        for layer in self.pr_cbat_layers:
-            pr_self, layer_loss_pr = layer(pr_self, src_mask=pr_attn_mask)
-            total_adaptive_loss += layer_loss_pr
+        for layer in self.cbat_layers:  # 遍历CBAT层
+            enh, layer_loss = layer(att1, src_mask=enh_attn_mask, residual_input=enh)  # 输入cross输出，残差是早期E自注意
+            total_adaptive_loss += layer_loss  # 累加损失
+        for layer in self.pr_cbat_layers:  # 遍历启动子CBAT层
+            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)  # 前向传播
+            total_adaptive_loss += layer_loss_pr  # 累加损失
 
-        att2, _ = self.cross_attn_2(enh_self, pr_self, pr_self, key_padding_mask=pr_pad_mask)
-        enh_cross = att1 + att2
+        att2, _ = self.cross_attn_2(att1, pr, pr, key_padding_mask=pr_pad_mask)  # 第二次跨注意力（以第一次cross输出为Q）
+        enh = enh_x1 + att2  # 两个cross间的跳跃连接：用enh_x1承载skip
 
-        att3, _ = self.post_cross_attn(enh_cross, pr_self, pr_self, key_padding_mask=pr_pad_mask)
-        enh = att3
+        post_out, post_loss = self.post_cbat(  # 末端单层CBAT仅作为特征整合层，保持主干
+            enh.permute(1, 0, 2),  # 输入E序列
+            attention_mask=enh_attn_mask,  # 使用E的mask
+            position_ids=None,  # 无位置ID
+            return_loss=True,  # 返回loss
+        )
+        total_adaptive_loss += post_loss  # 累加loss
+        enh = post_out.permute(1, 0, 2)  # 回到[L,B,D]
 
         x_seq = enh.permute(1, 0, 2)
         sample_vec = self.sample_agg(x_seq, key_padding_mask=enh_pad_mask)
