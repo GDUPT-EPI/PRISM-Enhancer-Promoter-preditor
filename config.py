@@ -106,3 +106,7 @@ PRISM_IMG_SIZE = 16  # CBAT模块图像尺寸
 # ISAB模块配置
 ISAB_NUM_INDUCING = 32  # 诱导点数量
 ISAB_DROPOUT = 0.1      # ISAB dropout
+
+# 批级上下文规模与上下文自注意层数
+CONTEXT_BATCH_SIZE = 64
+CONTEXT_ATTENTION_LAYERS = 2

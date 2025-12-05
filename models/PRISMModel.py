@@ -125,6 +125,47 @@ class AttnPool1dWindow(nn.Module):  # 定义滑窗注意力池化类
             return x.new_zeros(B, C, 0)  # 无输出返回空
         return torch.cat(outs, dim=-1)  # 拼接
 
+class SampleAggregator(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, d_model))
+        nn.init.xavier_uniform_(self.query.unsqueeze(0))
+        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=num_heads, batch_first=True, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, 4 * d_model), nn.GELU(), nn.Dropout(dropout), nn.Linear(4 * d_model, d_model))
+        self.norm2 = nn.LayerNorm(d_model)
+
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        B, L, D = x.shape
+        q = self.query.expand(B, 1, D)
+        xn = self.norm1(x)
+        y, _ = self.mha(query=q, key=xn, value=xn, key_padding_mask=key_padding_mask)
+        y = y.squeeze(1)
+        y = y + self.ffn(self.norm2(y))
+        return y
+
+class ContextSelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, num_layers: int, dropout: float):
+        super().__init__()
+        blocks = []
+        for _ in range(num_layers):
+            blocks.append(nn.ModuleDict({
+                'norm1': nn.LayerNorm(d_model),
+                'mha': nn.MultiheadAttention(embed_dim=d_model, num_heads=num_heads, batch_first=True, dropout=dropout),
+                'norm2': nn.LayerNorm(d_model),
+                'ffn': nn.Sequential(nn.Linear(d_model, 4 * d_model), nn.GELU(), nn.Dropout(dropout), nn.Linear(4 * d_model, d_model)),
+            }))
+        self.blocks = nn.ModuleList(blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [1, B, D]
+        for blk in self.blocks:
+            xn = blk['norm1'](x)
+            y, _ = blk['mha'](query=xn, key=xn, value=xn)
+            x = x + y
+            x = x + blk['ffn'](blk['norm2'](x))
+        return x
+
 # 统一由PRISMBackbone组成
 
 class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
@@ -206,7 +247,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             num_inducing=ISAB_NUM_INDUCING,
             dropout=ISAB_DROPOUT,
         )
-        self.attn_pool_en = AttnPool1d(OUT_CHANNELS)  # 注意力池化
+        self.sample_agg = SampleAggregator(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT)
+        self.context_attn = ContextSelfAttention(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, num_layers=CONTEXT_ATTENTION_LAYERS, dropout=TRANSFORMER_DROPOUT)
         self.classifier = FourierKAN(  # KAN分类头
             in_features=OUT_CHANNELS,  # 输入特征数
             out_features=1,  # 输出特征数
@@ -309,12 +351,11 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         enh = post_out.permute(1, 0, 2)
 
         x_seq = enh.permute(1, 0, 2)
-        pooled = self.attn_pool_en(x_seq, enh_pad_mask)
-        pooled = F.layer_norm(pooled, pooled.shape[-1:])
-
-        x_set = pooled.unsqueeze(0)
-        y_set = self.isab(x_set)
-        y = y_set.squeeze(0)
+        sample_vec = self.sample_agg(x_seq, key_padding_mask=enh_pad_mask)
+        x_set = sample_vec.unsqueeze(0)
+        x_set = self.isab(x_set)
+        x_set = self.context_attn(x_set)
+        y = x_set.squeeze(0)
         result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
