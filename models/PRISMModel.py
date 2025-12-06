@@ -331,20 +331,24 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)  # 启动子预注意力
         pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
-        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)  # 第一次跨注意力（E为Q，P为K/V）
-        enh_x1 = enh + att1  # 正确：第一次cross输出与早期E自注意形成跳跃连接
+        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
+        enh_x1 = enh + att1
 
 
-        total_adaptive_loss = 0.0  # 总自适应损失
-        for layer in self.cbat_layers:  # 遍历CBAT层
-            enh, layer_loss = layer(att1, src_mask=enh_attn_mask, residual_input=enh)  # 输入cross输出，残差是早期E自注意
-            total_adaptive_loss += layer_loss  # 累加损失
-        for layer in self.pr_cbat_layers:  # 遍历启动子CBAT层
-            pr, layer_loss_pr = layer(pr, src_mask=pr_attn_mask)  # 前向传播
-            total_adaptive_loss += layer_loss_pr  # 累加损失
+        total_adaptive_loss = 0.0
+        enh_source = enh
+        x_enh = enh
+        for layer in self.cbat_layers:
+            x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
+            total_adaptive_loss += layer_loss
+        pr_source = pr
+        x_pr = pr
+        for layer in self.pr_cbat_layers:
+            x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
+            total_adaptive_loss += layer_loss_pr
 
-        att2, _ = self.cross_attn_2(att1, pr, pr, key_padding_mask=pr_pad_mask)  # 第二次跨注意力（以第一次cross输出为Q）
-        enh = enh_x1 + att2  # 两个cross间的跳跃连接：用enh_x1承载skip
+        att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
+        enh = enh_x1 + att2
 
         post_out, post_loss = self.post_cbat(  # 末端单层CBAT仅作为特征整合层，保持主干
             enh.permute(1, 0, 2),  # 输入E序列
