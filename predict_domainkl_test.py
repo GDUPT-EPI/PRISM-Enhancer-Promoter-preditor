@@ -292,6 +292,10 @@ def evaluate() -> Optional[Dict[str, object]]:
     aupr = average_precision_score(all_labels, all_preds)  # AUPR
     auc = roc_auc_score(all_labels, all_preds)  # AUC
     
+    # 创建输出目录（提前定义以便在阈值可视化中使用）
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), EvalConfig.OUTPUT_DIR_NAME)  # 输出目录
+    os.makedirs(out_dir, exist_ok=True)  # 创建目录
+    
     # 寻找最优阈值
     if EvalConfig.FIND_OPTIMAL_THRESHOLD:
         optimal_threshold, optimal_metrics, threshold_history = find_optimal_threshold(
@@ -336,8 +340,6 @@ def evaluate() -> Optional[Dict[str, object]]:
     f1 = f1_score(all_labels, bin_preds)  # F1
     rec = recall_score(all_labels, bin_preds)  # 召回
     prec = precision_score(all_labels, bin_preds)  # 精度
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), EvalConfig.OUTPUT_DIR_NAME)  # 输出目录
-    os.makedirs(out_dir, exist_ok=True)  # 创建目录
     pr_p, pr_r, _ = precision_recall_curve(all_labels, all_preds)  # PR曲线数据
     if EvalConfig.PLOT_PR:  # 绘制PR
         plt.figure()  # 新图
