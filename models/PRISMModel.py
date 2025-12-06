@@ -338,13 +338,21 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         total_adaptive_loss = 0.0
         enh_source = enh
         x_enh = enh
-        for layer in self.cbat_layers:
-            x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
+        for i, layer in enumerate(self.cbat_layers):
+            # 只在第一层使用预注意力层的输出作为残差，后续层使用标准残差连接
+            if i == 0:
+                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
+            else:
+                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask)
             total_adaptive_loss += layer_loss
         pr_source = pr
         x_pr = pr
-        for layer in self.pr_cbat_layers:
-            x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
+        for i, layer in enumerate(self.pr_cbat_layers):
+            # 只在第一层使用预注意力层的输出作为残差，后续层使用标准残差连接
+            if i == 0:
+                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
+            else:
+                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask)
             total_adaptive_loss += layer_loss_pr
 
         att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
