@@ -26,6 +26,71 @@ from models.pleat.embedding import KMerTokenizer  # K-mer分词器
 from torch.nn.utils.rnn import pad_sequence  # 序列填充
 
 
+def find_optimal_threshold(labels: np.ndarray, predictions: np.ndarray, 
+                          metric: str = "f1", 
+                          threshold_range: Tuple[float, float] = (0.01, 0.99),
+                          num_steps: int = 99) -> Tuple[float, Dict[str, float]]:
+    """寻找最优分类阈值
+    
+    基于指定指标在给定范围内搜索最佳分类阈值。
+    
+    Args:
+        labels: 真实标签 (0或1)
+        predictions: 预测概率值 (0-1之间)
+        metric: 优化指标，可选'f1', 'precision', 'recall', 'accuracy'
+        threshold_range: 阈值搜索范围 (最小值, 最大值)
+        num_steps: 搜索步数
+        
+    Returns:
+        (最佳阈值, 各指标在最佳阈值下的值字典)
+    """
+    thresholds = np.linspace(threshold_range[0], threshold_range[1], num_steps)
+    best_score = -1.0
+    best_threshold = threshold_range[0]
+    
+    # 存储每个阈值对应的指标值
+    metrics_history = {
+        "thresholds": thresholds,
+        "f1": [],
+        "precision": [],
+        "recall": [],
+        "accuracy": []
+    }
+    
+    for threshold in thresholds:
+        binary_preds = (predictions >= threshold).astype(int)
+        
+        # 计算各项指标
+        f1 = f1_score(labels, binary_preds, zero_division=0)
+        precision = precision_score(labels, binary_preds, zero_division=0)
+        recall = recall_score(labels, binary_preds, zero_division=0)
+        accuracy = np.mean(binary_preds == labels)
+        
+        # 存储指标历史
+        metrics_history["f1"].append(f1)
+        metrics_history["precision"].append(precision)
+        metrics_history["recall"].append(recall)
+        metrics_history["accuracy"].append(accuracy)
+        
+        # 根据指定指标选择最佳阈值
+        current_score = locals()[metric]
+        if current_score > best_score:
+            best_score = current_score
+            best_threshold = threshold
+    
+    # 计算最佳阈值下的各项指标
+    binary_preds = (predictions >= best_threshold).astype(int)
+    best_metrics = {
+        "threshold": best_threshold,
+        "f1": f1_score(labels, binary_preds, zero_division=0),
+        "precision": precision_score(labels, binary_preds, zero_division=0),
+        "recall": recall_score(labels, binary_preds, zero_division=0),
+        "accuracy": np.mean(binary_preds == labels)
+    }
+    
+    return best_threshold, best_metrics, metrics_history
+
+
 class EvalConfig:
     """评估配置类
 
@@ -45,6 +110,13 @@ class EvalConfig:
     OUTPUT_DIR_NAME = "compete/ddd"  # 输出目录名称
     PLOT_PR = True  # 是否绘制PR曲线
     PLOT_ROC = True  # 是否绘制ROC曲线
+    
+    # 阈值寻找相关配置
+    FIND_OPTIMAL_THRESHOLD = True  # 是否启用阈值寻找
+    OPTIMIZE_METRIC = "f1"  # 优化指标，可选'f1', 'precision', 'recall', 'accuracy'
+    THRESHOLD_RANGE = (0.01, 0.99)  # 阈值搜索范围
+    THRESHOLD_STEPS = 99  # 搜索步数
+    PLOT_THRESHOLD_METRICS = True  # 是否绘制阈值-指标曲线
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -219,7 +291,48 @@ def evaluate() -> Optional[Dict[str, object]]:
     all_labels = np.concatenate(all_labels, axis=0)  # 拼接标签
     aupr = average_precision_score(all_labels, all_preds)  # AUPR
     auc = roc_auc_score(all_labels, all_preds)  # AUC
-    bin_preds = (all_preds >= EvalConfig.THRESHOLD).astype(int)  # 二值化（阈值0.3）
+    
+    # 寻找最优阈值
+    if EvalConfig.FIND_OPTIMAL_THRESHOLD:
+        optimal_threshold, optimal_metrics, threshold_history = find_optimal_threshold(
+            all_labels, 
+            all_preds, 
+            metric=EvalConfig.OPTIMIZE_METRIC,
+            threshold_range=EvalConfig.THRESHOLD_RANGE,
+            num_steps=EvalConfig.THRESHOLD_STEPS
+        )
+        print(f"Optimal threshold ({EvalConfig.OPTIMIZE_METRIC}): {optimal_threshold:.4f}")
+        print(f"Optimal metrics - F1: {optimal_metrics['f1']:.4f}, "
+              f"Precision: {optimal_metrics['precision']:.4f}, "
+              f"Recall: {optimal_metrics['recall']:.4f}, "
+              f"Accuracy: {optimal_metrics['accuracy']:.4f}")
+        threshold = optimal_threshold
+        
+        # 绘制阈值-指标曲线
+        if EvalConfig.PLOT_THRESHOLD_METRICS:
+            plt.figure(figsize=(10, 6))
+            plt.plot(threshold_history["thresholds"], threshold_history["f1"], label='F1 Score')
+            plt.plot(threshold_history["thresholds"], threshold_history["precision"], label='Precision')
+            plt.plot(threshold_history["thresholds"], threshold_history["recall"], label='Recall')
+            plt.plot(threshold_history["thresholds"], threshold_history["accuracy"], label='Accuracy')
+            
+            # 标记最优阈值点
+            optimal_idx = np.argmin(np.abs(threshold_history["thresholds"] - optimal_threshold))
+            plt.plot(optimal_threshold, threshold_history["f1"][optimal_idx], 'ro', 
+                    label=f'Optimal Threshold ({optimal_threshold:.4f})')
+            
+            plt.xlabel('Threshold')
+            plt.ylabel('Metric Value')
+            plt.title('Metrics vs. Threshold')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, "threshold_metrics.png"))
+            plt.close()
+    else:
+        threshold = EvalConfig.THRESHOLD
+    
+    bin_preds = (all_preds >= threshold).astype(int)  # 二值化
     f1 = f1_score(all_labels, bin_preds)  # F1
     rec = recall_score(all_labels, bin_preds)  # 召回
     prec = precision_score(all_labels, bin_preds)  # 精度
@@ -259,7 +372,20 @@ def evaluate() -> Optional[Dict[str, object]]:
             cauc = roc_auc_score(cl, cp)  # AUC
         except Exception:
             cauc = float("nan")  # 异常处理
-        cb = (cp >= EvalConfig.THRESHOLD).astype(int)  # 二值化（阈值0.3）
+        
+        # 对每个细胞系也可以单独寻找最优阈值（可选）
+        if EvalConfig.FIND_OPTIMAL_THRESHOLD:
+            cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(
+                cl, cp, metric=EvalConfig.OPTIMIZE_METRIC,
+                threshold_range=EvalConfig.THRESHOLD_RANGE,
+                num_steps=EvalConfig.THRESHOLD_STEPS
+            )
+            cb = (cp >= cell_optimal_threshold).astype(int)  # 使用细胞系特定阈值
+            cell_threshold = cell_optimal_threshold
+        else:
+            cb = (cp >= threshold).astype(int)  # 使用全局阈值
+            cell_threshold = threshold
+            
         cf1 = f1_score(cl, cb) if cl.size > 0 else float("nan")  # F1
         cr = recall_score(cl, cb) if cl.size > 0 else float("nan")  # 召回
         cpr = precision_score(cl, cb) if cl.size > 0 else float("nan")  # 精度
@@ -269,6 +395,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             "f1": cf1,
             "recall": cr,
             "precision": cpr,
+            "threshold": cell_threshold,  # 添加阈值信息
             "n": int(cl.size),
         }
     return {  # 返回总体结果
@@ -277,6 +404,7 @@ def evaluate() -> Optional[Dict[str, object]]:
         "f1": f1,
         "recall": rec,
         "precision": prec,
+        "threshold": threshold,  # 添加使用的阈值
         "per_cell": per_cell_results,
         "n": int(all_labels.size),
     }
@@ -294,11 +422,13 @@ if __name__ == "__main__":
         print(f"F1: {res['f1']:.4f}")  # F1
         print(f"Recall: {res['recall']:.4f}")  # 召回
         print(f"Precision: {res['precision']:.4f}")  # 精度
+        print(f"Threshold: {res['threshold']:.4f}")  # 阈值
         print(f"Samples: {res['n']}")  # 样本数
         for c, m in res["per_cell"].items():  # 逐细胞系打印
             print(
                 f"{c}: AUPR={m['aupr']:.4f} AUC={m['auc']:.4f} F1={m['f1']:.4f} "
-                f"Recall={m['recall']:.4f} Precision={m['precision']:.4f} N={m['n']}"
+                f"Recall={m['recall']:.4f} Precision={m['precision']:.4f} "
+                f"Threshold={m['threshold']:.4f} N={m['n']}"
             )
 
         # 保存文本结果
@@ -309,10 +439,12 @@ if __name__ == "__main__":
             f.write(f"F1: {res['f1']:.4f}\n")  # F1
             f.write(f"Recall: {res['recall']:.4f}\n")  # 召回
             f.write(f"Precision: {res['precision']:.4f}\n")  # 精度
+            f.write(f"Threshold: {res['threshold']:.4f}\n")  # 阈值
             f.write(f"Samples: {res['n']}\n")  # 样本数
             f.write("\nPer-cell results:\n")  # 子标题
             for c, m in res["per_cell"].items():  # 逐细胞系
                 f.write(
                     f"{c}: AUPR={m['aupr']:.4f} AUC={m['auc']:.4f} F1={m['f1']:.4f} "
-                    f"Recall={m['recall']:.4f} Precision={m['precision']:.4f} N={m['n']}\n"
+                    f"Recall={m['recall']:.4f} Precision={m['precision']:.4f} "
+                    f"Threshold={m['threshold']:.4f} N={m['n']}\n"
                 )
