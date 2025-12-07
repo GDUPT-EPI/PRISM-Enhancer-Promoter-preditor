@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 256  # 默认训练批量大小
-PRISM_BATCH_SIZE = 16  # PRISM模型批量大小
+PRISM_BATCH_SIZE = 64  # PRISM模型批量大小
 EPOCH = 20  # 训练轮数
 LEARNING_RATE = 5e-5  # 学习率
 GRAD_CLIP_MAX_NORM = 1.2  # 梯度裁剪上限
@@ -131,7 +131,7 @@ BYPASS_ROPE_HEADS = TRANSFORMER_HEADS  # 复用主干的头数
 BYPASS_LEARNING_RATE = 1e-4  # 旁路优化器学习率
 BYPASS_WEIGHT_DECAY = 1e-4   # 旁路优化器权重衰减
 BYPASS_EPOCHS = 5            # 旁路训练轮数（快速验证）
-BYPASS_BATCH_SIZE = 32       # 旁路训练批量大小
+BYPASS_BATCH_SIZE = 128       # 旁路训练批量大小
 BYPASS_MAX_BATCHES_PER_EPOCH = 20  # 每轮最多迭代批次数（绘图验证加速）
 
 # ISAB模块配置
