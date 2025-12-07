@@ -14,7 +14,7 @@ DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目�
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
-PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/e")
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/f")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
@@ -23,7 +23,7 @@ for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, SAVE_MODEL_DIR, PRISM_SAVE_
 
 # 训练参数配置
 BATCH_SIZE = 256  # 默认训练批量大小
-PRISM_BATCH_SIZE = 128  # PRISM模型批量大小
+PRISM_BATCH_SIZE = 16  # PRISM模型批量大小
 EPOCH = 20  # 训练轮数
 LEARNING_RATE = 5e-5  # 学习率
 GRAD_CLIP_MAX_NORM = 1.2  # 梯度裁剪上限
