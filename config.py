@@ -50,7 +50,7 @@ CNN_DROPOUT = 0.35      # CNN层dropout率
 # 交叉注意力和序列池化后的Dropout参数
 CROSS_ATTN_DROPOUT = 0.2  # 交叉注意力层后的dropout率
 SEQ_POOL_DROPOUT = 0.15   # 序列池化后的dropout率
-CLASSIFIER_DROPOUT = 0.15  # 分类器前的dropout率
+CLASSIFIER_DROPOUT = 0.1  # 分类器前的dropout率
 
 # 优化器配置
 WEIGHT_DECAY = 0.001

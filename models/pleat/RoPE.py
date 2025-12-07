@@ -14,7 +14,7 @@ class RoPEConfig:
     ROPE_BASE = 10000.0  # RoPE基础频率
     ROPE_SCALING_TYPE = "linear"  # 线性缩放类型
     ROPE_TRAINING_LENGTH = 4096  # 模型预训练时的上下文长度
-    ROPE_DROPOUT = 0.35  # RoPE注意力层的dropout率
+    ROPE_DROPOUT = 0.15  # RoPE注意力层的dropout率
     
     # RoPE_AdaptAttention 特有配置
     ADAPTIVE_USE_ADAPTIVE = False  # 是否使用自适应注意力

@@ -283,10 +283,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         if promoter_ids.size(1) < min_required_length:
             promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
 
-        # 随机掩码：位置依赖的平滑分布（中心≤10%，全局均值≈8%）
-        if MASK_ENABLED:
-            enhancer_ids = self._apply_positional_random_mask(enhancer_ids)
-            promoter_ids = self._apply_positional_random_mask(promoter_ids)
+        # 本任务不适用随机掩码，直接使用原始ID
 
         embed_en = self.enh_embedding(enhancer_ids)  # 增强子嵌入
         embed_pr = self.pr_embedding(promoter_ids)  # 启动子嵌入
@@ -376,72 +373,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
-    def _apply_positional_random_mask(self, token_ids: torch.Tensor) -> torch.Tensor:
-        """按位置依赖概率对序列进行随机掩码
-
-        使用边缘高斯+中心高斯的平滑分布：
-        - 中心区域宽度由 `MASK_CENTER_REGION_RATIO` 控制，掩码概率上限为 `MASK_CENTER_MAX_PROB`
-        - 首尾边缘概率更高，使用 `MASK_EDGE_SIGMA` 作为高斯宽度
-        - 全局平均概率接近 `MASK_PROB`，在中心限幅后对边缘进行轻微缩放以逼近目标
-
-        Args:
-            token_ids: `[B, L]` 的token索引张量
-
-        Returns:
-            掩码后的 `[B, L]` token索引张量
-        """
-        B, L = token_ids.shape
-        device = token_ids.device
-        probs = self._build_mask_probs(L, device)
-        prob_mat = probs.unsqueeze(0).expand(B, L)
-        rand = torch.rand(B, L, device=device)
-        valid = (token_ids != DNA_EMBEDDING_PADDING_IDX)
-        mask_positions = (rand < prob_mat) & valid
-        out = token_ids.clone()
-        out[mask_positions] = MASK_TOKEN_ID
-        return out
-
-    def _build_mask_probs(self, L: int, device: torch.device) -> torch.Tensor:
-        """构造长度为 L 的位置掩码概率分布
-
-        分布为两侧高斯叠加+中心高斯，随后缩放到全局均值≈`MASK_PROB`，
-        并对中心区域限幅不超过 `MASK_CENTER_MAX_PROB`，保持平滑过渡。
-
-        Args:
-            L: 序列长度
-            device: 张量设备
-
-        Returns:
-            `[L]` 概率向量，范围 [0, 1]
-        """
-        x = torch.linspace(0.0, 1.0, steps=L, device=device)
-        sigma_edge = max(MASK_EDGE_SIGMA, 1e-4)
-        center_sigma = max(MASK_CENTER_REGION_RATIO / 2.0, 1e-4)
-        center_amp = MASK_CENTER_MAX_PROB
-        edge_amp = center_amp * 1.5
-
-        edge = edge_amp * (torch.exp(-x.pow(2) / (2 * sigma_edge ** 2)) + torch.exp(-(1 - x).pow(2) / (2 * sigma_edge ** 2)))
-        center = center_amp * torch.exp(-(x - 0.5).pow(2) / (2 * center_sigma ** 2))
-        p_raw = edge + center
-        mean_raw = p_raw.mean()
-        scale = (MASK_PROB / mean_raw).clamp(min=0.0) if mean_raw > 0 else torch.tensor(1.0, device=device)
-        p_scaled = p_raw * scale
-
-        c_start = 0.5 - MASK_CENTER_REGION_RATIO / 2.0
-        c_end = 0.5 + MASK_CENTER_REGION_RATIO / 2.0
-        center_mask = (x >= c_start) & (x <= c_end)
-        p_scaled[center_mask] = torch.minimum(p_scaled[center_mask], torch.tensor(MASK_CENTER_MAX_PROB, device=device))
-
-        new_mean = p_scaled.mean()
-        if new_mean < MASK_PROB:
-            edge_mask = ~center_mask
-            edge_mean = p_scaled[edge_mask].mean()
-            if edge_mean > 0:
-                adj = ((MASK_PROB - new_mean) / edge_mean).clamp(min=0.0)
-                p_scaled[edge_mask] = p_scaled[edge_mask] * (1.0 + adj)
-            p_scaled[center_mask] = torch.minimum(p_scaled[center_mask], torch.tensor(MASK_CENTER_MAX_PROB, device=device))
-
-        return p_scaled.clamp(0.0, 1.0)
+    # 掩码相关逻辑已移除
 
     def compute_loss(  # 计算损失
         self,
