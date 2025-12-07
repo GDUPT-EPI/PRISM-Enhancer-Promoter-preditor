@@ -265,6 +265,11 @@ def main():
             })
             # 使用完整数据集，无批次上限，保持与PRISM一致
 
+        # 保存旁路模型权重
+        save_path = os.path.join(PROJECT_ROOT, 'save_model', 'bypass')
+        os.makedirs(save_path, exist_ok=True)
+        torch.save({'auxiliary': model.state_dict()}, os.path.join(save_path, f"aux_epoch_{epoch+1}.pth"))
+
         # 记录与绘图
         avg_total = total_loss_epoch / max(1, n_batches)
         history['total'].append(avg_total)
