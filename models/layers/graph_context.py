@@ -41,6 +41,11 @@ class GraphContext(nn.Module):
             Pc = P[mask]
             d = torch.cdist(Pc, Pc, p=2)
             S = torch.exp(-(d.pow(2)) / max(self.tau, 1e-6))
+            k = min(Pc.size(0) - 1, max(1, getattr(__import__('config'), 'GCN_KNN_K', 2)))
+            topk = torch.topk(S, k=k+1, dim=-1).indices
+            mask_knn = torch.zeros_like(S)
+            mask_knn.scatter_(1, topk, 1.0)
+            S = S * mask_knn
             W[mask][:, mask] = S
         W = W + torch.eye(N, device=P.device, dtype=P.dtype)
         d = W.sum(dim=-1)
@@ -90,4 +95,3 @@ class GraphContext(nn.Module):
         margins = (m - dists)[margin_mask]
         margin = torch.relu(margins).mean() if margins.numel() > 0 else torch.tensor(0.0, device=mu.device, dtype=mu.dtype)
         return mu_b, smooth, center, margin
-

@@ -213,6 +213,8 @@ def main():
             gcn_center = extras['gcn_center']
             gcn_margin = extras['gcn_margin']
             gcn_smooth = extras['gcn_smooth']
+            # 将图平滑视为一致性项（图内一致性替代跨批一致性）
+            consist_loss = gcn_smooth
 
             # 正交约束：来自FootprintExpert
             fp_enh: FootprintExpert = model.fp_enh
@@ -220,7 +222,6 @@ def main():
             orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) 
             orth_loss = orth_loss + fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) * 0.0  # 已合并z，避免重复加重
 
-            consist_loss = torch.tensor(0.0, device=DEVICE)
 
             total_loss = (
                 BYPASS_SPEC_WEIGHT * spec_loss +
