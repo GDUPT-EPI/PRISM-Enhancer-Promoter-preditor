@@ -95,8 +95,8 @@ class AuxiliaryModel(nn.Module):
     def __init__(
         self,
         num_cell_types: int,
-        rope_layers: int = 4,
-        rope_heads: int = TRANSFORMER_HEADS,
+        rope_layers: int = None,
+        rope_heads: int = None,
         grl_alpha: float = 1.0,
     ):
         super().__init__()
@@ -135,7 +135,10 @@ class AuxiliaryModel(nn.Module):
         self.fp_enh = FootprintExpert(d_model=OUT_CHANNELS)
         self.fp_pr = FootprintExpert(d_model=OUT_CHANNELS)
 
-        # ============= RoPE自注意堆叠（每塔各4层） =============
+        # ============= RoPE自注意堆叠（层数/头数可配置） =============
+        from config import BYPASS_ROPE_LAYERS, BYPASS_ROPE_HEADS
+        rope_layers = rope_layers or BYPASS_ROPE_LAYERS
+        rope_heads = rope_heads or BYPASS_ROPE_HEADS
         self.rope_layers = rope_layers
         self.enh_attn = nn.ModuleList([RoPEAttention(d_model=OUT_CHANNELS, num_heads=rope_heads) for _ in range(rope_layers)])
         self.pr_attn = nn.ModuleList([RoPEAttention(d_model=OUT_CHANNELS, num_heads=rope_heads) for _ in range(rope_layers)])

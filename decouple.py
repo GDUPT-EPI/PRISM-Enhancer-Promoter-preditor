@@ -190,38 +190,42 @@ def main():
             orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) 
             orth_loss = orth_loss + fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) * 0.0  # 已合并z，避免重复加重
 
-            # 一致性约束：同序列对在不同细胞系的 z_G/z_I 应接近
-            # 修正：仅选择跨细胞系的相同序列样本对；若同一细胞系则不计入一致性
+            # 一致性约束：同序列对在不同细胞系的 z_G/z_I 应接近（间隔批次执行以加速）
             consist_loss = torch.tensor(0.0, device=DEVICE)
-            pairs = sample_consistency_pairs(group_map, max_pairs=64)
-            valid_pairs = 0
-            if len(pairs) > 0:
-                for (i, j) in pairs:
-                    ci = pairs_df.iloc[i]['cell_line']
-                    cj = pairs_df.iloc[j]['cell_line']
-                    if ci == cj:
-                        continue  # 同一细胞系不计一致性
-                    xi = dataset[i]
-                    xj = dataset[j]
-                    # 编码两样本
-                    ei_ids, pj_ids, _, _ = prism_collate_fn([xi])
-                    ej_ids, ppj_ids, _, _ = prism_collate_fn([xj])
-                    ei_ids = ei_ids.to(DEVICE)
-                    pj_ids = pj_ids.to(DEVICE)
-                    ej_ids = ej_ids.to(DEVICE)
-                    ppj_ids = ppj_ids.to(DEVICE)
-                    with torch.no_grad():
-                        _, ex_i = model(ei_ids, pj_ids)
-                        _, ex_j = model(ej_ids, ppj_ids)
-                    # 使用归一化的 zG/zI 以稳定尺度
-                    zg_i = F.normalize(ex_i['zG'], dim=-1)
-                    zg_j = F.normalize(ex_j['zG'], dim=-1)
-                    zi_i = F.normalize(ex_i['zI'], dim=-1)
-                    zi_j = F.normalize(ex_j['zI'], dim=-1)
-                    consist_loss = consist_loss + F.mse_loss(zg_i, zg_j) + F.mse_loss(zi_i, zi_j)
-                    valid_pairs += 1
-                if valid_pairs > 0:
-                    consist_loss = consist_loss / valid_pairs
+            if (bi % 10) == 0:  # 每10个batch计算一次一致性损失
+                pairs = sample_consistency_pairs(group_map, max_pairs=16)
+                valid_pairs = 0
+                if len(pairs) > 0:
+                    # 向量化批处理，减少反复构建与前向次数
+                    xs_i = []
+                    xs_j = []
+                    cells_i = []
+                    cells_j = []
+                    for (i, j) in pairs:
+                        ci = pairs_df.iloc[i]['cell_line']
+                        cj = pairs_df.iloc[j]['cell_line']
+                        if ci == cj:
+                            continue
+                        xs_i.append(dataset[i])
+                        xs_j.append(dataset[j])
+                        cells_i.append(ci)
+                        cells_j.append(cj)
+                    if len(xs_i) > 0:
+                        ei_ids, pj_ids, _, _ = prism_collate_fn(xs_i)
+                        ej_ids, ppj_ids, _, _ = prism_collate_fn(xs_j)
+                        ei_ids = ei_ids.to(DEVICE)
+                        pj_ids = pj_ids.to(DEVICE)
+                        ej_ids = ej_ids.to(DEVICE)
+                        ppj_ids = ppj_ids.to(DEVICE)
+                        with torch.no_grad():
+                            _, ex_i = model(ei_ids, pj_ids)
+                            _, ex_j = model(ej_ids, ppj_ids)
+                        zg_i = F.normalize(ex_i['zG'], dim=-1)
+                        zg_j = F.normalize(ex_j['zG'], dim=-1)
+                        zi_i = F.normalize(ex_i['zI'], dim=-1)
+                        zi_j = F.normalize(ex_j['zI'], dim=-1)
+                        consist_loss = F.mse_loss(zg_i, zg_j) + F.mse_loss(zi_i, zi_j)
+                        valid_pairs = zg_i.size(0)
 
             total_loss = (
                 BYPASS_SPEC_WEIGHT * spec_loss +
