@@ -274,6 +274,9 @@ class AuxiliaryModel(nn.Module):
         # 域判别器（G，通过GRL）
         adv_logits = self.adv_head(self.grl(zG))
 
+        m_ctx_in = torch.cat([zG, zI, zF, mu_b], dim=-1)
+        m_prime = self.ctx_mlp(m_ctx_in)
+
         extras = {
             'zG': zG, 'zF': zF, 'zI': zI,
             'spec_logits': spec_logits,
@@ -301,5 +304,3 @@ class AuxiliaryModel(nn.Module):
             extras['adv_acc'] = adv_acc
 
         return pred_prob, extras
-        m_ctx_in = torch.cat([zG, zI, zF, mu_b], dim=-1)
-        m_prime = self.ctx_mlp(m_ctx_in)
