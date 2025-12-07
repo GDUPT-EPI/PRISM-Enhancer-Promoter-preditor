@@ -15,6 +15,7 @@ import math
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Dict, Tuple, List
@@ -122,7 +123,8 @@ def main():
         consist_loss_epoch = 0.0
         n_batches = 0
 
-        for bi, batch_indices in enumerate(sampler):
+        pbar = tqdm(sampler, desc=f"Epoch {epoch+1}/{BYPASS_EPOCHS} [Bypass Training]", leave=True, dynamic_ncols=True)
+        for bi, batch_indices in enumerate(pbar):
             # 组装一个批次
             batch = [dataset[i] for i in batch_indices]
             # 使用与PRISM相同的tokenizer预处理
@@ -178,12 +180,24 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            total_loss_epoch += total_loss.item()
-            spec_loss_epoch += spec_loss.item()
-            adv_loss_epoch += adv_loss.item()
-            orth_loss_epoch += orth_loss.item()
-            consist_loss_epoch += consist_loss.item()
+            tl = total_loss.item()
+            sl = spec_loss.item()
+            il = adv_loss.item()
+            ol = orth_loss.item()
+            cl = consist_loss.item()
+            total_loss_epoch += tl
+            spec_loss_epoch += sl
+            adv_loss_epoch += il
+            orth_loss_epoch += ol
+            consist_loss_epoch += cl
             n_batches += 1
+            pbar.set_postfix({
+                'total': f"{tl:.4f}",
+                'spec': f"{sl:.4f}",
+                'adv': f"{il:.4f}",
+                'orth': f"{ol:.4f}",
+                'cons': f"{cl:.4f}",
+            })
             if bi + 1 >=  BYPASS_MAX_BATCHES_PER_EPOCH:
                 break
 
