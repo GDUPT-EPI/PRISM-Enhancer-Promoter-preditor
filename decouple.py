@@ -123,7 +123,13 @@ def main():
         consist_loss_epoch = 0.0
         n_batches = 0
 
-        pbar = tqdm(sampler, desc=f"Epoch {epoch+1}/{BYPASS_EPOCHS} [Bypass Training]", leave=True, dynamic_ncols=True)
+        pbar = tqdm(
+            sampler,
+            total=min(len(sampler), BYPASS_MAX_BATCHES_PER_EPOCH),
+            desc=f"Epoch {epoch+1}/{BYPASS_EPOCHS} [Bypass Training]",
+            leave=True,
+            dynamic_ncols=True,
+        )
         for bi, batch_indices in enumerate(pbar):
             # 组装一个批次
             batch = [dataset[i] for i in batch_indices]
