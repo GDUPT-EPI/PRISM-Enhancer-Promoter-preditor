@@ -34,6 +34,9 @@ from config import (
     BYPASS_INV_WEIGHT,
     BYPASS_ORTHO_WEIGHT,
     BYPASS_CONSIST_WEIGHT,
+    GCN_CENTER_LOSS_W,
+    GCN_MARGIN_LOSS_W,
+    GCN_SMOOTH_LOSS_W,
     PROJECT_ROOT,
 )
 
@@ -168,7 +171,7 @@ def main():
     model.to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=BYPASS_LEARNING_RATE, weight_decay=BYPASS_WEIGHT_DECAY)
 
-    history = { 'total': [], 'spec': [], 'adv': [], 'orth': [], 'consist': [] }
+    history = { 'total': [], 'spec': [], 'adv': [], 'orth': [], 'consist': [], 'gcn_center': [], 'gcn_margin': [], 'gcn_smooth': [] }
 
     for epoch in range(BYPASS_EPOCHS):
         model.train()
@@ -178,6 +181,9 @@ def main():
         orth_loss_epoch = 0.0
         consist_loss_epoch = 0.0
         n_batches = 0
+        gcn_center_epoch = 0.0
+        gcn_margin_epoch = 0.0
+        gcn_smooth_epoch = 0.0
 
         pbar = tqdm(
             sampler,
@@ -204,6 +210,9 @@ def main():
 
             spec_loss = extras['spec_loss']
             adv_loss = extras['adv_loss']
+            gcn_center = extras['gcn_center']
+            gcn_margin = extras['gcn_margin']
+            gcn_smooth = extras['gcn_smooth']
 
             # 正交约束：来自FootprintExpert
             fp_enh: FootprintExpert = model.fp_enh
@@ -211,48 +220,14 @@ def main():
             orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) 
             orth_loss = orth_loss + fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) * 0.0  # 已合并z，避免重复加重
 
-            # 一致性约束：同序列对在不同细胞系的 z_G/z_I 应接近（间隔批次执行以加速）
             consist_loss = torch.tensor(0.0, device=DEVICE)
-            if (bi % 10) == 0:  # 每10个batch计算一次一致性损失
-                pairs = sample_consistency_pairs(group_map, max_pairs=16)
-                valid_pairs = 0
-                if len(pairs) > 0:
-                    # 向量化批处理，减少反复构建与前向次数
-                    xs_i = []
-                    xs_j = []
-                    cells_i = []
-                    cells_j = []
-                    for (i, j) in pairs:
-                        ci = pairs_df.iloc[i]['cell_line']
-                        cj = pairs_df.iloc[j]['cell_line']
-                        if ci == cj:
-                            continue
-                        xs_i.append(dataset[i])
-                        xs_j.append(dataset[j])
-                        cells_i.append(ci)
-                        cells_j.append(cj)
-                    if len(xs_i) > 0:
-                        ei_ids, pj_ids, _, _ = prism_collate_fn(xs_i)
-                        ej_ids, ppj_ids, _, _ = prism_collate_fn(xs_j)
-                        ei_ids = ei_ids.to(DEVICE)
-                        pj_ids = pj_ids.to(DEVICE)
-                        ej_ids = ej_ids.to(DEVICE)
-                        ppj_ids = ppj_ids.to(DEVICE)
-                        with torch.no_grad():
-                            _, ex_i = model(ei_ids, pj_ids)
-                            _, ex_j = model(ej_ids, ppj_ids)
-                        zg_i = F.normalize(ex_i['zG'], dim=-1)
-                        zg_j = F.normalize(ex_j['zG'], dim=-1)
-                        zi_i = F.normalize(ex_i['zI'], dim=-1)
-                        zi_j = F.normalize(ex_j['zI'], dim=-1)
-                        consist_loss = F.mse_loss(zg_i, zg_j) + F.mse_loss(zi_i, zi_j)
-                        valid_pairs = zg_i.size(0)
 
             total_loss = (
                 BYPASS_SPEC_WEIGHT * spec_loss +
                 BYPASS_INV_WEIGHT * adv_loss +
                 BYPASS_ORTHO_WEIGHT * orth_loss +
-                BYPASS_CONSIST_WEIGHT * consist_loss
+                BYPASS_CONSIST_WEIGHT * consist_loss +
+                GCN_CENTER_LOSS_W * gcn_center + GCN_MARGIN_LOSS_W * gcn_margin + GCN_SMOOTH_LOSS_W * gcn_smooth
             )
             # 额外一致性信号：在RoPE后池化的序列表征保持一致（跨细胞）
             # 注意：该项权重较小，仅作为补充
@@ -273,6 +248,9 @@ def main():
             adv_loss_epoch += il
             orth_loss_epoch += ol
             consist_loss_epoch += cl
+            gcn_center_epoch += float(gcn_center.item())
+            gcn_margin_epoch += float(gcn_margin.item())
+            gcn_smooth_epoch += float(gcn_smooth.item())
             n_batches += 1
             pbar.set_postfix({
                 'total': f"{tl:.4f}",
@@ -280,6 +258,9 @@ def main():
                 'adv': f"{il:.4f}",
                 'orth': f"{ol:.4f}",
                 'cons': f"{cl:.4f}",
+                'g_center': f"{gcn_center.item():.4f}",
+                'g_margin': f"{gcn_margin.item():.4f}",
+                'g_smooth': f"{gcn_smooth.item():.4f}",
             })
             # 使用完整数据集，无批次上限，保持与PRISM一致
 
@@ -290,6 +271,9 @@ def main():
         history['adv'].append(adv_loss_epoch / max(1, n_batches))
         history['orth'].append(orth_loss_epoch / max(1, n_batches))
         history['consist'].append(consist_loss_epoch / max(1, n_batches))
+        history['gcn_center'].append(gcn_center_epoch / max(1, n_batches))
+        history['gcn_margin'].append(gcn_margin_epoch / max(1, n_batches))
+        history['gcn_smooth'].append(gcn_smooth_epoch / max(1, n_batches))
         plot_epoch_curves(out_dir, history, epoch + 1)
 
         # 深度可视化：G/F子空间的t-SNE分布与F分类的混淆矩阵

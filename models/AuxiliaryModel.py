@@ -34,6 +34,7 @@ from models.pleat.embedding import create_dna_embedding_layer
 from models.layers.attn import RoPEAttention
 from models.layers.FourierKAN import FourierKAN
 from models.layers.footprint import FootprintExpert
+from models.layers.graph_context import GraphContext
 
 
 class SequencePooling(nn.Module):
@@ -134,6 +135,15 @@ class AuxiliaryModel(nn.Module):
         # ============= Footprint专家（样本级向量 + 三元子空间） =============
         self.fp_enh = FootprintExpert(d_model=OUT_CHANNELS)
         self.fp_pr = FootprintExpert(d_model=OUT_CHANNELS)
+
+        # ============= 图上下文（GCN原型） =============
+        self.graph_ctx = GraphContext(num_cells=num_cell_types, d_spec=max(8, OUT_CHANNELS // 8))
+        self.ctx_mlp = nn.Sequential(
+            nn.LayerNorm(2 * OUT_CHANNELS + 2 * max(8, OUT_CHANNELS // 8)),
+            nn.Linear(2 * OUT_CHANNELS + 2 * max(8, OUT_CHANNELS // 8), OUT_CHANNELS),
+            nn.GELU(),
+            nn.LayerNorm(OUT_CHANNELS),
+        )
 
         # ============= RoPE自注意堆叠（层数/头数可配置） =============
         from config import BYPASS_ROPE_LAYERS, BYPASS_ROPE_HEADS
@@ -259,8 +269,8 @@ class AuxiliaryModel(nn.Module):
         logits = self.classifier(h)
         pred_prob = torch.sigmoid(logits)
 
-        # 特性分类器（F）
         spec_logits = self.spec_head(zF)
+        mu_b, smooth_loss, center_loss, margin_loss = self.graph_ctx(zF, cell_labels)
         # 域判别器（G，通过GRL）
         adv_logits = self.adv_head(self.grl(zG))
 
@@ -268,6 +278,11 @@ class AuxiliaryModel(nn.Module):
             'zG': zG, 'zF': zF, 'zI': zI,
             'spec_logits': spec_logits,
             'adv_logits': adv_logits,
+            'mu_ctx': mu_b,
+            'gcn_smooth': smooth_loss,
+            'gcn_center': center_loss,
+            'gcn_margin': margin_loss,
+            'M_prime': m_prime,
             'enh_pad_mask': enh_pad_mask,
             'pr_pad_mask': pr_pad_mask,
         }
@@ -286,3 +301,5 @@ class AuxiliaryModel(nn.Module):
             extras['adv_acc'] = adv_acc
 
         return pred_prob, extras
+        m_ctx_in = torch.cat([zG, zI, zF, mu_b], dim=-1)
+        m_prime = self.ctx_mlp(m_ctx_in)
