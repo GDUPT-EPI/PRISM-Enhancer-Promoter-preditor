@@ -215,6 +215,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         self.cross_attn_1 = nn.MultiheadAttention(  # 第一次跨序列注意力
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )  # 第一次跨序列注意力
+        self.cross_attn_1_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)  # 交叉注意力1后的Dropout
         self.cbat_layers = nn.ModuleList([  # 增强子CBAT层列表
             CBATTransformerEncoderLayer(  # CBAT编码器层
                 d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,  # 模型维度和头数
@@ -232,6 +233,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         self.cross_attn_2 = nn.MultiheadAttention(  # 第二次跨序列注意力
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
         )  # 第二次跨序列注意力
+        self.cross_attn_2_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)  # 交叉注意力2后的Dropout
         self.post_cbat = CBAT(  # 末端CBAT
             d_model=OUT_CHANNELS,  # 模型维度
             num_heads=TRANSFORMER_HEADS,  # 注意力头数
@@ -240,6 +242,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             dropout=TRANSFORMER_DROPOUT,  # Dropout
         )  # 末端CBAT
         self.seq_pool = SequencePooling(d_model=OUT_CHANNELS)
+        self.seq_pool_dropout = nn.Dropout(p=SEQ_POOL_DROPOUT)  # 序列池化后的Dropout
+        self.classifier_dropout = nn.Dropout(p=CLASSIFIER_DROPOUT)  # 分类器前的Dropout
         self.classifier = FourierKAN(  # KAN分类头
             in_features=OUT_CHANNELS,  # 输入特征数
             out_features=1,  # 输出特征数
@@ -328,6 +332,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
         att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
+        att1 = self.cross_attn_1_dropout(att1)  # 应用交叉注意力1后的Dropout
         enh_x1 = enh + att1
 
 
@@ -352,6 +357,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             total_adaptive_loss += layer_loss_pr
 
         att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
+        att2 = self.cross_attn_2_dropout(att2)  # 应用交叉注意力2后的Dropout
         enh = enh_x1 + att2
 
         post_out, post_loss = self.post_cbat(
@@ -365,6 +371,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
 
         x_seq = enh.permute(1, 0, 2)
         y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
+        y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
+        y = self.classifier_dropout(y)  # 应用分类器前的Dropout
         result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
