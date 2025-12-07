@@ -1,7 +1,7 @@
 from models.pleat.embedding import KMerTokenizer
 from config import *
 from config import PRISM_SAVE_MODEL_DIR, PRISM_BATCH_SIZE
-from data_loader import load_prism_data, PRISMDataset, CellBatchSampler
+from data_loader import load_prism_data, PRISMDataset, RandomBatchSampler
 import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
@@ -195,8 +195,7 @@ def main():  # 主函数
     # 创建数据集
     train_dataset = PRISMDataset(train_pairs_df, train_e_seqs, train_p_seqs)  # 创建训练数据集
     
-    # 创建对比采样器
-    train_sampler = CellBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)  # 创建训练采样器
+    train_sampler = RandomBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)
     
     # 创建数据加载器
     logger.info("创建数据加载器...")  # 记录日志
@@ -254,7 +253,7 @@ def main():  # 主函数
     total_steps = len(train_loader) * EPOCH  # 总步数
     scheduler = None  # 调度器为空
     
-    logger.info(f"批量大小: {PRISM_BATCH_SIZE} (纯细胞系批次)")  # 记录日志
+    logger.info(f"批量大小: {PRISM_BATCH_SIZE} (纯随机批次)")
     logger.info(f"训练轮数: {EPOCH}")  # 记录日志
     logger.info(f"学习率: {LEARNING_RATE}")  # 记录日志
     logger.info(f"总训练步数: {total_steps}")  # 记录日志

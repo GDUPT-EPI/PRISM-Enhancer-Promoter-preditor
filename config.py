@@ -77,11 +77,19 @@ SAVE_ATTENTION_OUTPUTS = False
 # K-mer配置
 KMER_SIZE = 6  # 6-mer tokenization
 
-# DNA嵌入层配置
-DNA_EMBEDDING_VOCAB_SIZE = 4097  # 6-mer词汇表大小 (4^6 + 1 null token)
+# DNA嵌入层与词表配置
+# 采用 4^K + 1(null) + n 的方式扩展词表，以支持随机掩码与特殊符号
+SPECIAL_TOKENS_ORDER = ["MASK", "CLS", "SEP"]
+NUM_EXTRA_TOKENS = len(SPECIAL_TOKENS_ORDER)
+DNA_EMBEDDING_VOCAB_SIZE = (4 ** KMER_SIZE) + 1 + NUM_EXTRA_TOKENS
 DNA_EMBEDDING_DIM = 768  # DNA嵌入维度，与EMBEDDING_DIM保持一致
-DNA_EMBEDDING_PADDING_IDX = 0  # padding token的索引
+DNA_EMBEDDING_PADDING_IDX = 0  # padding token的索引（null 保持为0）
 DNA_EMBEDDING_INIT_STD = 0.1  # 嵌入权重初始化标准差
+
+# 约定：特殊token按顺序追加在 4^K + 1(null) 之后，便于索引推导
+MASK_TOKEN_ID = (4 ** KMER_SIZE) + 1
+CLS_TOKEN_ID = MASK_TOKEN_ID + 1
+SEP_TOKEN_ID = MASK_TOKEN_ID + 2
 
 # 预处理优化配置
 PREPROCESS_NUM_WORKERS = max(1, os.cpu_count() - 1)  # 使用所有核心-1
@@ -110,3 +118,10 @@ ISAB_DROPOUT = 0.1      # ISAB dropout
 # 批级上下文规模与上下文自注意层数
 CONTEXT_BATCH_SIZE = 128
 CONTEXT_ATTENTION_LAYERS = 2
+
+# 随机掩码配置（位置依赖，平滑过渡）
+MASK_ENABLED = True
+MASK_PROB = 0.08  # 全局平均掩码概率（约8%）
+MASK_CENTER_MAX_PROB = 0.10  # 中心区域最大掩码概率上限
+MASK_CENTER_REGION_RATIO = 0.5  # 中心区域相对于序列长度的比例（50%）
+MASK_EDGE_SIGMA = 0.25  # 边缘高斯宽度（相对化坐标系的sigma）

@@ -6,6 +6,7 @@
 from config import DOMAIN_KL_DIR
 from torch.utils.data import Dataset, Sampler
 import random
+import math
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
@@ -466,3 +467,20 @@ class CellBatchSampler(Sampler):
 
     def __len__(self):
         return self.num_batches
+
+
+class RandomBatchSampler(Sampler):
+    def __init__(self, dataset: Dataset, batch_size: int, shuffle: bool = True):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        indices = list(range(len(self.dataset)))
+        if self.shuffle:
+            random.shuffle(indices)
+        for i in range(0, len(indices), self.batch_size):
+            yield indices[i:i + self.batch_size]
+
+    def __len__(self):
+        return math.ceil(len(self.dataset) / max(1, self.batch_size))

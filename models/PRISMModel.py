@@ -12,7 +12,7 @@ from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.layers.attn import *
 from models.layers.FourierKAN import FourierKAN
-from models.layers.ISAB import ISAB
+# ISAB 上下文结构不再使用，直接序列池化分类
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.pleat.SpeculationPenalty import SpeculationPenaltyLoss
 from typing import Optional, Tuple
@@ -125,24 +125,22 @@ class AttnPool1dWindow(nn.Module):  # 定义滑窗注意力池化类
             return x.new_zeros(B, C, 0)  # 无输出返回空
         return torch.cat(outs, dim=-1)  # 拼接
 
-class SampleAggregator(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, dropout: float):
+class SequencePooling(nn.Module):
+    def __init__(self, d_model: int):
         super().__init__()
-        self.query = nn.Parameter(torch.randn(1, d_model))
-        nn.init.xavier_uniform_(self.query.unsqueeze(0))
-        self.mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=num_heads, batch_first=True, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.ffn = nn.Sequential(nn.Linear(d_model, 4 * d_model), nn.GELU(), nn.Dropout(dropout), nn.Linear(4 * d_model, d_model))
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.proj = nn.Linear(d_model, 1)
 
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, L, D = x.shape
-        q = self.query.expand(B, 1, D)
-        xn = self.norm1(x)
-        y, _ = self.mha(query=q, key=xn, value=xn, key_padding_mask=key_padding_mask)
-        y = y.squeeze(1)
-        y = y + self.ffn(self.norm2(y))
-        return y
+        xn = self.norm(x)
+        w = self.proj(xn).squeeze(-1)
+        if key_padding_mask is not None:
+            w = w.masked_fill(key_padding_mask, -1e9)
+        w = torch.softmax(w, dim=-1)
+        w = w.masked_fill((key_padding_mask if key_padding_mask is not None else torch.zeros_like(w, dtype=torch.bool)), 0.0)
+        denom = w.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        w = w / denom
+        return (x * w.unsqueeze(-1)).sum(dim=1)
 
 class ContextSelfAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, num_layers: int, dropout: float):
@@ -241,14 +239,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
             dropout=TRANSFORMER_DROPOUT,  # Dropout
         )  # 末端CBAT
-        self.isab = ISAB(  # ISAB上下文层（批级集合）
-            d_model=OUT_CHANNELS,
-            num_heads=TRANSFORMER_HEADS,
-            num_inducing=ISAB_NUM_INDUCING,
-            dropout=ISAB_DROPOUT,
-        )
-        self.sample_agg = SampleAggregator(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT)
-        self.context_attn = ContextSelfAttention(d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, num_layers=CONTEXT_ATTENTION_LAYERS, dropout=TRANSFORMER_DROPOUT)
+        self.seq_pool = SequencePooling(d_model=OUT_CHANNELS)
         self.classifier = FourierKAN(  # KAN分类头
             in_features=OUT_CHANNELS,  # 输入特征数
             out_features=1,  # 输出特征数
@@ -283,10 +274,15 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         K = CNN_KERNEL_SIZE  # 卷积核大小
         P = POOL_KERNEL_SIZE  # 池化核大小
         min_required_length = K + P - 1  # 最小所需长度
-        if enhancer_ids.size(1) < min_required_length:  # 检查增强子长度
-            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)  # 填充
-        if promoter_ids.size(1) < min_required_length:  # 检查启动子长度
-            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)  # 填充
+        if enhancer_ids.size(1) < min_required_length:
+            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
+        if promoter_ids.size(1) < min_required_length:
+            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
+
+        # 随机掩码：位置依赖的平滑分布（中心≤10%，全局均值≈8%）
+        if MASK_ENABLED:
+            enhancer_ids = self._apply_positional_random_mask(enhancer_ids)
+            promoter_ids = self._apply_positional_random_mask(promoter_ids)
 
         embed_en = self.enh_embedding(enhancer_ids)  # 增强子嵌入
         embed_pr = self.pr_embedding(promoter_ids)  # 启动子嵌入
@@ -358,7 +354,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
         enh = enh_x1 + att2
 
-        post_out, post_loss = self.post_cbat(  # 末端单层CBAT仅作为特征整合层，保持主干
+        post_out, post_loss = self.post_cbat(
             enh.permute(1, 0, 2),  # 输入E序列
             attention_mask=enh_attn_mask,  # 使用E的mask
             position_ids=None,  # 无位置ID
@@ -368,13 +364,76 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         enh = post_out.permute(1, 0, 2)  # 回到[L,B,D]
 
         x_seq = enh.permute(1, 0, 2)
-        sample_vec = self.sample_agg(x_seq, key_padding_mask=enh_pad_mask)
-        x_set = sample_vec.unsqueeze(0)
-        x_set = self.isab(x_set)
-        x_set = self.context_attn(x_set)
-        y = x_set.squeeze(0)
+        y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
         result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
+
+    def _apply_positional_random_mask(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """按位置依赖概率对序列进行随机掩码
+
+        使用边缘高斯+中心高斯的平滑分布：
+        - 中心区域宽度由 `MASK_CENTER_REGION_RATIO` 控制，掩码概率上限为 `MASK_CENTER_MAX_PROB`
+        - 首尾边缘概率更高，使用 `MASK_EDGE_SIGMA` 作为高斯宽度
+        - 全局平均概率接近 `MASK_PROB`，在中心限幅后对边缘进行轻微缩放以逼近目标
+
+        Args:
+            token_ids: `[B, L]` 的token索引张量
+
+        Returns:
+            掩码后的 `[B, L]` token索引张量
+        """
+        B, L = token_ids.shape
+        device = token_ids.device
+        probs = self._build_mask_probs(L, device)
+        prob_mat = probs.unsqueeze(0).expand(B, L)
+        rand = torch.rand(B, L, device=device)
+        valid = (token_ids != DNA_EMBEDDING_PADDING_IDX)
+        mask_positions = (rand < prob_mat) & valid
+        out = token_ids.clone()
+        out[mask_positions] = MASK_TOKEN_ID
+        return out
+
+    def _build_mask_probs(self, L: int, device: torch.device) -> torch.Tensor:
+        """构造长度为 L 的位置掩码概率分布
+
+        分布为两侧高斯叠加+中心高斯，随后缩放到全局均值≈`MASK_PROB`，
+        并对中心区域限幅不超过 `MASK_CENTER_MAX_PROB`，保持平滑过渡。
+
+        Args:
+            L: 序列长度
+            device: 张量设备
+
+        Returns:
+            `[L]` 概率向量，范围 [0, 1]
+        """
+        x = torch.linspace(0.0, 1.0, steps=L, device=device)
+        sigma_edge = max(MASK_EDGE_SIGMA, 1e-4)
+        center_sigma = max(MASK_CENTER_REGION_RATIO / 2.0, 1e-4)
+        center_amp = MASK_CENTER_MAX_PROB
+        edge_amp = center_amp * 1.5
+
+        edge = edge_amp * (torch.exp(-x.pow(2) / (2 * sigma_edge ** 2)) + torch.exp(-(1 - x).pow(2) / (2 * sigma_edge ** 2)))
+        center = center_amp * torch.exp(-(x - 0.5).pow(2) / (2 * center_sigma ** 2))
+        p_raw = edge + center
+        mean_raw = p_raw.mean()
+        scale = (MASK_PROB / mean_raw).clamp(min=0.0) if mean_raw > 0 else torch.tensor(1.0, device=device)
+        p_scaled = p_raw * scale
+
+        c_start = 0.5 - MASK_CENTER_REGION_RATIO / 2.0
+        c_end = 0.5 + MASK_CENTER_REGION_RATIO / 2.0
+        center_mask = (x >= c_start) & (x <= c_end)
+        p_scaled[center_mask] = torch.minimum(p_scaled[center_mask], torch.tensor(MASK_CENTER_MAX_PROB, device=device))
+
+        new_mean = p_scaled.mean()
+        if new_mean < MASK_PROB:
+            edge_mask = ~center_mask
+            edge_mean = p_scaled[edge_mask].mean()
+            if edge_mean > 0:
+                adj = ((MASK_PROB - new_mean) / edge_mean).clamp(min=0.0)
+                p_scaled[edge_mask] = p_scaled[edge_mask] * (1.0 + adj)
+            p_scaled[center_mask] = torch.minimum(p_scaled[center_mask], torch.tensor(MASK_CENTER_MAX_PROB, device=device))
+
+        return p_scaled.clamp(0.0, 1.0)
 
     def compute_loss(  # 计算损失
         self,
