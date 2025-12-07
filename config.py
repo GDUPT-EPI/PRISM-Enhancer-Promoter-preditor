@@ -116,6 +116,24 @@ ENABLE_FAST_PREPROCESSING = True
 # =========================================================================
 PRISM_IMG_SIZE = 16  # CBAT模块图像尺寸
 
+# =========================================================================
+# 旁路解耦模块配置
+# =========================================================================
+# 不使用命令行参数，所有超参数集中在此处
+BYPASS_LATENT_DIM = 1024  # 旁路潜变量总维度 z = [G,F,I]
+BYPASS_SPEC_WEIGHT = 1.0  # 特性鉴别损失权重
+BYPASS_INV_WEIGHT = 1.0   # 共性对抗损失权重
+BYPASS_ORTHO_WEIGHT = 0.2 # 正交性约束权重
+BYPASS_CONSIST_WEIGHT = 0.2 # 一致性约束权重
+BYPASS_GRL_ALPHA = 1.0    # 梯度反转层系数
+BYPASS_ROPE_LAYERS = 4    # RoPE自注意层数
+BYPASS_ROPE_HEADS = TRANSFORMER_HEADS  # 复用主干的头数
+BYPASS_LEARNING_RATE = 1e-4  # 旁路优化器学习率
+BYPASS_WEIGHT_DECAY = 1e-4   # 旁路优化器权重衰减
+BYPASS_EPOCHS = 5            # 旁路训练轮数（快速验证）
+BYPASS_BATCH_SIZE = 32       # 旁路训练批量大小
+BYPASS_MAX_BATCHES_PER_EPOCH = 20  # 每轮最多迭代批次数（绘图验证加速）
+
 # ISAB模块配置
 ISAB_NUM_INDUCING = 32  # 诱导点数量
 ISAB_DROPOUT = 0.1      # ISAB dropout

@@ -482,19 +482,80 @@ class LCWnetFootprint(nn.Module):
 
 
 class FootprintExpert(nn.Module):
-    def __init__(self, d_model: int, d_spec_ratio: int = 8):
+    def __init__(self, d_model: int, d_spec_ratio: int = 8, d_int: Optional[int] = None):
+        """
+        Footprint专家模块
+
+        负责将LCWnetFootprint提取的样本向量进一步投影为
+        [共性G, 特异F, 互作I] 三个子空间，并提供正交性约束。
+
+        Args:
+            d_model: 主干维度（与CNN输出通道一致）
+            d_spec_ratio: 特异子空间的降维比例（默认 d_model/8）
+            d_int: 互作子空间维度，默认与 d_model 一致
+        """
         super().__init__()
         self.backbone = LCWnetFootprint(d_model)
         self.d_model = d_model
         self.d_spec = max(8, d_model // d_spec_ratio)
+        self.d_int = d_int or d_model
+
+        # 线性投影头：将样本级footprint向量映射到三个子空间
         self.w_com = nn.Linear(d_model, d_model, bias=False)
         self.w_spec = nn.Linear(d_model, self.d_spec, bias=False)
+        self.w_int = nn.Linear(d_model, self.d_int, bias=False)
 
-    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, residual: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        前向传播
+
+        Args:
+            x: 序列级输入 [B, L, D]
+            residual: 残差输入（可选）[B, L, D]
+
+        Returns:
+            seq_out: 序列级输出 [B, L, D]
+            sample_vec: 样本级向量 v ∈ R^{D}
+            z_com: 共性子空间向量 G ∈ R^{D}
+            z_spec: 特异子空间向量 F ∈ R^{D_spec}
+            z_int: 互作子空间向量 I ∈ R^{D_int}
+        """
         seq_out, sample_vec = self.backbone(x, residual)
         z_com = self.w_com(sample_vec)
         z_spec = self.w_spec(sample_vec)
-        return seq_out, sample_vec, z_com, z_spec
+        z_int = self.w_int(sample_vec)
+        return seq_out, sample_vec, z_com, z_spec, z_int
 
     def forward_vector(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        仅提取样本级footprint向量
+        """
         return self.backbone.forward_vector(x)
+
+    def orthogonality_loss(self, z_com: torch.Tensor, z_spec: torch.Tensor, z_int: torch.Tensor) -> torch.Tensor:
+        """
+        正交性约束损失
+
+        强制 [G, F, I] 子空间在统计意义上相互独立，
+        通过最小化两两内积的平方和实现。
+
+        Args:
+            z_com: 共性向量 [B, D]
+            z_spec: 特异向量 [B, D_spec]
+            z_int: 互作向量 [B, D_int]
+
+        Returns:
+            标量损失值
+        """
+        # 标准化以避免尺度主导
+        g = F.normalize(z_com, dim=-1)
+        f = F.normalize(z_spec, dim=-1)
+        i = F.normalize(z_int, dim=-1)
+
+        # 计算两两相关性（跨维度外积的Frobenius范数）
+        # Z_G^T Z_F ∈ R^{D×D_spec}；Z_G^T Z_I ∈ R^{D×D_int}；Z_F^T Z_I ∈ R^{D_spec×D_int}
+        gf = (g.transpose(0, 1) @ f).pow(2).mean()
+        gi = (g.transpose(0, 1) @ i).pow(2).mean()
+        fi = (f.transpose(0, 1) @ i).pow(2).mean()
+
+        return gf + gi + fi
