@@ -131,8 +131,13 @@ BYPASS_ROPE_HEADS = TRANSFORMER_HEADS  # 复用主干的头数
 BYPASS_LEARNING_RATE = 1e-4  # 旁路优化器学习率
 BYPASS_WEIGHT_DECAY = 1e-4   # 旁路优化器权重衰减
 BYPASS_EPOCHS = 5            # 旁路训练轮数（快速验证）
-BYPASS_BATCH_SIZE = 128       # 旁路训练批量大小
-BYPASS_MAX_BATCHES_PER_EPOCH = 20  # 每轮最多迭代批次数（绘图验证加速）
+BYPASS_BATCH_SIZE = 32       # 旁路训练批量大小
+BYPASS_MAX_BATCHES_PER_EPOCH = None  # 每轮最多迭代批次数（None表示不限制）
+BYPASS_TSNE_POINTS = 600      # 每个epoch用于t-SNE的采样点数（G/F各）
+BYPASS_CONSIST_PAIRS = 64     # 每个epoch一致性对数量（相同序列）
+BYPASS_RANDOM_PAIRS = 64      # 每个epoch随机对数量（对比分布）
+BYPASS_PLOT_TSNE = True       # 是否绘制t-SNE
+BYPASS_PLOT_CONFUSION = True  # 是否绘制混淆矩阵
 
 # ISAB模块配置
 ISAB_NUM_INDUCING = 32  # 诱导点数量

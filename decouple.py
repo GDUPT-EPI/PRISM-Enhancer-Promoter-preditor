@@ -19,6 +19,8 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Dict, Tuple, List
+from sklearn.manifold import TSNE
+from sklearn.metrics import confusion_matrix
 
 from config import (
     DEVICE,
@@ -88,6 +90,40 @@ def plot_epoch_curves(out_dir: str, history: Dict[str, List[float]], epoch: int)
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f'epoch_{epoch:02d}_loss.png'))
+    plt.close()
+
+def _safe_np(x: torch.Tensor) -> np.ndarray:
+    return x.detach().cpu().numpy()
+
+def plot_tsne(out_dir: str, epoch: int, Z: np.ndarray, labels: np.ndarray, title: str) -> None:
+    tsne = TSNE(n_components=2, perplexity=30, learning_rate='auto', init='random', random_state=42)
+    Y = tsne.fit_transform(Z)
+    plt.figure(figsize=(7,6))
+    unique = np.unique(labels)
+    colors = plt.cm.get_cmap('tab20', len(unique))
+    for i, u in enumerate(unique):
+        idx = labels == u
+        plt.scatter(Y[idx,0], Y[idx,1], s=8, color=colors(i), label=str(u), alpha=0.8)
+    plt.title(title)
+    plt.legend(markerscale=2, bbox_to_anchor=(1.04, 1), loc='upper left')
+    plt.tight_layout()
+    out_name = f"epoch_{epoch:02d}_{title.replace(' ', '_').lower()}.png"
+    plt.savefig(os.path.join(out_dir, out_name))
+    plt.close()
+
+def plot_confusion(out_dir: str, epoch: int, y_true: np.ndarray, y_pred: np.ndarray, title: str) -> None:
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(6,5))
+    plt.imshow(cm, cmap='Blues')
+    plt.title(title)
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.colorbar()
+    for (i, j), v in np.ndenumerate(cm):
+        plt.text(j, i, str(v), ha='center', va='center', color='black')
+    plt.tight_layout()
+    out_name = f"epoch_{epoch:02d}_{title.replace(' ', '_').lower()}.png"
+    plt.savefig(os.path.join(out_dir, out_name))
     plt.close()
 
 
@@ -214,19 +250,51 @@ def main():
         history['consist'].append(consist_loss_epoch / max(1, n_batches))
         plot_epoch_curves(out_dir, history, epoch + 1)
 
-        # 简要保存z的分布可视化（G/F/I范数）
+        # 深度可视化：G/F子空间的t-SNE分布与F分类的混淆矩阵
         with torch.no_grad():
-            norms = {
-                'G_norm': history['orth'][-1],
-                'F_loss_proxy': history['spec'][-1],
-                'I_consist_proxy': history['consist'][-1],
-            }
-            plt.figure(figsize=(6,4))
-            plt.bar(list(norms.keys()), list(norms.values()))
-            plt.title('Bypass Proxies (epoch avg)')
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, f'epoch_{epoch+1:02d}_proxies.png'))
-            plt.close()
+            # 采样若干批次收集 zG/zF 与细胞标签
+            zg_list: List[torch.Tensor] = []
+            zf_list: List[torch.Tensor] = []
+            y_list: List[torch.Tensor] = []
+            steps_collected = 0
+            for batch_indices in sampler:
+                if steps_collected >= 10:
+                    break
+                batch = [dataset[i] for i in batch_indices]
+                from PRISM import prism_collate_fn
+                enh_ids, pr_ids, cell_lines, labels_t = prism_collate_fn(batch)
+                cell_t = build_cell_label_tensor(cell_lines, all_cells).to(DEVICE)
+                enh_ids = enh_ids.to(DEVICE)
+                pr_ids = pr_ids.to(DEVICE)
+                _, ex = model(enh_ids, pr_ids, cell_labels=cell_t)
+                zg_list.append(ex['zG'])
+                zf_list.append(ex['zF'])
+                y_list.append(cell_t)
+                steps_collected += 1
+            if len(zg_list) > 0:
+                ZG = _safe_np(torch.cat(zg_list, dim=0))
+                ZF = _safe_np(torch.cat(zf_list, dim=0))
+                Y = _safe_np(torch.cat(y_list, dim=0))
+                # 下采样避免t-SNE过慢
+                nG = ZG.shape[0]
+                nF = ZF.shape[0]
+                selG = np.random.choice(nG, size=min(600, nG), replace=False)
+                selF = np.random.choice(nF, size=min(600, nF), replace=False)
+                plot_tsne(out_dir, epoch+1, ZG[selG], Y[selG], 't-SNE G (cell)')
+                plot_tsne(out_dir, epoch+1, ZF[selF], Y[selF], 't-SNE F (cell)')
+            # 使用一批绘制F分类混淆矩阵
+            for batch_indices in sampler:
+                batch = [dataset[i] for i in batch_indices]
+                from PRISM import prism_collate_fn
+                enh_ids, pr_ids, cell_lines, labels_t = prism_collate_fn(batch)
+                cell_t = build_cell_label_tensor(cell_lines, all_cells).to(DEVICE)
+                enh_ids = enh_ids.to(DEVICE)
+                pr_ids = pr_ids.to(DEVICE)
+                _, ex = model(enh_ids, pr_ids, cell_labels=cell_t)
+                y_true = _safe_np(cell_t)
+                y_pred = _safe_np(ex['spec_logits'].argmax(dim=-1))
+                plot_confusion(out_dir, epoch+1, y_true, y_pred, 'Confusion (cell by F)')
+                break
 
 
 if __name__ == '__main__':
