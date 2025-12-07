@@ -140,16 +140,16 @@ BYPASS_PLOT_TSNE = True       # 是否绘制t-SNE
 BYPASS_PLOT_CONFUSION = True  # 是否绘制混淆矩阵
 
 # 图上下文与GCN配置
-GCN_PROTOS_PER_CELL = 4
-GCN_HIDDEN_DIM = 32
-GCN_LAYERS = 2
-GCN_MOMENTUM = 0.1
-GCN_SIM_TAU = 0.5
-GCN_KNN_K = 2
-GCN_SMOOTH_LOSS_W = 0.2
-GCN_CENTER_LOSS_W = 0.5
-GCN_MARGIN = 1.0
-GCN_MARGIN_LOSS_W = 0.5
+GCN_PROTOS_PER_CELL = 4     # 每个细胞系的图卷积原型数量(调大增加模型容量但易过拟合，调小降低表达能力)
+GCN_HIDDEN_DIM = 32          # GCN隐藏层维度(调大增强特征表达能力但增加计算量，调小可能导致欠拟合)
+GCN_LAYERS = 2               # GCN层数(调大增强特征抽象层次但易梯度消失，调小降低模型深度)
+GCN_MOMENTUM = 0.1           # 原型更新动量系数(调大增强原型稳定性但降低适应性，调小提高响应速度但易震荡)
+GCN_SIM_TAU = 0.5            # 相似度温度参数(调大使相似度分布更平滑，调小使分布更尖锐)
+GCN_KNN_K = 64                # K近邻图的K值(调大增加图连接密度但可能引入噪声，调小使图更稀疏)
+GCN_SMOOTH_LOSS_W = 0.2      # 平滑损失权重(调大增强特征平滑性但可能过度平滑，调小降低约束强度)
+GCN_CENTER_LOSS_W = 0.5      # 中心损失权重(调大增强类内紧凑性但可能过度压缩，调小降低聚类效果)
+GCN_MARGIN = 1.0             # 边际损失阈值(调大增加类间距离要求，调小降低分离要求)
+GCN_MARGIN_LOSS_W = 0.5      # 边际损失权重(调大增强类间分离性但可能过度分离，调小降低分离效果)
 
 # ISAB模块配置
 ISAB_NUM_INDUCING = 32  # 诱导点数量
