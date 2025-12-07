@@ -82,11 +82,27 @@ def sample_consistency_pairs(group_map: Dict[Tuple[str, str], List[int]], max_pa
 def plot_epoch_curves(out_dir: str, history: Dict[str, List[float]], epoch: int) -> None:
     """绘制训练曲线（英文标签）"""
     plt.figure(figsize=(8, 5))
+    has_any = False
+    y_max = 0.0
     for k, v in history.items():
-        plt.plot(v, label=k)
+        if not v:
+            continue
+        arr = np.array(v, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            continue
+        x = np.arange(1, arr.size + 1)
+        plt.plot(x, arr, label=k, marker='o', linewidth=1.5)
+        y_max = max(y_max, float(arr.max()))
+        has_any = True
+    if not has_any:
+        plt.text(0.5, 0.5, 'No data', ha='center')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Bypass Training Loss Curves')
+    if y_max > 0:
+        plt.ylim(0, y_max * 1.1)
+    plt.grid(True, linestyle='--', alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(out_dir, f'epoch_{epoch:02d}_loss.png'))
