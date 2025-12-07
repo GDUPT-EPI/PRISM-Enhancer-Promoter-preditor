@@ -100,10 +100,15 @@ def plot_tsne(out_dir: str, epoch: int, Z: np.ndarray, labels: np.ndarray, title
     Y = tsne.fit_transform(Z)
     plt.figure(figsize=(7,6))
     unique = np.unique(labels)
-    colors = plt.cm.get_cmap('tab20', len(unique))
+    try:
+        import matplotlib
+        colors = matplotlib.colormaps.get_cmap('tab20')
+    except Exception:
+        colors = plt.get_cmap('tab20')
     for i, u in enumerate(unique):
         idx = labels == u
-        plt.scatter(Y[idx,0], Y[idx,1], s=8, color=colors(i), label=str(u), alpha=0.8)
+        c = colors(i / max(len(unique)-1, 1)) if hasattr(colors, '__call__') else colors(i)
+        plt.scatter(Y[idx,0], Y[idx,1], s=8, color=c, label=str(u), alpha=0.8)
     plt.title(title)
     plt.legend(markerscale=2, bbox_to_anchor=(1.04, 1), loc='upper left')
     plt.tight_layout()
