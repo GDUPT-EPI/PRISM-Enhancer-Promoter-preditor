@@ -33,7 +33,6 @@ from config import (
     BYPASS_ORTHO_WEIGHT,
     BYPASS_CONSIST_WEIGHT,
     PROJECT_ROOT,
-    BYPASS_MAX_BATCHES_PER_EPOCH,
 )
 
 from data_loader import load_prism_data, PRISMDataset, RandomBatchSampler
@@ -125,7 +124,7 @@ def main():
 
         pbar = tqdm(
             sampler,
-            total=min(len(sampler), BYPASS_MAX_BATCHES_PER_EPOCH),
+            total=len(sampler),
             desc=f"Epoch {epoch+1}/{BYPASS_EPOCHS} [Bypass Training]",
             leave=True,
             dynamic_ncols=True,
@@ -204,8 +203,7 @@ def main():
                 'orth': f"{ol:.4f}",
                 'cons': f"{cl:.4f}",
             })
-            if bi + 1 >=  BYPASS_MAX_BATCHES_PER_EPOCH:
-                break
+            # 使用完整数据集，无批次上限，保持与PRISM一致
 
         # 记录与绘图
         avg_total = total_loss_epoch / max(1, n_batches)
