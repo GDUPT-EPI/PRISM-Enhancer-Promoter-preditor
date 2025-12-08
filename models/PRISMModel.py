@@ -212,35 +212,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         self.pre_pr_attn = RoPEAttention(  # 启动子预注意力
             d_model=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, dropout=TRANSFORMER_DROPOUT
         )  # 启动子预注意力
-        self.cross_attn_1 = nn.MultiheadAttention(  # 第一次跨序列注意力
+        self.cross_attn_1 = nn.MultiheadAttention(
             embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )  # 第一次跨序列注意力
-        self.cross_attn_1_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)  # 交叉注意力1后的Dropout
-        self.cbat_layers = nn.ModuleList([  # 增强子CBAT层列表
-            CBATTransformerEncoderLayer(  # CBAT编码器层
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,  # 模型维度和头数
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,  # 前馈维度和dropout
-                img_size=img_size  # 图像大小
-            ) for _ in range(self.num_transformer_layers)  # 创建多层
-        ])  # 增强子CBAT层
-        self.pr_cbat_layers = nn.ModuleList([  # 启动子CBAT层列表
-            CBATTransformerEncoderLayer(  # CBAT编码器层
-                d_model=OUT_CHANNELS, nhead=TRANSFORMER_HEADS,  # 模型维度和头数
-                dim_feedforward=TRANSFORMER_FF_DIM, dropout=TRANSFORMER_DROPOUT,  # 前馈维度和dropout
-                img_size=img_size  # 图像大小
-            ) for _ in range(self.num_transformer_layers)  # 创建多层
-        ])  # 启动子CBAT层
-        self.cross_attn_2 = nn.MultiheadAttention(  # 第二次跨序列注意力
-            embed_dim=OUT_CHANNELS, num_heads=TRANSFORMER_HEADS, batch_first=False
-        )  # 第二次跨序列注意力
-        self.cross_attn_2_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)  # 交叉注意力2后的Dropout
-        self.post_cbat = CBAT(  # 末端CBAT
-            d_model=OUT_CHANNELS,  # 模型维度
-            num_heads=TRANSFORMER_HEADS,  # 注意力头数
-            img_size=img_size,  # 图像大小
-            max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,  # 最大序列长度
-            dropout=TRANSFORMER_DROPOUT,  # Dropout
-        )  # 末端CBAT
+        )
+        self.cross_attn_1_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)
         self.seq_pool = SequencePooling(d_model=OUT_CHANNELS)
         self.seq_pool_dropout = nn.Dropout(p=SEQ_POOL_DROPOUT)  # 序列池化后的Dropout
         self.classifier_dropout = nn.Dropout(p=CLASSIFIER_DROPOUT)  # 分类器前的Dropout
@@ -329,44 +304,12 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
         att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
-        att1 = self.cross_attn_1_dropout(att1)  # 应用交叉注意力1后的Dropout
+        att1 = self.cross_attn_1_dropout(att1)
         enh_x1 = enh + att1
 
-
         total_adaptive_loss = 0.0
-        enh_source = enh
-        x_enh = enh
-        for i, layer in enumerate(self.cbat_layers):
-            # 只在第一层使用预注意力层的输出作为残差，后续层使用标准残差连接
-            if i == 0:
-                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
-            else:
-                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask)
-            total_adaptive_loss += layer_loss
-        pr_source = pr
-        x_pr = pr
-        for i, layer in enumerate(self.pr_cbat_layers):
-            # 只在第一层使用预注意力层的输出作为残差，后续层使用标准残差连接
-            if i == 0:
-                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
-            else:
-                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask)
-            total_adaptive_loss += layer_loss_pr
 
-        att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
-        att2 = self.cross_attn_2_dropout(att2)  # 应用交叉注意力2后的Dropout
-        enh = enh_x1 + att2
-
-        post_out, post_loss = self.post_cbat(
-            enh.permute(1, 0, 2),  # 输入E序列
-            attention_mask=enh_attn_mask,  # 使用E的mask
-            position_ids=None,  # 无位置ID
-            return_loss=True,  # 返回loss
-        )
-        total_adaptive_loss += post_loss  # 累加loss
-        enh = post_out.permute(1, 0, 2)  # 回到[L,B,D]
-
-        x_seq = enh.permute(1, 0, 2)
+        x_seq = enh_x1.permute(1, 0, 2)
         y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
         y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
         y = self.classifier_dropout(y)  # 应用分类器前的Dropout
@@ -450,37 +393,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         enh_x1 = enh + att1
 
         total_adaptive_loss = 0.0
-        enh_source = enh
-        x_enh = enh
-        for i, layer in enumerate(self.cbat_layers):
-            if i == 0:
-                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
-            else:
-                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask)
-            total_adaptive_loss += layer_loss
-        pr_source = pr
-        x_pr = pr
-        for i, layer in enumerate(self.pr_cbat_layers):
-            if i == 0:
-                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
-            else:
-                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask)
-            total_adaptive_loss += layer_loss_pr
 
-        att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
-        att2 = self.cross_attn_2_dropout(att2)
-        enh = enh_x1 + att2
-
-        post_out, post_loss = self.post_cbat(
-            enh.permute(1, 0, 2),
-            attention_mask=enh_attn_mask,
-            position_ids=None,
-            return_loss=True,
-        )
-        total_adaptive_loss += post_loss
-        enh = post_out.permute(1, 0, 2)
-
-        x_seq = enh.permute(1, 0, 2)
+        x_seq = enh_x1.permute(1, 0, 2)
         y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
         y = self.seq_pool_dropout(y)
         y = self.classifier_dropout(y)

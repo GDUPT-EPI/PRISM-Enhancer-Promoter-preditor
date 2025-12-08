@@ -35,13 +35,13 @@ PERSISTENT_WORKERS = True  # 避免worker重复创建
 
 # 模型参数配置
 EMBEDDING_DIM = 768  # 嵌入维度
-CNN_KERNEL_SIZE = 40  # 卷积核大小
-POOL_KERNEL_SIZE = 20  # 池化核大小
+CNN_KERNEL_SIZE = 43  # 卷积核大小
+POOL_KERNEL_SIZE = 24  # 池化核大小
 OUT_CHANNELS = 64  # 卷积输出通道数
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 4  # 每个enhancer/promoter的transformer层数
-TRANSFORMER_HEADS = 8   # 多头注意力头数
+TRANSFORMER_LAYERS = 2  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_HEADS = 4   # 多头注意力头数
 TRANSFORMER_FF_DIM = 128  # 前馈网络维度 (从128修改为256以匹配checkpoint)
 
 # CNN和分类头参数 - 集中管理避免冲突
