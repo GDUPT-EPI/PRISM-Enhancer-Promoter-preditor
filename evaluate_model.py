@@ -149,6 +149,10 @@ class EvalConfig:
     BACKOFF_ALPHA_TAU = 0.3
     BACKOFF_I_TAU = 0.3
     BACKOFF_SOFT_K = 8.0
+    ANCHOR_HI = 0.80
+    ANCHOR_LO = 0.20
+    ANCHOR_DELTA_HI = 0.10
+    ANCHOR_DELTA_LO = 0.10
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -604,6 +608,24 @@ def evaluate() -> Optional[Dict[str, object]]:
                 # 温度缩放
                 logit_temp = logit_cal / max(EvalConfig.TEMP_SCALE_T, 1e-6)
                 probs_cal = torch.sigmoid(logit_temp)
+                # 锚定单调校准：高置信区不被过度压低；低置信且门控低时不被过度抬高
+                hi_mask = (torch.sigmoid(logits_base) >= EvalConfig.ANCHOR_HI).float().unsqueeze(-1)
+                lo_mask = (torch.sigmoid(logits_base) <= EvalConfig.ANCHOR_LO).float().unsqueeze(-1)
+                delta_hi = EvalConfig.ANCHOR_DELTA_HI
+                delta_lo = EvalConfig.ANCHOR_DELTA_LO
+                base_prob = torch.sigmoid(logits_base).unsqueeze(-1)
+                cal_prob = probs_cal.unsqueeze(-1)
+                cal_prob = torch.where(
+                    hi_mask > 0,
+                    torch.clamp(cal_prob, min=(base_prob - delta_hi)),
+                    cal_prob,
+                )
+                cal_prob = torch.where(
+                    (lo_mask > 0) & (alpha < EvalConfig.BACKOFF_ALPHA_TAU),
+                    torch.clamp(cal_prob, max=(base_prob + delta_lo)),
+                    cal_prob,
+                )
+                probs_cal = cal_prob.squeeze(-1)
                 probs_base = torch.sigmoid(logits_base)
                 k = EvalConfig.BACKOFF_SOFT_K
                 u_alpha = torch.sigmoid(k * (EvalConfig.BACKOFF_ALPHA_TAU - alpha))
