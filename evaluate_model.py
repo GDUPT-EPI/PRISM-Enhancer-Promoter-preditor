@@ -299,30 +299,54 @@ def finetune_auxiliary_on_test_cells(
     aux_model.train()
     optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
 
-    for cell in all_cells:
+    # 外层细胞系进度条（实时监视每个细胞系的微调进度）
+    pbar_cells = tqdm(all_cells, desc="Finetune per cell", leave=True, dynamic_ncols=True)
+    for cell in pbar_cells:
         loader = _cell_subset_loader(dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE)
-        # 计算累计间隔：确保总更新步数约为3步
         total_batches = len(loader)
         if total_batches <= 0:
+            pbar_cells.set_postfix({"cell": cell, "batches": 0})
             continue
+        # 累计间隔设置为将全部批次划分为约 FINETUNE_STEPS_PER_CELL 次参数更新
         accum_interval = max(1, int(np.ceil(total_batches / float(EvalConfig.FINETUNE_STEPS_PER_CELL))))
+        expected_updates = int(np.ceil(total_batches / float(accum_interval)))
         optimizer.zero_grad()
         batch_counter = 0
-        for batch in loader:
+        update_counter = 0
+
+        # 内层批次进度条（实时显示损失项与累计状态）
+        pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] batches", leave=False, dynamic_ncols=True)
+        for batch in pbar_batches:
             enh_ids, pr_ids, labels_t, cells = batch
-            # 构造细胞系监督索引
             cell_t = _build_cell_label_tensor(cells, all_cells)
             enh_ids = enh_ids.to(device)
             pr_ids = pr_ids.to(device)
             cell_t = cell_t.to(device)
-            # 计算损失（不使用labels_t）
-            loss, _ = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+            loss, extras = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
             loss.backward()
             batch_counter += 1
+
+            # 实时显示关键损失项与累计信息
+            pbar_batches.set_postfix({
+                "loss": f"{float(loss.item()):.4f}",
+                "spec": f"{float(extras.get('spec_loss', torch.tensor(0.0)).item()):.4f}",
+                "adv": f"{float(extras.get('adv_loss', torch.tensor(0.0)).item()):.4f}",
+                "accum": f"{batch_counter}/{accum_interval}",
+            })
+
+            # 达到累计间隔或最后一批次时执行参数更新，并在外层进度条显示已完成的更新步数
             if (batch_counter % accum_interval == 0) or (batch_counter == total_batches):
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
                 optimizer.step()
                 optimizer.zero_grad()
+                update_counter += 1
+                pbar_cells.set_postfix({
+                    "cell": cell,
+                    "updates": f"{update_counter}/{expected_updates}",
+                })
+
+        # 该细胞系微调完成后，关闭内层进度条，外层进度条自动前进一格（由迭代驱动）
+        pbar_batches.close()
 
     # 保存微调后的权重
     save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
