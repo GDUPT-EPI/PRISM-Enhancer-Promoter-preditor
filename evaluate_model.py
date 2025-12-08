@@ -141,7 +141,7 @@ class EvalConfig:
     ALPHA_BETA0 = 0.5
     ALPHA_BETA1 = 0.5
     ALPHA_BETA2 = 0.1
-    ALPHA_MIN = 0.15
+    ALPHA_MIN = 0.25
     I_KAPPA = 2.0
     LOGIT_I_WEIGHT = 0.1
     LOGIT_C_WEIGHT = 0.1
