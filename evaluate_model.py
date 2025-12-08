@@ -137,11 +137,13 @@ class EvalConfig:
     GCN_CENTER_LOSS_W = 0.2  # 图中心原型约束权重
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
-    ALPHA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0]
     ALPHA_TAU_F = 1.0
     ALPHA_BETA0 = 0.5
     ALPHA_BETA1 = 0.5
+    ALPHA_BETA2 = 0.3
     I_KAPPA = 2.0
+    LOGIT_I_WEIGHT = 0.2
+    LOGIT_C_WEIGHT = 0.2
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -522,19 +524,21 @@ def evaluate() -> Optional[Dict[str, object]]:
         loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=prism_collate_fn)
 
         with torch.no_grad():
-            # 预计算该细胞系的 GraphContext 原型均值 mu_c
-            # 通过一次前向获得 mu_ctx，并取该细胞系批次的均值，作为近似原型
+            # 预计算该细胞系的 GraphContext 原型集近似（均值与样本近邻权重）
             mu_ctx_accum = []
+            zF_accum = []
             for batch in tqdm(loader, desc=f"Warmup[{cell}]", leave=False, dynamic_ncols=True):
                 enh_ids, pr_ids, cells, labels = batch
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 _, bx_w = aux_model(enh_ids, pr_ids, cell_labels=None)
                 mu_ctx_accum.append(bx_w['mu_ctx'])
+                zF_accum.append(bx_w['zF'])
             if len(mu_ctx_accum) == 0:
                 mu_c = None
             else:
                 mu_c = torch.cat(mu_ctx_accum, dim=0).mean(dim=0, keepdim=True)  # [1, d_spec]
+            zF_warm = torch.cat(zF_accum, dim=0) if len(zF_accum) > 0 else None
 
             # 正式预测阶段：方向性 α 与 I_approx 融合
             for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
@@ -563,6 +567,16 @@ def evaluate() -> Optional[Dict[str, object]]:
                 den = torch.clamp(torch.norm(zG, dim=-1, keepdim=True) * torch.norm(zG_bar, dim=-1, keepdim=True), min=1e-6)
                 s_g = torch.clamp(num / den, min=0.0, max=1.0)  # [B,1]
                 alpha = alpha_f * (EvalConfig.ALPHA_BETA0 + EvalConfig.ALPHA_BETA1 * s_g)  # [B,1]
+                # 原型混合修正：比较该样本在当前细胞近邻与其他近邻的相对权重（以 warmup 的 zF 中位数近邻作为近似）
+                if zF_warm is not None and zF_warm.size(0) > 0:
+                    # 构造一个简化的两簇近邻：当前批次与 warmup 聚合
+                    # 以样本到 warmup 集的平均距离作为“其他域”近邻，近似 w_other
+                    d_to_warm = torch.cdist(zF, zF_warm.to(zF.device), p=2)  # [B, W]
+                    w_other = torch.exp(- d_to_warm.pow(2) / max(EvalConfig.ALPHA_TAU_F, 1e-6)).mean(dim=-1, keepdim=True)
+                    # 当前批次内到 mu_c 的 RBF 作为 w_c 近似
+                    w_c = alpha_f
+                    alpha = torch.clamp(alpha + EvalConfig.ALPHA_BETA2 * (w_c - w_other), 0.0, 1.0)
+                alpha = torch.clamp(alpha, 0.0, 1.0)
                 alpha = torch.clamp(alpha, 0.0, 1.0)
 
                 # 交互近似 I_approx：用批次标准化的 ||zI|| 经 Sigmoid 映射
@@ -574,9 +588,14 @@ def evaluate() -> Optional[Dict[str, object]]:
                 # 方向性 FiLM 融合与交互偏置
                 y_mod_dir = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
                 out = backbone.classifier(y_mod_dir)
-                logits = out.squeeze(-1)
-                probs = torch.sigmoid(logits)
-                probs = torch.clamp(probs + 0.05 * (i_approx.squeeze(-1) - 0.5), 0.0, 1.0)
+                logits_dir = out.squeeze(-1)
+                # 对数几率校准：加性偏置注入 I_approx 与原型权重差，保持单调
+                logit_cal = logits_dir + EvalConfig.LOGIT_I_WEIGHT * (i_approx.squeeze(-1) - 0.5)
+                if zF_warm is not None and zF_warm.size(0) > 0:
+                    # 使用 w_c - w_other 近似原型权重差
+                    proto_diff = (alpha_f - torch.exp(- torch.cdist(zF, zF_warm.to(zF.device), p=2).pow(2) / max(EvalConfig.ALPHA_TAU_F, 1e-6)).mean(dim=-1, keepdim=True)).squeeze(-1)
+                    logit_cal = logit_cal + EvalConfig.LOGIT_C_WEIGHT * proto_diff
+                probs = torch.sigmoid(logit_cal)
 
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
