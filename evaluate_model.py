@@ -388,6 +388,7 @@ def finetune_auxiliary_on_test_cells(
                 boundaries.append(b)
         boundaries = sorted(list(set(boundaries + [total_batches])))
         expected_updates = update_steps
+        accum_interval = total_batches // update_steps if update_steps > 0 else total_batches
         optimizer.zero_grad()
         batch_counter = 0
         update_counter = 0
