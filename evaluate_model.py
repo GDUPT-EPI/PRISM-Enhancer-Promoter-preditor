@@ -478,7 +478,7 @@ def evaluate() -> Optional[Dict[str, object]]:
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
 
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
-        _ = inject_auxiliary_into_backbone(backbone, aux_model)
+        # 按用户要求严格复用主干PRISMBackbone，不将旁路权重注入主干，确保与decouple一致性
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
