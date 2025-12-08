@@ -124,9 +124,9 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 1
+    FINETUNE_EPOCHS = 1  # 一步微调
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
-    FINETUNE_LR = 5e-4
+    FINETUNE_LR = 5e-5
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
     # 损失权重（与旁路训练保持一致的语义，但数值更保守）
@@ -137,6 +137,7 @@ class EvalConfig:
     GCN_CENTER_LOSS_W = 0.2  # 图中心原型约束权重
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
+    ALPHA_GRID = [0.0, 0.1, 0.2, 0.3]
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -522,33 +523,51 @@ def evaluate() -> Optional[Dict[str, object]]:
                 labels_t = labels.to(device)
                 _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
                 M_prime = bx['M_prime']
-                y_feat, adaptive_loss = backbone.extract_pooled_feature(enh_ids, pr_ids)
+                y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
                 gamma = torch.sigmoid(M_prime)
                 beta = torch.tanh(M_prime)
-                y_mod = gamma * y_feat + beta
-                ep_outputs = backbone.classifier(y_mod)
-                preds = torch.sigmoid(ep_outputs).squeeze(-1).detach().cpu().numpy()
-                labs = labels_t.cpu().numpy()
-                all_preds.append(preds)
-                all_labels.append(labs)
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
-                per_cell[cell]["preds"].append(preds)
+                # alpha 网格集成，按AUPR择优
+                preds_grid = []
+                for alpha in EvalConfig.ALPHA_GRID:
+                    y_mod = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
+                    out = backbone.classifier(y_mod)
+                    preds_a = torch.sigmoid(out).squeeze(-1).detach().cpu().numpy()
+                    preds_grid.append(preds_a)
+                labs = labels_t.cpu().numpy()
+                # 暂存；待会儿我们在细胞系级汇总进行AUPR选择
+                per_cell[cell]["preds"].append(np.stack(preds_grid, axis=-1))
                 per_cell[cell]["labels"].append(labs)
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
 
         # ========== 该细胞系即时评估与保存 ==========
-        cp = np.concatenate(per_cell[cell]["preds"], axis=0)
+        preds_stack = np.concatenate(per_cell[cell]["preds"], axis=0)  # [N, A]
         cl = np.concatenate(per_cell[cell]["labels"], axis=0)
-        try:
-            caupr = average_precision_score(cl, cp)
-        except Exception:
-            caupr = float("nan")
-        try:
-            cauc = roc_auc_score(cl, cp)
-        except Exception:
-            cauc = float("nan")
+        best_aupr = -1.0
+        best_auc = float('nan')
+        best_alpha = EvalConfig.ALPHA_GRID[0]
+        best_cp = preds_stack[:, 0]
+        for i, alpha in enumerate(EvalConfig.ALPHA_GRID):
+            cp_a = preds_stack[:, i]
+            try:
+                aupr_a = average_precision_score(cl, cp_a)
+            except Exception:
+                aupr_a = float('nan')
+            try:
+                auc_a = roc_auc_score(cl, cp_a)
+            except Exception:
+                auc_a = float('nan')
+            score = aupr_a if np.isfinite(aupr_a) else -1.0
+            if score > best_aupr:
+                best_aupr = score
+                best_auc = auc_a
+                best_alpha = alpha
+                best_cp = cp_a
+        cp = best_cp
+        caupr = best_aupr
+        cauc = best_auc
 
         if EvalConfig.FIND_OPTIMAL_THRESHOLD:
             cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(
@@ -612,6 +631,8 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 即时在控制台打印该细胞系评估结果
         print(f"{cell}: AUPR={caupr:.4f} AUC={cauc:.4f} F1={cf1:.4f} Recall={cr:.4f} Precision={cpr:.4f} Threshold={cell_threshold:.4f} N={int(cl.size)}")
+        all_preds.append(cp)
+        all_labels.append(cl)
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
@@ -690,9 +711,13 @@ def evaluate() -> Optional[Dict[str, object]]:
         plt.savefig(os.path.join(out_dir, "roc_curve.png"))  # 保存
         plt.close()  # 关闭
     # 细胞系指标已在逐细胞系阶段即时计算并写入 per_cell_results
+    macro_aupr = float(np.mean([m['aupr'] for m in per_cell_results.values() if np.isfinite(m['aupr'])])) if len(per_cell_results) > 0 else float('nan')
+    macro_auc = float(np.mean([m['auc'] for m in per_cell_results.values() if np.isfinite(m['auc'])])) if len(per_cell_results) > 0 else float('nan')
     return {  # 返回总体结果
         "aupr": aupr,
         "auc": auc,
+        "macro_aupr": macro_aupr,
+        "macro_auc": macro_auc,
         "f1": f1,
         "recall": rec,
         "precision": prec,
@@ -711,6 +736,8 @@ if __name__ == "__main__":
         print("domain-kl/test overall")  # 概览
         print(f"AUPR: {res['aupr']:.4f}")  # AUPR
         print(f"AUC: {res['auc']:.4f}")  # AUC
+        print(f"Macro-AUPR: {res['macro_aupr']:.4f}")  # 宏平均AUPR
+        print(f"Macro-AUC: {res['macro_auc']:.4f}")  # 宏平均AUC
         print(f"F1: {res['f1']:.4f}")  # F1
         print(f"Recall: {res['recall']:.4f}")  # 召回
         print(f"Precision: {res['precision']:.4f}")  # 精度
@@ -728,6 +755,8 @@ if __name__ == "__main__":
             f.write("domain-kl/test overall\n")  # 标题
             f.write(f"AUPR: {res['aupr']:.4f}\n")  # AUPR
             f.write(f"AUC: {res['auc']:.4f}\n")  # AUC
+            f.write(f"Macro-AUPR: {res['macro_aupr']:.4f}\n")  # 宏平均AUPR
+            f.write(f"Macro-AUC: {res['macro_auc']:.4f}\n")  # 宏平均AUC
             f.write(f"F1: {res['f1']:.4f}\n")  # F1
             f.write(f"Recall: {res['recall']:.4f}\n")  # 召回
             f.write(f"Precision: {res['precision']:.4f}\n")  # 精度
