@@ -3,6 +3,7 @@ import re  # 正则表达式
 import torch  # 深度学习框架
 import numpy as np  # 数值计算
 import matplotlib.pyplot as plt  # 可视化
+import xml.etree.ElementTree as ET  # 读取细胞类型词表
 from sklearn.metrics import average_precision_score, roc_auc_score, f1_score, recall_score, precision_score, precision_recall_curve, roc_curve  # 评估指标
 from torch.utils.data import DataLoader  # 数据加载器
 from tqdm import tqdm  # 进度条
@@ -19,7 +20,6 @@ from config import (  # 集中配置导入
     DNA_EMBEDDING_PADDING_IDX,
     MAX_ENHANCER_LENGTH,
     MAX_PROMOTER_LENGTH,
-    PROJECT_ROOT,
 )
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler  # 数据加载与采样
 from models.PRISMModel import PRISMBackbone  # 模型主干
@@ -203,8 +203,55 @@ def _build_cell_label_tensor(cells: List[str], all_cells: List[str]) -> torch.Te
     说明：仅用于旁路网络的特性/对抗损失，不涉及EP互作标签，避免数据泄露。
     """
     name_to_idx = {c: i for i, c in enumerate(all_cells)}
-    idxs = [name_to_idx.get(x, 0) for x in cells]
+    other_idx = name_to_idx.get("OTHER", 0)
+    idxs = [name_to_idx.get(x, other_idx) for x in cells]
     return torch.tensor(idxs, dtype=torch.long)
+
+
+def _load_fixed_cells() -> List[str]:
+    """从 `vocab/cell_type.xml` 加载固定细胞类型列表，失败时回退到训练集唯一细胞系"""
+    xml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vocab", "cell_type.xml")
+    cells: List[str] = []
+    if os.path.exists(xml_path):
+        try:
+            root = ET.parse(xml_path).getroot()
+            for node in root.findall('.//type'):
+                name = node.get('name')
+                if name:
+                    name = name.strip()
+                    if name:
+                        cells.append(name)
+        except Exception:
+            cells = []
+    if not cells:
+        try:
+            train_df, _, _ = load_prism_data('train')
+            cells = sorted(train_df['cell_line'].unique().tolist())
+        except Exception:
+            cells = []
+    return cells
+
+
+def _sample_support_batch(train_dataset: PRISMDataset, exclude_cell: str, batch_size: int):
+    """从训练集采样除目标细胞外的辅助批次，用于spec/adv/图损失计算"""
+    other_cells = [c for c in train_dataset.cell_line_groups.keys() if c != exclude_cell]
+    if len(other_cells) == 0:
+        return None
+    per_cell = max(1, batch_size // max(1, len(other_cells)))
+    idxs: List[int] = []
+    for c in other_cells:
+        pool = train_dataset.cell_line_groups.get(c, [])
+        if len(pool) == 0:
+            continue
+        pick_n = min(per_cell, len(pool))
+        sel = np.random.choice(pool, size=pick_n, replace=False).tolist()
+        idxs.extend(sel)
+    if len(idxs) == 0:
+        return None
+    if len(idxs) > batch_size:
+        idxs = np.random.choice(idxs, size=batch_size, replace=False).tolist()
+    batch = [train_dataset[i] for i in idxs]
+    return collate_fn(batch)
 
 
 def _load_auxiliary_checkpoint(aux_model: AuxiliaryModel, path: str, device: torch.device) -> bool:
@@ -248,84 +295,6 @@ def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> Da
         def __len__(self):
             return max(1, (len(self.indices) + self.bs - 1) // self.bs)
     sampler = _Sampler(idxs, batch_size)
-    return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
-
-
-def _load_fixed_cell_types() -> List[str]:
-    """加载固定细胞类型映射（与训练一致），失败则回退到训练集唯一细胞系"""
-    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
-    if os.path.exists(xml_path):
-        try:
-            import xml.etree.ElementTree as ET
-            root = ET.parse(xml_path).getroot()
-            names = []
-            for node in root.findall(".//type"):
-                name = node.get("name")
-                if name:
-                    name = name.strip()
-                    if name:
-                        names.append(name)
-            if names:
-                return names
-        except Exception:
-            pass
-    # 回退：使用训练集中的唯一细胞系
-    tr_df, _, _ = load_prism_data("train")
-    return sorted(tr_df['cell_line'].unique().tolist())
-
-
-def _focused_contrastive_loader(dataset: PRISMDataset, target_cell: str, batch_size: int, shuffle: bool = True) -> DataLoader:
-    """构建以目标细胞系为中心的对比批次加载器：一半来自目标细胞，另一半来自其他细胞系"""
-    cell_line_groups = {c: g.copy() for c, g in dataset.cell_line_groups.items()}
-    cell_lines = list(cell_line_groups.keys())
-    half = max(1, batch_size // 2)
-
-    class _Sampler:
-        def __init__(self):
-            self.num_batches = max(1, len(dataset) // max(1, batch_size))
-        def __iter__(self):
-            # 预打乱
-            for c in cell_lines:
-                if shuffle:
-                    import random
-                    random.shuffle(cell_line_groups[c])
-            import random
-            others = [c for c in cell_lines if c != target_cell] or cell_lines
-            # 每个批次：half个target + half个均匀分配的others
-            for _ in range(self.num_batches):
-                batch = []
-                # 目标细胞样本
-                tgt_pool = cell_line_groups.get(target_cell, [])
-                for _i in range(half):
-                    if not tgt_pool:
-                        tgt_pool = dataset.cell_line_groups.get(target_cell, [])[:]
-                        if shuffle:
-                            random.shuffle(tgt_pool)
-                        cell_line_groups[target_cell] = tgt_pool
-                    if tgt_pool:
-                        batch.append(tgt_pool.pop())
-                # 其他细胞样本
-                # 尽量均匀覆盖
-                per_cell = max(1, half // max(1, len(others)))
-                remaining = half - per_cell * max(1, len(others))
-                for j, oc in enumerate(others):
-                    take = per_cell + (1 if j < remaining else 0)
-                    oc_pool = cell_line_groups.get(oc, [])
-                    for _k in range(take):
-                        if not oc_pool:
-                            oc_pool = dataset.cell_line_groups.get(oc, [])[:]
-                            if shuffle:
-                                random.shuffle(oc_pool)
-                            cell_line_groups[oc] = oc_pool
-                        if oc_pool:
-                            batch.append(oc_pool.pop())
-                if shuffle:
-                    random.shuffle(batch)
-                yield batch or [0]  # 防御性：空批次退化为单样本
-        def __len__(self):
-            return self.num_batches
-
-    sampler = _Sampler()
     return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
 
 
@@ -373,49 +342,91 @@ def finetune_auxiliary_on_test_cells(
     """
     if len(all_cells) == 0:
         return None
-
-    # 使用训练集作为微调数据来源（与 main.py 一致）
-    tr_df, tr_e_seqs, tr_p_seqs = load_prism_data("train")
-    train_dataset = PRISMDataset(tr_df, tr_e_seqs, tr_p_seqs)
-    fixed_cells = _load_fixed_cell_types()
-
-    aux_model = AuxiliaryModel(num_cell_types=len(fixed_cells)).to(device)
-    _ = _load_auxiliary_checkpoint(aux_model, EvalConfig.AUX_CHECKPOINT_PATH, device)
+    fixed_cells = _load_fixed_cells()
+    num_types = len(fixed_cells) if len(fixed_cells) > 0 else len(all_cells)
+    ref_cells = fixed_cells if len(fixed_cells) > 0 else all_cells
+    aux_model = AuxiliaryModel(num_cell_types=num_types).to(device)
+    def _find_latest_aux_checkpoint() -> Optional[str]:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass')
+        if not os.path.isdir(base):
+            return None
+        latest_epoch = 0
+        latest_path = None
+        for name in os.listdir(base):
+            m = re.match(r"aux_epoch_(\d+)\.pth$", name)
+            if m:
+                e = int(m.group(1))
+                if e > latest_epoch:
+                    latest_epoch = e
+                    latest_path = os.path.join(base, name)
+        return latest_path
+    ckpt = _find_latest_aux_checkpoint() or EvalConfig.AUX_CHECKPOINT_PATH
+    _ = _load_auxiliary_checkpoint(aux_model, ckpt, device)
     aux_model.train()
     optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
 
-    # 外层细胞系进度条（只微调指定目标细胞系列表）
+    # 加载训练集作为辅助损失采样源（不使用EP标签）
+    try:
+        train_df, train_e, train_p = load_prism_data('train')
+        train_dataset = PRISMDataset(train_df, train_e, train_p)
+    except Exception:
+        train_dataset = None
+
+    # 外层细胞系进度条（实时监视每个细胞系的微调进度）
     pbar_cells = tqdm(all_cells, desc="Finetune per cell", leave=True, dynamic_ncols=True)
     for cell in pbar_cells:
-        loader = _focused_contrastive_loader(train_dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE, shuffle=True)
+        loader = _cell_subset_loader(dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE)
         total_batches = len(loader)
         if total_batches <= 0:
             pbar_cells.set_postfix({"cell": cell, "batches": 0})
             continue
+        # 累计间隔设置为将全部批次划分为约 FINETUNE_STEPS_PER_CELL 次参数更新
         accum_interval = max(1, int(np.ceil(total_batches / float(EvalConfig.FINETUNE_STEPS_PER_CELL))))
         expected_updates = int(np.ceil(total_batches / float(accum_interval)))
         optimizer.zero_grad()
         batch_counter = 0
         update_counter = 0
 
+        # 内层批次进度条（实时显示损失项与累计状态）
         pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] batches", leave=False, dynamic_ncols=True)
         for batch in pbar_batches:
             enh_ids, pr_ids, labels_t, cells = batch
-            cell_t = _build_cell_label_tensor(cells, fixed_cells)
+            cell_t = _build_cell_label_tensor(cells, ref_cells)
             enh_ids = enh_ids.to(device)
             pr_ids = pr_ids.to(device)
             cell_t = cell_t.to(device)
-            loss, extras = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
-            loss.backward()
+            loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+
+            # 采样辅助批次（来自训练集的其他细胞）以避免spec/adv在单类上退化为0
+            if train_dataset is not None:
+                sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
+            else:
+                sup = None
+            spec_total = extras_main.get('spec_loss', torch.tensor(0.0))
+            adv_total = extras_main.get('adv_loss', torch.tensor(0.0))
+            if sup is not None:
+                s_enh, s_pr, _, s_cells = sup
+                s_cell_t = _build_cell_label_tensor(s_cells, ref_cells).to(device)
+                s_enh = s_enh.to(device)
+                s_pr = s_pr.to(device)
+                loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
+                total_loss = loss_main + loss_sup
+                spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
+                adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
+            else:
+                total_loss = loss_main
+            total_loss.backward()
             batch_counter += 1
 
+            # 实时显示关键损失项与累计信息
             pbar_batches.set_postfix({
-                "loss": f"{float(loss.item()):.4f}",
-                "spec": f"{float(extras.get('spec_loss', torch.tensor(0.0)).item()):.4f}",
-                "adv": f"{float(extras.get('adv_loss', torch.tensor(0.0)).item()):.4f}",
+                "loss": f"{float(total_loss.item()):.4f}",
+                "spec": f"{float(spec_total.item()):.4f}",
+                "adv": f"{float(adv_total.item()):.4f}",
                 "accum": f"{batch_counter}/{accum_interval}",
             })
 
+            # 达到累计间隔或最后一批次时执行参数更新，并在外层进度条显示已完成的更新步数
             if (batch_counter % accum_interval == 0) or (batch_counter == total_batches):
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
                 optimizer.step()
@@ -426,6 +437,7 @@ def finetune_auxiliary_on_test_cells(
                     "updates": f"{update_counter}/{expected_updates}",
                 })
 
+        # 该细胞系微调完成后，关闭内层进度条，外层进度条自动前进一格（由迭代驱动）
         pbar_batches.close()
 
     # 保存微调后的权重
