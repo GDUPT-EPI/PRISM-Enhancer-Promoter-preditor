@@ -377,8 +377,8 @@ def evaluate() -> Optional[Dict[str, object]]:
     print("开始按细胞系微调旁路网络（三步/细胞系，禁用EP互作标签）")
     opt = torch.optim.AdamW(filter(lambda t: t.requires_grad, bypass.parameters()), lr=FinetuneConfig.FT_LEARNING_RATE)
     for cell_name, indices in dataset.cell_line_groups.items():
-        # 支持集采样
-        sel = indices[:FinetuneConfig.FT_SAMPLES_PER_CELL]
+        # 支持集采样：全量采集该细胞系的所有样本作为支持集（避免信息不足）
+        sel = indices
         print(f"细胞系: {cell_name} | 支持集样本数: {len(sel)} | 步数: {FinetuneConfig.FT_STEPS_PER_CELL}")
         # 取原始序列
         enh_list = [dataset.e_sequences[dataset.pairs_df.iloc[i]['enhancer_name']] for i in sel]
@@ -387,21 +387,22 @@ def evaluate() -> Optional[Dict[str, object]]:
         enh_ids = enh_ids.to(device)
         pr_ids = pr_ids.to(device)
         cell_idx = name_to_idx.get(cell_name, 0)
-        # 三步随机小批次
+        # 三步微调：每步使用全量支持集进行一次更新（确保充分利用支持样本）
         B_total = enh_ids.size(0)
         for step in range(FinetuneConfig.FT_STEPS_PER_CELL):
-            bs = min(FinetuneConfig.FT_BATCH_PER_STEP, B_total)
-            perm = torch.randperm(B_total, device=device)[:bs]
-            x_en = enh_ids.index_select(0, perm)
-            x_pr = pr_ids.index_select(0, perm)
+            bs = B_total
+            perm = torch.arange(B_total, device=device)
+            x_en = enh_ids  # 全量
+            x_pr = pr_ids  # 全量
             y_cell = torch.full((bs,), cell_idx, dtype=torch.long, device=device)
             opt.zero_grad()
             _, extras = bypass(x_en, x_pr, cell_labels=y_cell)
-            spec_loss = torch.nn.functional.cross_entropy(extras['spec_logits'], y_cell)
-            adv_loss = torch.nn.functional.cross_entropy(extras['adv_logits'], y_cell)
+            # 使用模型内部计算的一致损失项，保持与训练脚本一致
+            spec_loss = extras.get('spec_loss', torch.nn.functional.cross_entropy(extras['spec_logits'], y_cell))
+            adv_loss = extras.get('adv_loss', torch.nn.functional.cross_entropy(extras['adv_logits'], y_cell))
             # 忽略center项：避免误用同一批的μ导致局部最优；保留smooth/margin
             g_smooth = extras.get('gcn_smooth', torch.tensor(0.0, device=device))
-            g_center = torch.tensor(0.0, device=device)  # 微调阶段不显式聚合到中心
+            g_center = extras.get('gcn_center', torch.tensor(0.0, device=device))
             g_margin = extras.get('gcn_margin', torch.tensor(0.0, device=device))
             total = (
                 FinetuneConfig.FT_SPEC_W * spec_loss +
@@ -413,6 +414,16 @@ def evaluate() -> Optional[Dict[str, object]]:
             total.backward()
             torch.nn.utils.clip_grad_norm_(filter(lambda t: t.requires_grad, bypass.parameters()), max_norm=1.0)
             opt.step()
+            # 输出每步的微调状态（不涉及EP标签）
+            try:
+                spec_acc = float(extras.get('spec_acc', torch.tensor(0.0)).detach().item())
+            except Exception:
+                spec_acc = 0.0
+            try:
+                adv_acc = float(extras.get('adv_acc', torch.tensor(0.0)).detach().item())
+            except Exception:
+                adv_acc = 0.0
+            print(f"  [Step {step+1}/{FinetuneConfig.FT_STEPS_PER_CELL}] spec={float(spec_loss.detach().item()):.4f}, adv={float(adv_loss.detach().item()):.4f}, smooth={float(g_smooth.detach().item()):.4f}, center={float(g_center.detach().item()):.4f}, margin={float(g_margin.detach().item()):.4f}, spec_acc={spec_acc:.3f}, adv_acc={adv_acc:.3f}")
     # 4) 保存微调后的旁路权重
     ft_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune')
     os.makedirs(ft_dir, exist_ok=True)
