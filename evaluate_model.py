@@ -140,13 +140,14 @@ class EvalConfig:
     ALPHA_TAU_F = 1.0
     ALPHA_BETA0 = 0.5
     ALPHA_BETA1 = 0.5
-    ALPHA_BETA2 = 0.3
+    ALPHA_BETA2 = 0.1
+    ALPHA_MIN = 0.15
     I_KAPPA = 2.0
-    LOGIT_I_WEIGHT = 0.2
-    LOGIT_C_WEIGHT = 0.2
-    TEMP_SCALE_T = 1.5
-    BACKOFF_ALPHA_TAU = 0.2
-    BACKOFF_I_TAU = 0.4
+    LOGIT_I_WEIGHT = 0.1
+    LOGIT_C_WEIGHT = 0.1
+    TEMP_SCALE_T = 1.2
+    BACKOFF_ALPHA_TAU = 0.3
+    BACKOFF_I_TAU = 0.3
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
