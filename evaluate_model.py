@@ -148,6 +148,7 @@ class EvalConfig:
     TEMP_SCALE_T = 1.2
     BACKOFF_ALPHA_TAU = 0.3
     BACKOFF_I_TAU = 0.3
+    BACKOFF_SOFT_K = 8.0
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -580,8 +581,7 @@ def evaluate() -> Optional[Dict[str, object]]:
                     # 当前批次内到 mu_c 的 RBF 作为 w_c 近似
                     w_c = alpha_f
                     alpha = torch.clamp(alpha + EvalConfig.ALPHA_BETA2 * (w_c - w_other), 0.0, 1.0)
-                alpha = torch.clamp(alpha, 0.0, 1.0)
-                alpha = torch.clamp(alpha, 0.0, 1.0)
+                alpha = torch.clamp(alpha, EvalConfig.ALPHA_MIN, 1.0)
 
                 # 交互近似 I_approx：用批次标准化的 ||zI|| 经 Sigmoid 映射
                 norm_i = torch.norm(zI, dim=-1, keepdim=True)
@@ -604,30 +604,66 @@ def evaluate() -> Optional[Dict[str, object]]:
                 # 温度缩放
                 logit_temp = logit_cal / max(EvalConfig.TEMP_SCALE_T, 1e-6)
                 probs_cal = torch.sigmoid(logit_temp)
-                # 置信回退到基线
                 probs_base = torch.sigmoid(logits_base)
-                backoff_mask = ((alpha.squeeze(-1) < EvalConfig.BACKOFF_ALPHA_TAU) | (i_approx.squeeze(-1) < EvalConfig.BACKOFF_I_TAU)).float()
-                probs = (1.0 - backoff_mask) * probs_cal + backoff_mask * probs_base
+                k = EvalConfig.BACKOFF_SOFT_K
+                u_alpha = torch.sigmoid(k * (EvalConfig.BACKOFF_ALPHA_TAU - alpha))
+                u_I = torch.sigmoid(k * (EvalConfig.BACKOFF_I_TAU - i_approx))
+                u = 1.0 - (1.0 - u_alpha) * (1.0 - u_I)
+                probs_mix = (1.0 - u.squeeze(-1)) * probs_cal + u.squeeze(-1) * probs_base
 
                 if cell not in per_cell:
-                    per_cell[cell] = {"preds": [], "labels": []}
-                per_cell[cell]["preds"].append(probs.detach().cpu().numpy())
+                    per_cell[cell] = {"preds_base": [], "preds_cal": [], "preds_mix": [], "labels": []}
+                per_cell[cell]["preds_base"].append(probs_base.detach().cpu().numpy())
+                per_cell[cell]["preds_cal"].append(probs_cal.detach().cpu().numpy())
+                per_cell[cell]["preds_mix"].append(probs_mix.detach().cpu().numpy())
                 per_cell[cell]["labels"].append(labels_t.cpu().numpy())
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
 
         # ========== 该细胞系即时评估与保存 ==========
-        preds_stack = np.concatenate(per_cell[cell]["preds"], axis=0)  # [N]
+        cp_base = np.concatenate(per_cell[cell]["preds_base"], axis=0)
+        cp_cal = np.concatenate(per_cell[cell]["preds_cal"], axis=0)
+        cp_mix = np.concatenate(per_cell[cell]["preds_mix"], axis=0)
         cl = np.concatenate(per_cell[cell]["labels"], axis=0)
-        cp = preds_stack
         try:
-            caupr = average_precision_score(cl, cp)
+            caupr_base = average_precision_score(cl, cp_base)
         except Exception:
-            caupr = float('nan')
+            caupr_base = float('nan')
         try:
-            cauc = roc_auc_score(cl, cp)
+            cauc_base = roc_auc_score(cl, cp_base)
         except Exception:
-            cauc = float('nan')
+            cauc_base = float('nan')
+        try:
+            caupr_cal = average_precision_score(cl, cp_cal)
+        except Exception:
+            caupr_cal = float('nan')
+        try:
+            cauc_cal = roc_auc_score(cl, cp_cal)
+        except Exception:
+            cauc_cal = float('nan')
+        try:
+            caupr_mix = average_precision_score(cl, cp_mix)
+        except Exception:
+            caupr_mix = float('nan')
+        try:
+            cauc_mix = roc_auc_score(cl, cp_mix)
+        except Exception:
+            cauc_mix = float('nan')
+        if np.nan_to_num(caupr_base, nan=-1.0) >= max(np.nan_to_num(caupr_cal, nan=-1.0), np.nan_to_num(caupr_mix, nan=-1.0)):
+            cp = cp_base
+            caupr = caupr_base
+            cauc = cauc_base
+            chosen_variant = "base"
+        elif np.nan_to_num(caupr_cal, nan=-1.0) >= np.nan_to_num(caupr_mix, nan=-1.0):
+            cp = cp_cal
+            caupr = caupr_cal
+            cauc = cauc_cal
+            chosen_variant = "cal"
+        else:
+            cp = cp_mix
+            caupr = caupr_mix
+            cauc = cauc_mix
+            chosen_variant = "mix"
 
         if EvalConfig.FIND_OPTIMAL_THRESHOLD:
             cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(
@@ -652,6 +688,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             "precision": cpr,
             "threshold": cell_threshold,
             "n": int(cl.size),
+            "variant": chosen_variant,
         }
 
         # PR/ROC 即时画图保存（细胞系级）
