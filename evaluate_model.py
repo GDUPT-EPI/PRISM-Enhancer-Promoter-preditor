@@ -474,6 +474,9 @@ def evaluate() -> Optional[Dict[str, object]]:
             pbar_eval.set_postfix({"cell": cell, "n": 0})
             continue
 
+        # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
+        _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
+
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
         _ = inject_auxiliary_into_backbone(backbone, aux_model)
 
@@ -582,6 +585,9 @@ def evaluate() -> Optional[Dict[str, object]]:
             f.write(f"Precision: {cpr:.4f}\n")
             f.write(f"Threshold: {cell_threshold:.4f}\n")
             f.write(f"Samples: {int(cl.size)}\n")
+
+        # 即时在控制台打印该细胞系评估结果
+        print(f"{cell}: AUPR={caupr:.4f} AUC={cauc:.4f} F1={cf1:.4f} Recall={cr:.4f} Precision={cpr:.4f} Threshold={cell_threshold:.4f} N={int(cl.size)}")
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
