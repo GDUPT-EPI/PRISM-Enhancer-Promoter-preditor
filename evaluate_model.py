@@ -22,11 +22,11 @@ from config import (  # 集中配置导入
     MAX_PROMOTER_LENGTH,
 )
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler  # 数据加载与采样
+from PRISM import prism_collate_fn
 from models.PRISMModel import PRISMBackbone  # 模型主干
 from models.pleat.embedding import KMerTokenizer  # K-mer分词器
 from torch.nn.utils.rnn import pad_sequence  # 序列填充
-from models.AuxiliaryModel import AuxiliaryModel  # 旁路网络
-from models.layers.footprint import FootprintExpert  # 正交约束工具
+import models.AuxiliaryModel as AuxiliaryModelModule
 
 
 def find_optimal_threshold(labels: np.ndarray, predictions: np.ndarray, 
@@ -126,7 +126,7 @@ class EvalConfig:
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
     FINETUNE_EPOCHS = 7
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
-    FINETUNE_LR = 5e-4  # 微调学习率（小步快跑，避免数值震荡）
+    FINETUNE_LR = 5e-5
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
     # 损失权重（与旁路训练保持一致的语义，但数值更保守）
@@ -140,60 +140,7 @@ class EvalConfig:
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
-    """批处理拼接函数
-
-    将原始DNA序列转换为固定长度的token ID张量，并返回标签与细胞系名称列表。
-
-    Args:
-        batch: 列表项为 (enhancer_seq, promoter_seq, cell_line, label)
-
-    Returns:
-        (enh_ids, pr_ids, labels_t, cells)
-    """
-    tokenizer = getattr(collate_fn, "tokenizer", None)  # 复用静态tokenizer避免重复构造
-    if tokenizer is None:  # 首次调用时构建
-        tokenizer = KMerTokenizer()  # 6-mer分词器
-        setattr(collate_fn, "tokenizer", tokenizer)  # 挂载到函数属性
-    enh_seqs = [b[0] for b in batch]  # 增强子序列列表
-    pr_seqs = [b[1] for b in batch]  # 启动子序列列表
-    cells = [b[2] for b in batch]  # 细胞系名称列表
-    labels = [int(b[3]) for b in batch]  # 标签列表
-    enh_ids_list = [tokenizer.encode(s) for s in enh_seqs]  # 增强子编码
-    pr_ids_list = [tokenizer.encode(s) for s in pr_seqs]  # 启动子编码
-    K = CNN_KERNEL_SIZE  # 卷积核大小
-    P = POOL_KERNEL_SIZE  # 池化核大小
-    pad_id = DNA_EMBEDDING_PADDING_IDX  # PAD索引
-    min_req = K + P - 1  # 最小有效长度（保证卷积+池化后至少一个片段）
-    max_len_en = max(int(x.size(0)) for x in enh_ids_list) if enh_ids_list else min_req  # 批内最大增强子长度
-    max_len_pr = max(int(x.size(0)) for x in pr_ids_list) if pr_ids_list else min_req  # 批内最大启动子长度
-    adj_base_en = max(1, max_len_en - (K - 1))  # 去除卷积边界后可池化基长
-    adj_base_pr = max(1, max_len_pr - (K - 1))  # 去除卷积边界后可池化基长
-    target_len_en = (K - 1) + ((adj_base_en + P - 1) // P) * P  # 按池化步长对齐的目标增强子长度
-    target_len_pr = (K - 1) + ((adj_base_pr + P - 1) // P) * P  # 按池化步长对齐的目标启动子长度
-    target_len_en = max(min_req, min(target_len_en, MAX_ENHANCER_LENGTH))  # 长度裁剪（上限）
-    target_len_pr = max(min_req, min(target_len_pr, MAX_PROMOTER_LENGTH))  # 长度裁剪（上限）
-    proc_en: List[torch.Tensor] = []  # 处理后的增强子列表
-    for ids in enh_ids_list:  # 遍历增强子
-        L = int(ids.size(0))  # 原始长度
-        if L > target_len_en:  # 超长居中裁剪
-            s = (L - target_len_en) // 2  # 起始位置
-            ids = ids[s:s + target_len_en]  # 居中截取
-        proc_en.append(ids)  # 收集
-    proc_pr: List[torch.Tensor] = []  # 处理后的启动子列表
-    for ids in pr_ids_list:  # 遍历启动子
-        L = int(ids.size(0))  # 原始长度
-        if L > target_len_pr:  # 超长居中裁剪
-            s = (L - target_len_pr) // 2  # 起始位置
-            ids = ids[s:s + target_len_pr]  # 居中截取
-        proc_pr.append(ids)  # 收集
-    enh_ids = pad_sequence(proc_en, batch_first=True, padding_value=pad_id)  # 增强子PAD填充
-    pr_ids = pad_sequence(proc_pr, batch_first=True, padding_value=pad_id)  # 启动子PAD填充
-    if enh_ids.size(1) < target_len_en:  # 右侧补齐到目标长度
-        enh_ids = torch.nn.functional.pad(enh_ids, (0, target_len_en - enh_ids.size(1)), value=pad_id)  # 右侧PAD
-    if pr_ids.size(1) < target_len_pr:  # 右侧补齐到目标长度
-        pr_ids = torch.nn.functional.pad(pr_ids, (0, target_len_pr - pr_ids.size(1)), value=pad_id)  # 右侧PAD
-    labels_t = torch.tensor(labels, dtype=torch.long)  # 标签张量
-    return enh_ids, pr_ids, labels_t, cells  # 返回拼接结果
+    return prism_collate_fn(batch)
 
 
 # ========================= 旁路微调工具函数 =========================
@@ -252,10 +199,10 @@ def _sample_support_batch(train_dataset: PRISMDataset, exclude_cell: str, batch_
     if len(idxs) > batch_size:
         idxs = np.random.choice(idxs, size=batch_size, replace=False).tolist()
     batch = [train_dataset[i] for i in idxs]
-    return collate_fn(batch)
+    return prism_collate_fn(batch)
 
 
-def _load_auxiliary_checkpoint(aux_model: AuxiliaryModel, path: str, device: torch.device) -> bool:
+def _load_auxiliary_checkpoint(aux_model: AuxiliaryModelModule.AuxiliaryModel, path: str, device: torch.device) -> bool:
     """加载旁路网络初始权重
 
     支持保存格式：{'auxiliary': state_dict} 或直接 state_dict。
@@ -296,10 +243,10 @@ def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> Da
         def __len__(self):
             return max(1, (len(self.indices) + self.bs - 1) // self.bs)
     sampler = _Sampler(idxs, batch_size)
-    return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
+    return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=prism_collate_fn)
 
 
-def _compute_aux_losses(aux_model: AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """计算旁路网络微调阶段使用的损失项
 
     仅使用细胞系监督：spec/adv 与图约束；不涉及EP互作0/1标签，避免泄露。
@@ -311,8 +258,8 @@ def _compute_aux_losses(aux_model: AuxiliaryModel, enh_ids: torch.Tensor, pr_ids
     gcn_margin = extras['gcn_margin']
     gcn_smooth = extras['gcn_smooth']
     # 正交约束：使用FootprintExpert提供的三元子空间约束
-    fp_enh: FootprintExpert = aux_model.fp_enh
-    fp_pr: FootprintExpert = aux_model.fp_pr
+    fp_enh = aux_model.fp_enh
+    fp_pr = aux_model.fp_pr
     orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
     orth_loss = orth_loss + 0.0 * fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
 
@@ -332,7 +279,7 @@ def finetune_auxiliary_on_test_cells(
     dataset: PRISMDataset,
     all_cells: List[str],
     device: torch.device,
-) -> Optional[AuxiliaryModel]:
+) -> Optional[AuxiliaryModelModule.AuxiliaryModel]:
     """按细胞系进行三步快速微调（尽可能覆盖全样本，使用梯度累积），返回微调后的旁路模型
 
     流程：
@@ -346,7 +293,7 @@ def finetune_auxiliary_on_test_cells(
     fixed_cells = _load_fixed_cells()
     num_types = len(fixed_cells) if len(fixed_cells) > 0 else len(all_cells)
     ref_cells = fixed_cells if len(fixed_cells) > 0 else sorted(all_cells) + (['OTHER'] if 'OTHER' not in all_cells else [])
-    aux_model = AuxiliaryModel(num_cell_types=num_types).to(device)
+    aux_model = AuxiliaryModelModule.AuxiliaryModel(num_cell_types=num_types).to(device)
     def _find_latest_aux_checkpoint() -> Optional[str]:
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass')
         if not os.path.isdir(base):
@@ -383,7 +330,7 @@ def finetune_auxiliary_on_test_cells(
         for epoch in range(int(EvalConfig.FINETUNE_EPOCHS)):
             pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] epoch {epoch+1}/{EvalConfig.FINETUNE_EPOCHS}", leave=False, dynamic_ncols=True)
             for batch in pbar_batches:
-                enh_ids, pr_ids, labels_t, cells = batch
+                enh_ids, pr_ids, cells, labels_t = batch
                 cell_t = _build_cell_label_tensor(cells, ref_cells)
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
@@ -424,23 +371,8 @@ def finetune_auxiliary_on_test_cells(
     return aux_model
 
 
-def inject_auxiliary_into_backbone(backbone: PRISMBackbone, aux_model: AuxiliaryModel) -> int:
-    """将旁路网络中与主干结构一致的参数注入到主干（embedding/CNN），返回成功注入的参数个数
-
-    注入范围：`enh_embedding`, `pr_embedding`, `enh_cnn`, `pr_cnn`
-    """
-    if aux_model is None:
-        return 0
-    aux_sd = aux_model.state_dict()
-    back_sd = backbone.state_dict()
-    injected = 0
-    for k in list(aux_sd.keys()):
-        if (k.startswith('enh_embedding') or k.startswith('pr_embedding') or k.startswith('enh_cnn') or k.startswith('pr_cnn')) and (k in back_sd):
-            if aux_sd[k].shape == back_sd[k].shape:
-                back_sd[k] = aux_sd[k]
-                injected += 1
-    backbone.load_state_dict(back_sd, strict=False)
-    return injected
+def inject_auxiliary_into_backbone(backbone: PRISMBackbone, aux_model: AuxiliaryModelModule.AuxiliaryModel) -> int:
+    return 0
 
 
 def _find_latest_checkpoint(save_dir: str) -> Tuple[int, Optional[str], Optional[str]]:
@@ -547,7 +479,6 @@ def evaluate() -> Optional[Dict[str, object]]:
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
 
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
-        injected = inject_auxiliary_into_backbone(backbone, aux_model)
         aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
@@ -564,11 +495,11 @@ def evaluate() -> Optional[Dict[str, object]]:
             def __len__(self):
                 return max(1, (len(self.indices) + self.bs - 1) // self.bs)
         sampler = _Sampler(idxs, bs)
-        loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=collate_fn)
+        loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=prism_collate_fn)
 
         with torch.no_grad():
             for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
-                enh_ids, pr_ids, labels, cells = batch
+                enh_ids, pr_ids, cells, labels = batch
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 labels_t = labels.to(device)
