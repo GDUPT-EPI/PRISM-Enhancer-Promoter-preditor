@@ -124,9 +124,9 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 7
+    FINETUNE_EPOCHS = 3
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
-    FINETUNE_LR = 5e-5
+    FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
     # 损失权重（与旁路训练保持一致的语义，但数值更保守）
@@ -453,9 +453,29 @@ def evaluate() -> Optional[Dict[str, object]]:
     device = EvalConfig.DEVICE  # 设备
     df, e_seq, p_seq = load_prism_data("test")  # 加载测试数据
     dataset = PRISMDataset(df, e_seq, p_seq)  # 构建数据集
-    backbone = PRISMBackbone().to(device)  # 模型加载到设备
-    _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
-    backbone.eval()  # 评估模式
+    backbone = PRISMBackbone().to(device)
+    _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
+    backbone.eval()
+
+    def _find_latest_aux_checkpoint() -> Optional[str]:
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass')
+        if not os.path.isdir(base):
+            return None
+        latest_epoch = 0
+        latest_path = None
+        for name in os.listdir(base):
+            m = re.match(r"aux_epoch_(\d+)\.pth$", name)
+            if m:
+                e = int(m.group(1))
+                if e > latest_epoch:
+                    latest_epoch = e
+                    latest_path = os.path.join(base, name)
+        return latest_path
+    fixed_cells_eval = _load_fixed_cells()
+    aux_model = AuxiliaryModelModule.AuxiliaryModel(num_cell_types=len(fixed_cells_eval)).to(device)
+    ckpt_aux = _find_latest_aux_checkpoint() or EvalConfig.AUX_CHECKPOINT_PATH
+    _ = _load_auxiliary_checkpoint(aux_model, ckpt_aux, device)
+    aux_model.eval()
 
     # 逐细胞系：导入 → 微调 → 注入 → 推理
     all_cells = sorted(df['cell_line'].unique().tolist())
@@ -477,9 +497,6 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
-
-        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
-        aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
