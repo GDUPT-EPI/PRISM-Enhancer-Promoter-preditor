@@ -643,7 +643,10 @@ def evaluate() -> Optional[Dict[str, object]]:
                 y_mod_dir = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
                 out = backbone.classifier(y_mod_dir)
                 logits_dir = out.squeeze(-1)
-                # 基线（无方向性）logit
+                # 基线（无方向性）概率直接取主干前向，确保与基线评估一致
+                out_base_pred, _ = backbone(enh_ids, pr_ids)
+                probs_base = out_base_pred.squeeze(-1)
+                # 仍保留基线logit用于锚定与温度缩放的一致性计算
                 out_base = backbone.classifier(y_feat)
                 logits_base = out_base.squeeze(-1)
                 # 对数几率校准
@@ -655,11 +658,11 @@ def evaluate() -> Optional[Dict[str, object]]:
                 logit_temp = logit_cal / max(EvalConfig.TEMP_SCALE_T, 1e-6)
                 probs_cal = torch.sigmoid(logit_temp)
                 # 锚定单调校准：高置信区不被过度压低；低置信且门控低时不被过度抬高
-                hi_mask = (torch.sigmoid(logits_base) >= EvalConfig.ANCHOR_HI).float().unsqueeze(-1)
-                lo_mask = (torch.sigmoid(logits_base) <= EvalConfig.ANCHOR_LO).float().unsqueeze(-1)
+                hi_mask = (probs_base >= EvalConfig.ANCHOR_HI).float().unsqueeze(-1)
+                lo_mask = (probs_base <= EvalConfig.ANCHOR_LO).float().unsqueeze(-1)
                 delta_hi = EvalConfig.ANCHOR_DELTA_HI
                 delta_lo = EvalConfig.ANCHOR_DELTA_LO
-                base_prob = torch.sigmoid(logits_base).unsqueeze(-1)
+                base_prob = probs_base.unsqueeze(-1)
                 cal_prob = probs_cal.unsqueeze(-1)
                 cal_prob = torch.where(
                     hi_mask > 0,
@@ -672,7 +675,6 @@ def evaluate() -> Optional[Dict[str, object]]:
                     cal_prob,
                 )
                 probs_cal = cal_prob.squeeze(-1)
-                probs_base = torch.sigmoid(logits_base)
                 k = EvalConfig.BACKOFF_SOFT_K
                 u_alpha = torch.sigmoid(k * (EvalConfig.BACKOFF_ALPHA_TAU - alpha))
                 u_I = torch.sigmoid(k * (EvalConfig.BACKOFF_I_TAU - i_approx))
@@ -795,7 +797,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             f.write(f"Samples: {int(cl.size)}\n")
 
         # 即时在控制台打印该细胞系评估结果
-        print(f"{cell}: AUPR={caupr:.4f} AUC={cauc:.4f} F1={cf1:.4f} Recall={cr:.4f} Precision={cpr:.4f} Threshold={cell_threshold:.4f} N={int(cl.size)}")
+        print(f"{cell}: AUPR={caupr:.4f} AUC={cauc:.4f} F1={cf1:.4f} Recall={cr:.4f} Precision={cpr:.4f} Threshold={cell_threshold:.4f} N={int(cl.size)} variant={chosen_variant}")
         all_preds.append(cp)
         all_labels.append(cl)
     if len(all_preds) == 0:  # 无预测
