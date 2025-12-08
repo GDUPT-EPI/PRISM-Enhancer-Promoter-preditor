@@ -1,6 +1,5 @@
 import os  # 文件与目录操作
 import re  # 正则表达式
-import copy  # 深拷贝权重以便逐细胞系恢复
 import torch  # 深度学习框架
 import numpy as np  # 数值计算
 import matplotlib.pyplot as plt  # 可视化
@@ -456,14 +455,17 @@ def evaluate() -> Optional[Dict[str, object]]:
     backbone = PRISMBackbone().to(device)  # 模型加载到设备
     _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
     backbone.eval()  # 评估模式
-    # 保存基础主干权重的深拷贝，便于每个细胞系注入前恢复，避免相互覆盖
-    base_sd = copy.deepcopy(backbone.state_dict())
 
     # 逐细胞系：导入 → 微调 → 注入 → 推理
     all_cells = sorted(df['cell_line'].unique().tolist())
     per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}
     all_preds: List[np.ndarray] = []
     all_labels: List[np.ndarray] = []
+    per_cell_results: Dict[str, Dict[str, float]] = {}
+
+    # 提前创建输出目录，便于每个细胞系即时保存图与结果
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), EvalConfig.OUTPUT_DIR_NAME)
+    os.makedirs(out_dir, exist_ok=True)
 
     pbar_eval = tqdm(all_cells, desc="Per-cell evaluate", leave=True, dynamic_ncols=True)
     for cell in pbar_eval:
@@ -473,18 +475,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             continue
 
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
-        # 每次注入前恢复主干到基础权重，避免跨细胞系覆盖
-        backbone.load_state_dict(base_sd, strict=False)
         _ = inject_auxiliary_into_backbone(backbone, aux_model)
-        backbone.eval()
-        # 另存该细胞系的微调旁路权重，避免唯一文件被覆盖造成混淆
-        try:
-            save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
-            os.makedirs(save_dir, exist_ok=True)
-            per_cell_path = os.path.join(save_dir, f"finetune_{cell}.pth")
-            torch.save({'auxiliary': aux_model.state_dict()}, per_cell_path)
-        except Exception:
-            pass
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
@@ -519,6 +510,78 @@ def evaluate() -> Optional[Dict[str, object]]:
                 per_cell[cell]["labels"].append(labs)
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
+
+        # ========== 该细胞系即时评估与保存 ==========
+        cp = np.concatenate(per_cell[cell]["preds"], axis=0)
+        cl = np.concatenate(per_cell[cell]["labels"], axis=0)
+        try:
+            caupr = average_precision_score(cl, cp)
+        except Exception:
+            caupr = float("nan")
+        try:
+            cauc = roc_auc_score(cl, cp)
+        except Exception:
+            cauc = float("nan")
+
+        if EvalConfig.FIND_OPTIMAL_THRESHOLD:
+            cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(
+                cl, cp, metric=EvalConfig.OPTIMIZE_METRIC,
+                threshold_range=EvalConfig.THRESHOLD_RANGE,
+                num_steps=EvalConfig.THRESHOLD_STEPS
+            )
+            cb = (cp >= cell_optimal_threshold).astype(int)
+            cell_threshold = cell_optimal_threshold
+        else:
+            cb = (cp >= EvalConfig.THRESHOLD).astype(int)
+            cell_threshold = EvalConfig.THRESHOLD
+
+        cf1 = f1_score(cl, cb) if cl.size > 0 else float("nan")
+        cr = recall_score(cl, cb) if cl.size > 0 else float("nan")
+        cpr = precision_score(cl, cb) if cl.size > 0 else float("nan")
+        per_cell_results[cell] = {
+            "aupr": caupr,
+            "auc": cauc,
+            "f1": cf1,
+            "recall": cr,
+            "precision": cpr,
+            "threshold": cell_threshold,
+            "n": int(cl.size),
+        }
+
+        # PR/ROC 即时画图保存（细胞系级）
+        if EvalConfig.PLOT_PR:
+            pr_p, pr_r, _ = precision_recall_curve(cl, cp)
+            plt.figure()
+            plt.plot(pr_r, pr_p, label=f"AUPR={caupr:.4f}")
+            plt.xlabel("Recall")
+            plt.ylabel("Precision")
+            plt.title(f"PR Curve [{cell}]")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"pr_curve_{cell}.png"))
+            plt.close()
+        if EvalConfig.PLOT_ROC:
+            fpr, tpr, _ = roc_curve(cl, cp)
+            plt.figure()
+            plt.plot(fpr, tpr, label=f"AUC={cauc:.4f}")
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            plt.title(f"ROC Curve [{cell}]")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"roc_curve_{cell}.png"))
+            plt.close()
+
+        # 文本结果即时保存
+        with open(os.path.join(out_dir, f"results_{cell}.txt"), "w") as f:
+            f.write(f"{cell} results\n")
+            f.write(f"AUPR: {caupr:.4f}\n")
+            f.write(f"AUC: {cauc:.4f}\n")
+            f.write(f"F1: {cf1:.4f}\n")
+            f.write(f"Recall: {cr:.4f}\n")
+            f.write(f"Precision: {cpr:.4f}\n")
+            f.write(f"Threshold: {cell_threshold:.4f}\n")
+            f.write(f"Samples: {int(cl.size)}\n")
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
@@ -596,44 +659,7 @@ def evaluate() -> Optional[Dict[str, object]]:
         plt.tight_layout()  # 紧凑布局
         plt.savefig(os.path.join(out_dir, "roc_curve.png"))  # 保存
         plt.close()  # 关闭
-    per_cell_results: Dict[str, Dict[str, float]] = {}  # 细胞系指标
-    for c, d in per_cell.items():  # 遍历细胞系
-        cp = np.concatenate(d["preds"], axis=0)  # 概率
-        cl = np.concatenate(d["labels"], axis=0)  # 标签
-        try:
-            caupr = average_precision_score(cl, cp)  # AUPR
-        except Exception:
-            caupr = float("nan")  # 异常处理
-        try:
-            cauc = roc_auc_score(cl, cp)  # AUC
-        except Exception:
-            cauc = float("nan")  # 异常处理
-        
-        # 对每个细胞系也可以单独寻找最优阈值（可选）
-        if EvalConfig.FIND_OPTIMAL_THRESHOLD:
-            cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(
-                cl, cp, metric=EvalConfig.OPTIMIZE_METRIC,
-                threshold_range=EvalConfig.THRESHOLD_RANGE,
-                num_steps=EvalConfig.THRESHOLD_STEPS
-            )
-            cb = (cp >= cell_optimal_threshold).astype(int)  # 使用细胞系特定阈值
-            cell_threshold = cell_optimal_threshold
-        else:
-            cb = (cp >= threshold).astype(int)  # 使用全局阈值
-            cell_threshold = threshold
-            
-        cf1 = f1_score(cl, cb) if cl.size > 0 else float("nan")  # F1
-        cr = recall_score(cl, cb) if cl.size > 0 else float("nan")  # 召回
-        cpr = precision_score(cl, cb) if cl.size > 0 else float("nan")  # 精度
-        per_cell_results[c] = {  # 存储结果
-            "aupr": caupr,
-            "auc": cauc,
-            "f1": cf1,
-            "recall": cr,
-            "precision": cpr,
-            "threshold": cell_threshold,  # 添加阈值信息
-            "n": int(cl.size),
-        }
+    # 细胞系指标已在逐细胞系阶段即时计算并写入 per_cell_results
     return {  # 返回总体结果
         "aupr": aupr,
         "auc": auc,
