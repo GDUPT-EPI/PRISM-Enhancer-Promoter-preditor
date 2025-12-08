@@ -213,7 +213,9 @@ def main():
             gcn_center = extras['gcn_center']
             gcn_margin = extras['gcn_margin']
             gcn_smooth = extras['gcn_smooth']
-            # 将图平滑视为一致性项（图内一致性替代跨批一致性）
+            
+            # 环境一致性 (Environmental Consistency): 同一batch属于同一细胞系的特性趋同
+            # 这里利用gcn_smooth作为一致性约束的体现
             consist_loss = gcn_smooth
 
             # 正交约束：来自FootprintExpert
