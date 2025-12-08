@@ -124,9 +124,9 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 1  # 一步微调
+    FINETUNE_EPOCHS = 5
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
-    FINETUNE_LR = 5e-5
+    FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
     # 损失权重（与旁路训练保持一致的语义，但数值更保守）
@@ -137,7 +137,7 @@ class EvalConfig:
     GCN_CENTER_LOSS_W = 0.2  # 图中心原型约束权重
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
-    ALPHA_GRID = [0.0, 0.1, 0.2, 0.3]
+    ALPHA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0]
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -498,6 +498,8 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
+        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device) or aux_model
+        aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
