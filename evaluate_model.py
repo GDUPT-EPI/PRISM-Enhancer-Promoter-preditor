@@ -376,10 +376,10 @@ def evaluate() -> Optional[Dict[str, object]]:
     # 3) 每个细胞系进行三步微调（不使用0/1互作标签）
     print("开始按细胞系微调旁路网络（三步/细胞系，禁用EP互作标签）")
     opt = torch.optim.AdamW(filter(lambda t: t.requires_grad, bypass.parameters()), lr=FinetuneConfig.FT_LEARNING_RATE)
-    for cell_name, indices in dataset.cell_line_groups.items():
+    for cell_name, indices in tqdm(dataset.cell_line_groups.items(), desc="Finetune per cell", leave=True):
         # 支持集采样：全量采集该细胞系的所有样本作为支持集（避免信息不足）
         sel = indices
-        print(f"细胞系: {cell_name} | 支持集样本数: {len(sel)} | 步数: {FinetuneConfig.FT_STEPS_PER_CELL}")
+        tqdm.write(f"细胞系: {cell_name} | 支持集样本数: {len(sel)} | 步数: {FinetuneConfig.FT_STEPS_PER_CELL}")
         # 取原始序列
         enh_list = [dataset.e_sequences[dataset.pairs_df.iloc[i]['enhancer_name']] for i in sel]
         pr_list = [dataset.p_sequences[dataset.pairs_df.iloc[i]['promoter_name']] for i in sel]
@@ -389,7 +389,7 @@ def evaluate() -> Optional[Dict[str, object]]:
         cell_idx = name_to_idx.get(cell_name, 0)
         # 三步微调：每步使用全量支持集进行一次更新（确保充分利用支持样本）
         B_total = enh_ids.size(0)
-        for step in range(FinetuneConfig.FT_STEPS_PER_CELL):
+        for step in tqdm(range(FinetuneConfig.FT_STEPS_PER_CELL), desc=f"{cell_name} steps", leave=False):
             bs = B_total
             perm = torch.arange(B_total, device=device)
             x_en = enh_ids  # 全量
@@ -423,7 +423,7 @@ def evaluate() -> Optional[Dict[str, object]]:
                 adv_acc = float(extras.get('adv_acc', torch.tensor(0.0)).detach().item())
             except Exception:
                 adv_acc = 0.0
-            print(f"  [Step {step+1}/{FinetuneConfig.FT_STEPS_PER_CELL}] spec={float(spec_loss.detach().item()):.4f}, adv={float(adv_loss.detach().item()):.4f}, smooth={float(g_smooth.detach().item()):.4f}, center={float(g_center.detach().item()):.4f}, margin={float(g_margin.detach().item()):.4f}, spec_acc={spec_acc:.3f}, adv_acc={adv_acc:.3f}")
+            tqdm.write(f"  [Step {step+1}/{FinetuneConfig.FT_STEPS_PER_CELL}] spec={float(spec_loss.detach().item()):.4f}, adv={float(adv_loss.detach().item()):.4f}, smooth={float(g_smooth.detach().item()):.4f}, center={float(g_center.detach().item()):.4f}, margin={float(g_margin.detach().item()):.4f}, spec_acc={spec_acc:.3f}, adv_acc={adv_acc:.3f}")
     # 4) 保存微调后的旁路权重
     ft_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune')
     os.makedirs(ft_dir, exist_ok=True)
