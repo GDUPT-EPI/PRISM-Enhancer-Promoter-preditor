@@ -1,5 +1,6 @@
 import os  # 文件与目录操作
 import re  # 正则表达式
+import copy  # 深拷贝权重以便逐细胞系恢复
 import torch  # 深度学习框架
 import numpy as np  # 数值计算
 import matplotlib.pyplot as plt  # 可视化
@@ -455,6 +456,8 @@ def evaluate() -> Optional[Dict[str, object]]:
     backbone = PRISMBackbone().to(device)  # 模型加载到设备
     _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
     backbone.eval()  # 评估模式
+    # 保存基础主干权重的深拷贝，便于每个细胞系注入前恢复，避免相互覆盖
+    base_sd = copy.deepcopy(backbone.state_dict())
 
     # 逐细胞系：导入 → 微调 → 注入 → 推理
     all_cells = sorted(df['cell_line'].unique().tolist())
@@ -470,7 +473,18 @@ def evaluate() -> Optional[Dict[str, object]]:
             continue
 
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
+        # 每次注入前恢复主干到基础权重，避免跨细胞系覆盖
+        backbone.load_state_dict(base_sd, strict=False)
         _ = inject_auxiliary_into_backbone(backbone, aux_model)
+        backbone.eval()
+        # 另存该细胞系的微调旁路权重，避免唯一文件被覆盖造成混淆
+        try:
+            save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
+            os.makedirs(save_dir, exist_ok=True)
+            per_cell_path = os.path.join(save_dir, f"finetune_{cell}.pth")
+            torch.save({'auxiliary': aux_model.state_dict()}, per_cell_path)
+        except Exception:
+            pass
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
