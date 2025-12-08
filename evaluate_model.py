@@ -156,6 +156,7 @@ class EvalConfig:
     CALIB_LOSS_W_HI = 1.0
     CALIB_LOSS_W_LO = 1.0
     CALIB_KL_W = 0.5
+    CALIB_CONS_W = 0.5
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -380,16 +381,22 @@ def finetune_auxiliary_on_test_cells(
                 p_base = torch.sigmoid(logits_base)
                 hi_mask = (p_base >= EvalConfig.ANCHOR_HI).float()
                 lo_mask = (p_base <= EvalConfig.ANCHOR_LO).float()
-                hi_loss = torch.relu(p_base - EvalConfig.ANCHOR_DELTA_HI - p_cal)
+                hi_loss = torch.relu((p_base - EvalConfig.ANCHOR_DELTA_HI) - p_cal)
                 lo_loss = torch.relu(p_cal - (p_base + EvalConfig.ANCHOR_DELTA_LO)) * ((alpha.squeeze(-1) < EvalConfig.BACKOFF_ALPHA_TAU).float())
                 eps = 1e-4
                 pb = torch.clamp(p_base, eps, 1.0 - eps)
                 pc = torch.clamp(p_cal, eps, 1.0 - eps)
                 kl = pc * torch.log(pc / pb) + (1.0 - pc) * torch.log((1.0 - pc) / (1.0 - pb))
+                # 主干一致性能量：限制方向性调制输出与基线输出的差异（L1）
+                with torch.no_grad():
+                    logits_base_detach = logits_base.detach()
+                consistency = torch.abs(torch.sigmoid(logit_temp) - torch.sigmoid(logits_base_detach))
+                consistency_loss = consistency.mean()
                 calib_loss = (
                     EvalConfig.CALIB_LOSS_W_HI * (hi_loss * hi_mask).mean() +
                     EvalConfig.CALIB_LOSS_W_LO * (lo_loss * lo_mask).mean() +
-                    EvalConfig.CALIB_KL_W * kl.mean()
+                    EvalConfig.CALIB_KL_W * kl.mean() +
+                    EvalConfig.CALIB_CONS_W * consistency_loss
                 )
                 if train_dataset is not None:
                     sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
