@@ -138,6 +138,7 @@ class EvalConfig:
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
     ALPHA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0]
+    EP_ENTROPY_WEIGHT = 0.5  # EP互作自监督熵项权重（微调阶段）
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -247,7 +248,7 @@ def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> Da
     return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=prism_collate_fn)
 
 
-def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, backbone: PRISMBackbone, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """计算旁路网络微调阶段使用的损失项
 
     仅使用细胞系监督：spec/adv 与图约束；不涉及EP互作0/1标签，避免泄露。
@@ -264,6 +265,19 @@ def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, enh_ids:
     orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
     orth_loss = orth_loss + 0.0 * fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
 
+    # EP互作自监督：在当前旁路上下文下，促使Backbone输出具有更高置信度（熵最小化），不使用0/1标签
+    M_prime = extras['M_prime']
+    with torch.no_grad():
+        y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
+    y_feat = y_feat.detach()
+    gamma = torch.sigmoid(M_prime)
+    beta = torch.tanh(M_prime)
+    y_mod = gamma * y_feat + beta
+    logits = backbone.classifier(y_mod).squeeze(-1)
+    p = torch.sigmoid(logits)
+    eps = 1e-6
+    ep_entropy = -(p * torch.log(p + eps) + (1 - p) * torch.log(1 - p + eps)).mean()
+
     total = (
         EvalConfig.BYPASS_SPEC_WEIGHT * spec_loss +
         EvalConfig.BYPASS_INV_WEIGHT * adv_loss +
@@ -271,7 +285,8 @@ def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, enh_ids:
         EvalConfig.BYPASS_CONSIST_WEIGHT * gcn_smooth +
         EvalConfig.GCN_CENTER_LOSS_W * gcn_center +
         EvalConfig.GCN_MARGIN_LOSS_W * gcn_margin +
-        EvalConfig.GCN_SMOOTH_LOSS_W * gcn_smooth
+        EvalConfig.GCN_SMOOTH_LOSS_W * gcn_smooth +
+        EvalConfig.EP_ENTROPY_WEIGHT * ep_entropy
     )
     return total, extras
 
@@ -280,6 +295,7 @@ def finetune_auxiliary_on_test_cells(
     dataset: PRISMDataset,
     all_cells: List[str],
     device: torch.device,
+    backbone: PRISMBackbone,
 ) -> Optional[AuxiliaryModelModule.AuxiliaryModel]:
     """按细胞系进行三步快速微调（尽可能覆盖全样本，使用梯度累积），返回微调后的旁路模型
 
@@ -312,6 +328,9 @@ def finetune_auxiliary_on_test_cells(
     ckpt = _find_latest_aux_checkpoint() or EvalConfig.AUX_CHECKPOINT_PATH
     _ = _load_auxiliary_checkpoint(aux_model, ckpt, device)
     aux_model.train()
+    backbone.eval()
+    for p in backbone.parameters():
+        p.requires_grad = False
     optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
 
     # 加载训练集作为辅助损失采样源（不使用EP标签）
@@ -336,7 +355,7 @@ def finetune_auxiliary_on_test_cells(
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 cell_t = cell_t.to(device)
-                loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+                loss_main, extras_main = _compute_aux_losses(aux_model, backbone, enh_ids, pr_ids, cell_t)
                 if train_dataset is not None:
                     sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
                 else:
@@ -348,7 +367,7 @@ def finetune_auxiliary_on_test_cells(
                     s_cell_t = _build_cell_label_tensor(s_cells, ref_cells).to(device)
                     s_enh = s_enh.to(device)
                     s_pr = s_pr.to(device)
-                    loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
+                    loss_sup, extras_sup = _compute_aux_losses(aux_model, backbone, s_enh, s_pr, s_cell_t)
                     total_loss = loss_main + loss_sup
                     spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
                     adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
@@ -498,7 +517,7 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
-        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device) or aux_model
+        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device, backbone) or aux_model
         aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
