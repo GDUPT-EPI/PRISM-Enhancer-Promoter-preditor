@@ -19,6 +19,7 @@ from config import (  # 集中配置导入
     DNA_EMBEDDING_PADDING_IDX,
     MAX_ENHANCER_LENGTH,
     MAX_PROMOTER_LENGTH,
+    PROJECT_ROOT,
 )
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler  # 数据加载与采样
 from models.PRISMModel import PRISMBackbone  # 模型主干
@@ -250,6 +251,84 @@ def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> Da
     return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
 
 
+def _load_fixed_cell_types() -> List[str]:
+    """加载固定细胞类型映射（与训练一致），失败则回退到训练集唯一细胞系"""
+    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
+    if os.path.exists(xml_path):
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(xml_path).getroot()
+            names = []
+            for node in root.findall(".//type"):
+                name = node.get("name")
+                if name:
+                    name = name.strip()
+                    if name:
+                        names.append(name)
+            if names:
+                return names
+        except Exception:
+            pass
+    # 回退：使用训练集中的唯一细胞系
+    tr_df, _, _ = load_prism_data("train")
+    return sorted(tr_df['cell_line'].unique().tolist())
+
+
+def _focused_contrastive_loader(dataset: PRISMDataset, target_cell: str, batch_size: int, shuffle: bool = True) -> DataLoader:
+    """构建以目标细胞系为中心的对比批次加载器：一半来自目标细胞，另一半来自其他细胞系"""
+    cell_line_groups = {c: g.copy() for c, g in dataset.cell_line_groups.items()}
+    cell_lines = list(cell_line_groups.keys())
+    half = max(1, batch_size // 2)
+
+    class _Sampler:
+        def __init__(self):
+            self.num_batches = max(1, len(dataset) // max(1, batch_size))
+        def __iter__(self):
+            # 预打乱
+            for c in cell_lines:
+                if shuffle:
+                    import random
+                    random.shuffle(cell_line_groups[c])
+            import random
+            others = [c for c in cell_lines if c != target_cell] or cell_lines
+            # 每个批次：half个target + half个均匀分配的others
+            for _ in range(self.num_batches):
+                batch = []
+                # 目标细胞样本
+                tgt_pool = cell_line_groups.get(target_cell, [])
+                for _i in range(half):
+                    if not tgt_pool:
+                        tgt_pool = dataset.cell_line_groups.get(target_cell, [])[:]
+                        if shuffle:
+                            random.shuffle(tgt_pool)
+                        cell_line_groups[target_cell] = tgt_pool
+                    if tgt_pool:
+                        batch.append(tgt_pool.pop())
+                # 其他细胞样本
+                # 尽量均匀覆盖
+                per_cell = max(1, half // max(1, len(others)))
+                remaining = half - per_cell * max(1, len(others))
+                for j, oc in enumerate(others):
+                    take = per_cell + (1 if j < remaining else 0)
+                    oc_pool = cell_line_groups.get(oc, [])
+                    for _k in range(take):
+                        if not oc_pool:
+                            oc_pool = dataset.cell_line_groups.get(oc, [])[:]
+                            if shuffle:
+                                random.shuffle(oc_pool)
+                            cell_line_groups[oc] = oc_pool
+                        if oc_pool:
+                            batch.append(oc_pool.pop())
+                if shuffle:
+                    random.shuffle(batch)
+                yield batch or [0]  # 防御性：空批次退化为单样本
+        def __len__(self):
+            return self.num_batches
+
+    sampler = _Sampler()
+    return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
+
+
 def _compute_aux_losses(aux_model: AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """计算旁路网络微调阶段使用的损失项
 
@@ -294,31 +373,35 @@ def finetune_auxiliary_on_test_cells(
     """
     if len(all_cells) == 0:
         return None
-    aux_model = AuxiliaryModel(num_cell_types=len(all_cells)).to(device)
+
+    # 使用训练集作为微调数据来源（与 main.py 一致）
+    tr_df, tr_e_seqs, tr_p_seqs = load_prism_data("train")
+    train_dataset = PRISMDataset(tr_df, tr_e_seqs, tr_p_seqs)
+    fixed_cells = _load_fixed_cell_types()
+
+    aux_model = AuxiliaryModel(num_cell_types=len(fixed_cells)).to(device)
     _ = _load_auxiliary_checkpoint(aux_model, EvalConfig.AUX_CHECKPOINT_PATH, device)
     aux_model.train()
     optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
 
-    # 外层细胞系进度条（实时监视每个细胞系的微调进度）
+    # 外层细胞系进度条（只微调指定目标细胞系列表）
     pbar_cells = tqdm(all_cells, desc="Finetune per cell", leave=True, dynamic_ncols=True)
     for cell in pbar_cells:
-        loader = _cell_subset_loader(dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE)
+        loader = _focused_contrastive_loader(train_dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE, shuffle=True)
         total_batches = len(loader)
         if total_batches <= 0:
             pbar_cells.set_postfix({"cell": cell, "batches": 0})
             continue
-        # 累计间隔设置为将全部批次划分为约 FINETUNE_STEPS_PER_CELL 次参数更新
         accum_interval = max(1, int(np.ceil(total_batches / float(EvalConfig.FINETUNE_STEPS_PER_CELL))))
         expected_updates = int(np.ceil(total_batches / float(accum_interval)))
         optimizer.zero_grad()
         batch_counter = 0
         update_counter = 0
 
-        # 内层批次进度条（实时显示损失项与累计状态）
         pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] batches", leave=False, dynamic_ncols=True)
         for batch in pbar_batches:
             enh_ids, pr_ids, labels_t, cells = batch
-            cell_t = _build_cell_label_tensor(cells, all_cells)
+            cell_t = _build_cell_label_tensor(cells, fixed_cells)
             enh_ids = enh_ids.to(device)
             pr_ids = pr_ids.to(device)
             cell_t = cell_t.to(device)
@@ -326,7 +409,6 @@ def finetune_auxiliary_on_test_cells(
             loss.backward()
             batch_counter += 1
 
-            # 实时显示关键损失项与累计信息
             pbar_batches.set_postfix({
                 "loss": f"{float(loss.item()):.4f}",
                 "spec": f"{float(extras.get('spec_loss', torch.tensor(0.0)).item()):.4f}",
@@ -334,7 +416,6 @@ def finetune_auxiliary_on_test_cells(
                 "accum": f"{batch_counter}/{accum_interval}",
             })
 
-            # 达到累计间隔或最后一批次时执行参数更新，并在外层进度条显示已完成的更新步数
             if (batch_counter % accum_interval == 0) or (batch_counter == total_batches):
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
                 optimizer.step()
@@ -345,7 +426,6 @@ def finetune_auxiliary_on_test_cells(
                     "updates": f"{update_counter}/{expected_updates}",
                 })
 
-        # 该细胞系微调完成后，关闭内层进度条，外层进度条自动前进一格（由迭代驱动）
         pbar_batches.close()
 
     # 保存微调后的权重
