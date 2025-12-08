@@ -295,10 +295,8 @@ def main():  # 主函数
         model.train()  # 设置为训练模式
         total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0  # 初始化统计变量
         total_tp = 0; total_fp = 0; total_fn = 0  # 初始化TP、FP、FN
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)
-        ADAPT_STEPS = 3
-        ADAPT_LR = 0.05
-        for batch in pbar:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)  # 创建进度条
+        for batch in pbar:  # 遍历批次
             enh_ids, pr_ids, cell_lines, labels = batch  # 获取批次数据
             enh_ids = enh_ids.to(device); pr_ids = pr_ids.to(device)  # 移动到设备
             # 暂停随机PAD掩码，避免训练初期数值不稳
@@ -306,34 +304,20 @@ def main():  # 主函数
             # pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)  # 移动到设备
             precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
+            # ====== 旁路M'影响分类（FiLM + FourierKAN） ======
+            # 1) 从旁路获取分布特征 M'（冻结旁路）
             with torch.no_grad():
-                _, bx = bypass(enh_ids, pr_ids, cell_labels=None)
-                M_prime_base = bx['M_prime'].detach()
-                y_feat_fixed, adaptive_loss = model.extract_pooled_feature(enh_ids, pr_ids)
-                y_feat_fixed = y_feat_fixed.detach()
-
-            delta = torch.zeros_like(M_prime_base, requires_grad=True)
-            optimizer_adapt = torch.optim.SGD([delta], lr=ADAPT_LR)
-            for _ in range(ADAPT_STEPS):
-                optimizer_adapt.zero_grad()
-                M_adapt = M_prime_base + delta
-                gamma_a = torch.sigmoid(M_adapt)
-                beta_a = torch.tanh(M_adapt)
-                y_mod_a = gamma_a * y_feat_fixed + beta_a
-                ep_out_a = model.classifier(y_mod_a).squeeze(-1)
-                p_a = torch.sigmoid(ep_out_a)
-                eps = 1e-6
-                entropy = -(p_a * torch.log(p_a + eps) + (1 - p_a) * torch.log(1 - p_a + eps)).mean()
-                entropy.backward()
-                optimizer_adapt.step()
-
-            M_final = M_prime_base + delta.detach()
+                _, bx = bypass(enh_ids, pr_ids, cell_labels=None)  # 不需要细胞标签以推断M'
+                M_prime = bx['M_prime']  # [B, OUT_CHANNELS]
+            # 2) 主干提取池化特征 y（分类器输入）
             y_feat, adaptive_loss = model.extract_pooled_feature(enh_ids, pr_ids)
-            gamma = torch.sigmoid(M_final)
-            beta = torch.tanh(M_final)
+            # 3) FiLM 调制：γ, β 由 M' 映射（简版：直接γ=σ(M'), β=tanh(M')）
+            gamma = torch.sigmoid(M_prime)
+            beta = torch.tanh(M_prime)
             y_mod = gamma * y_feat + beta
+            # 4) 送入原分类器头（FourierKAN）得到概率
             ep_outputs = model.classifier(y_mod).squeeze(-1)
-            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)
+            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)  # 计算损失
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
                 ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率

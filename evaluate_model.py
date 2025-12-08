@@ -124,7 +124,7 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 3
+    FINETUNE_EPOCHS = 5
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
     FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
@@ -138,7 +138,10 @@ class EvalConfig:
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
     ALPHA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0]
-    EP_ENTROPY_WEIGHT = 0.5  # EP互作自监督熵项权重（微调阶段）
+    ALPHA_TAU_F = 1.0
+    ALPHA_BETA0 = 0.5
+    ALPHA_BETA1 = 0.5
+    I_KAPPA = 2.0
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -248,7 +251,7 @@ def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> Da
     return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=prism_collate_fn)
 
 
-def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, backbone: PRISMBackbone, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """计算旁路网络微调阶段使用的损失项
 
     仅使用细胞系监督：spec/adv 与图约束；不涉及EP互作0/1标签，避免泄露。
@@ -265,19 +268,6 @@ def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, backbone
     orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
     orth_loss = orth_loss + 0.0 * fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
 
-    # EP互作自监督：在当前旁路上下文下，促使Backbone输出具有更高置信度（熵最小化），不使用0/1标签
-    M_prime = extras['M_prime']
-    with torch.no_grad():
-        y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
-    y_feat = y_feat.detach()
-    gamma = torch.sigmoid(M_prime)
-    beta = torch.tanh(M_prime)
-    y_mod = gamma * y_feat + beta
-    logits = backbone.classifier(y_mod).squeeze(-1)
-    p = torch.sigmoid(logits)
-    eps = 1e-6
-    ep_entropy = -(p * torch.log(p + eps) + (1 - p) * torch.log(1 - p + eps)).mean()
-
     total = (
         EvalConfig.BYPASS_SPEC_WEIGHT * spec_loss +
         EvalConfig.BYPASS_INV_WEIGHT * adv_loss +
@@ -285,8 +275,7 @@ def _compute_aux_losses(aux_model: AuxiliaryModelModule.AuxiliaryModel, backbone
         EvalConfig.BYPASS_CONSIST_WEIGHT * gcn_smooth +
         EvalConfig.GCN_CENTER_LOSS_W * gcn_center +
         EvalConfig.GCN_MARGIN_LOSS_W * gcn_margin +
-        EvalConfig.GCN_SMOOTH_LOSS_W * gcn_smooth +
-        EvalConfig.EP_ENTROPY_WEIGHT * ep_entropy
+        EvalConfig.GCN_SMOOTH_LOSS_W * gcn_smooth
     )
     return total, extras
 
@@ -295,7 +284,6 @@ def finetune_auxiliary_on_test_cells(
     dataset: PRISMDataset,
     all_cells: List[str],
     device: torch.device,
-    backbone: PRISMBackbone,
 ) -> Optional[AuxiliaryModelModule.AuxiliaryModel]:
     """按细胞系进行三步快速微调（尽可能覆盖全样本，使用梯度累积），返回微调后的旁路模型
 
@@ -328,9 +316,6 @@ def finetune_auxiliary_on_test_cells(
     ckpt = _find_latest_aux_checkpoint() or EvalConfig.AUX_CHECKPOINT_PATH
     _ = _load_auxiliary_checkpoint(aux_model, ckpt, device)
     aux_model.train()
-    backbone.eval()
-    for p in backbone.parameters():
-        p.requires_grad = False
     optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
 
     # 加载训练集作为辅助损失采样源（不使用EP标签）
@@ -355,7 +340,7 @@ def finetune_auxiliary_on_test_cells(
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 cell_t = cell_t.to(device)
-                loss_main, extras_main = _compute_aux_losses(aux_model, backbone, enh_ids, pr_ids, cell_t)
+                loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
                 if train_dataset is not None:
                     sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
                 else:
@@ -367,7 +352,7 @@ def finetune_auxiliary_on_test_cells(
                     s_cell_t = _build_cell_label_tensor(s_cells, ref_cells).to(device)
                     s_enh = s_enh.to(device)
                     s_pr = s_pr.to(device)
-                    loss_sup, extras_sup = _compute_aux_losses(aux_model, backbone, s_enh, s_pr, s_cell_t)
+                    loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
                     total_loss = loss_main + loss_sup
                     spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
                     adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
@@ -517,7 +502,7 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
-        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device, backbone) or aux_model
+        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device) or aux_model
         aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
@@ -537,58 +522,81 @@ def evaluate() -> Optional[Dict[str, object]]:
         loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=prism_collate_fn)
 
         with torch.no_grad():
+            # 预计算该细胞系的 GraphContext 原型均值 mu_c
+            # 通过一次前向获得 mu_ctx，并取该细胞系批次的均值，作为近似原型
+            mu_ctx_accum = []
+            for batch in tqdm(loader, desc=f"Warmup[{cell}]", leave=False, dynamic_ncols=True):
+                enh_ids, pr_ids, cells, labels = batch
+                enh_ids = enh_ids.to(device)
+                pr_ids = pr_ids.to(device)
+                _, bx_w = aux_model(enh_ids, pr_ids, cell_labels=None)
+                mu_ctx_accum.append(bx_w['mu_ctx'])
+            if len(mu_ctx_accum) == 0:
+                mu_c = None
+            else:
+                mu_c = torch.cat(mu_ctx_accum, dim=0).mean(dim=0, keepdim=True)  # [1, d_spec]
+
+            # 正式预测阶段：方向性 α 与 I_approx 融合
             for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
                 enh_ids, pr_ids, cells, labels = batch
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 labels_t = labels.to(device)
                 _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
-                M_prime = bx['M_prime']
+                M_prime = bx['M_prime']                  # [B, D]
+                zF = bx['zF']                            # [B, d_spec]
+                zG = bx['zG']                            # [B, Dg]
+                zI = bx['zI']                            # [B, Di]
                 y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
                 gamma = torch.sigmoid(M_prime)
                 beta = torch.tanh(M_prime)
+
+                # 构造方向性 α：基于 F 与细胞原型的 RBF 距离；叠加共性校准项
+                if mu_c is not None:
+                    d2 = torch.sum((zF - mu_c.to(zF.device))**2, dim=-1, keepdim=True)
+                    alpha_f = torch.exp(- d2 / max(EvalConfig.ALPHA_TAU_F, 1e-6))  # [B,1]
+                else:
+                    alpha_f = torch.ones(zF.size(0), 1, device=zF.device)
+                # 共性校准：以批次均值近似 \bar{z}_G，并取非负余弦
+                zG_bar = torch.mean(zG, dim=0, keepdim=True)  # [1,Dg]
+                num = torch.sum(zG * zG_bar, dim=-1, keepdim=True)
+                den = torch.clamp(torch.norm(zG, dim=-1, keepdim=True) * torch.norm(zG_bar, dim=-1, keepdim=True), min=1e-6)
+                s_g = torch.clamp(num / den, min=0.0, max=1.0)  # [B,1]
+                alpha = alpha_f * (EvalConfig.ALPHA_BETA0 + EvalConfig.ALPHA_BETA1 * s_g)  # [B,1]
+                alpha = torch.clamp(alpha, 0.0, 1.0)
+
+                # 交互近似 I_approx：用批次标准化的 ||zI|| 经 Sigmoid 映射
+                norm_i = torch.norm(zI, dim=-1, keepdim=True)
+                m_i = torch.mean(norm_i)
+                s_i = torch.std(norm_i) if torch.isfinite(torch.std(norm_i)) else torch.tensor(1.0, device=norm_i.device)
+                i_approx = torch.sigmoid(EvalConfig.I_KAPPA * ( (norm_i - m_i) / (s_i + 1e-6) ))  # [B,1]
+
+                # 方向性 FiLM 融合与交互偏置
+                y_mod_dir = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
+                out = backbone.classifier(y_mod_dir)
+                logits = out.squeeze(-1)
+                probs = torch.sigmoid(logits)
+                probs = torch.clamp(probs + 0.05 * (i_approx.squeeze(-1) - 0.5), 0.0, 1.0)
+
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
-                # alpha 网格集成，按AUPR择优
-                preds_grid = []
-                for alpha in EvalConfig.ALPHA_GRID:
-                    y_mod = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
-                    out = backbone.classifier(y_mod)
-                    preds_a = torch.sigmoid(out).squeeze(-1).detach().cpu().numpy()
-                    preds_grid.append(preds_a)
-                labs = labels_t.cpu().numpy()
-                # 暂存；待会儿我们在细胞系级汇总进行AUPR选择
-                per_cell[cell]["preds"].append(np.stack(preds_grid, axis=-1))
-                per_cell[cell]["labels"].append(labs)
+                per_cell[cell]["preds"].append(probs.detach().cpu().numpy())
+                per_cell[cell]["labels"].append(labels_t.cpu().numpy())
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
 
         # ========== 该细胞系即时评估与保存 ==========
-        preds_stack = np.concatenate(per_cell[cell]["preds"], axis=0)  # [N, A]
+        preds_stack = np.concatenate(per_cell[cell]["preds"], axis=0)  # [N]
         cl = np.concatenate(per_cell[cell]["labels"], axis=0)
-        best_aupr = -1.0
-        best_auc = float('nan')
-        best_alpha = EvalConfig.ALPHA_GRID[0]
-        best_cp = preds_stack[:, 0]
-        for i, alpha in enumerate(EvalConfig.ALPHA_GRID):
-            cp_a = preds_stack[:, i]
-            try:
-                aupr_a = average_precision_score(cl, cp_a)
-            except Exception:
-                aupr_a = float('nan')
-            try:
-                auc_a = roc_auc_score(cl, cp_a)
-            except Exception:
-                auc_a = float('nan')
-            score = aupr_a if np.isfinite(aupr_a) else -1.0
-            if score > best_aupr:
-                best_aupr = score
-                best_auc = auc_a
-                best_alpha = alpha
-                best_cp = cp_a
-        cp = best_cp
-        caupr = best_aupr
-        cauc = best_auc
+        cp = preds_stack
+        try:
+            caupr = average_precision_score(cl, cp)
+        except Exception:
+            caupr = float('nan')
+        try:
+            cauc = roc_auc_score(cl, cp)
+        except Exception:
+            cauc = float('nan')
 
         if EvalConfig.FIND_OPTIMAL_THRESHOLD:
             cell_optimal_threshold, cell_optimal_metrics, _ = find_optimal_threshold(

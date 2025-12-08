@@ -272,11 +272,11 @@ def main():
 
         # 记录与绘图
         avg_total = total_loss_epoch / max(1, n_batches)
-        history['total'].append(avg_total)
-        history['spec'].append(spec_loss_epoch / max(1, n_batches))
-        history['adv'].append(adv_loss_epoch / max(1, n_batches))
-        history['orth'].append(orth_loss_epoch / max(1, n_batches))
-        history['consist'].append(consist_loss_epoch / max(1, n_batches))
+        # history['total'].append(avg_total)
+        # history['spec'].append(spec_loss_epoch / max(1, n_batches))
+        # history['adv'].append(adv_loss_epoch / max(1, n_batches))
+        # history['orth'].append(orth_loss_epoch / max(1, n_batches))
+        # history['consist'].append(consist_loss_epoch / max(1, n_batches))
         history['gcn_center'].append(gcn_center_epoch / max(1, n_batches))
         history['gcn_margin'].append(gcn_margin_epoch / max(1, n_batches))
         history['gcn_smooth'].append(gcn_smooth_epoch / max(1, n_batches))
