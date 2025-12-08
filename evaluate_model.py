@@ -124,7 +124,7 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 10
+    FINETUNE_EPOCHS = 3
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
     FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
@@ -153,6 +153,9 @@ class EvalConfig:
     ANCHOR_LO = 0.20
     ANCHOR_DELTA_HI = 0.10
     ANCHOR_DELTA_LO = 0.10
+    CALIB_LOSS_W_HI = 1.0
+    CALIB_LOSS_W_LO = 1.0
+    CALIB_KL_W = 0.5
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -295,6 +298,7 @@ def finetune_auxiliary_on_test_cells(
     dataset: PRISMDataset,
     all_cells: List[str],
     device: torch.device,
+    backbone: PRISMBackbone,
 ) -> Optional[AuxiliaryModelModule.AuxiliaryModel]:
     """按细胞系进行三步快速微调（尽可能覆盖全样本，使用梯度累积），返回微调后的旁路模型
 
@@ -352,6 +356,41 @@ def finetune_auxiliary_on_test_cells(
                 pr_ids = pr_ids.to(device)
                 cell_t = cell_t.to(device)
                 loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+                with torch.no_grad():
+                    y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
+                M_prime = extras_main['M_prime']
+                zF = extras_main['zF']
+                zG = extras_main['zG']
+                mu_c = extras_main['mu_ctx']
+                gamma = torch.sigmoid(M_prime)
+                beta = torch.tanh(M_prime)
+                d2 = torch.sum((zF - mu_c.to(zF.device))**2, dim=-1, keepdim=True)
+                alpha_f = torch.exp(- d2 / max(EvalConfig.ALPHA_TAU_F, 1e-6))
+                zG_bar = torch.mean(zG, dim=0, keepdim=True)
+                num = torch.sum(zG * zG_bar, dim=-1, keepdim=True)
+                den = torch.clamp(torch.norm(zG, dim=-1, keepdim=True) * torch.norm(zG_bar, dim=-1, keepdim=True), min=1e-6)
+                s_g = torch.clamp(num / den, min=0.0, max=1.0)
+                alpha = torch.clamp(alpha_f * (EvalConfig.ALPHA_BETA0 + EvalConfig.ALPHA_BETA1 * s_g), EvalConfig.ALPHA_MIN, 1.0)
+                y_mod_dir = (1.0 - alpha) * y_feat.detach() + alpha * (gamma * y_feat.detach() + beta)
+                logits_dir = backbone.classifier(y_mod_dir).squeeze(-1)
+                logits_base = backbone.classifier(y_feat.detach()).squeeze(-1)
+                logit_cal = logits_dir + EvalConfig.LOGIT_I_WEIGHT * (0.0)
+                logit_temp = logit_cal / max(EvalConfig.TEMP_SCALE_T, 1e-6)
+                p_cal = torch.sigmoid(logit_temp)
+                p_base = torch.sigmoid(logits_base)
+                hi_mask = (p_base >= EvalConfig.ANCHOR_HI).float()
+                lo_mask = (p_base <= EvalConfig.ANCHOR_LO).float()
+                hi_loss = torch.relu(p_base - EvalConfig.ANCHOR_DELTA_HI - p_cal)
+                lo_loss = torch.relu(p_cal - (p_base + EvalConfig.ANCHOR_DELTA_LO)) * ((alpha.squeeze(-1) < EvalConfig.BACKOFF_ALPHA_TAU).float())
+                eps = 1e-4
+                pb = torch.clamp(p_base, eps, 1.0 - eps)
+                pc = torch.clamp(p_cal, eps, 1.0 - eps)
+                kl = pc * torch.log(pc / pb) + (1.0 - pc) * torch.log((1.0 - pc) / (1.0 - pb))
+                calib_loss = (
+                    EvalConfig.CALIB_LOSS_W_HI * (hi_loss * hi_mask).mean() +
+                    EvalConfig.CALIB_LOSS_W_LO * (lo_loss * lo_mask).mean() +
+                    EvalConfig.CALIB_KL_W * kl.mean()
+                )
                 if train_dataset is not None:
                     sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
                 else:
@@ -364,11 +403,11 @@ def finetune_auxiliary_on_test_cells(
                     s_enh = s_enh.to(device)
                     s_pr = s_pr.to(device)
                     loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
-                    total_loss = loss_main + loss_sup
+                    total_loss = loss_main + loss_sup + calib_loss
                     spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
                     adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
                 else:
-                    total_loss = loss_main
+                    total_loss = loss_main + calib_loss
                 optimizer.zero_grad()
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
@@ -513,7 +552,7 @@ def evaluate() -> Optional[Dict[str, object]]:
 
         # 每个细胞系开始前，重置主干到最近的基础权重，避免跨细胞系注入相互干扰
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
-        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device) or aux_model
+        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device, backbone) or aux_model
         aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
