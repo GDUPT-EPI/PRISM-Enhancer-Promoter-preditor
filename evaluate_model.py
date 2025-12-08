@@ -124,7 +124,7 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 3
+    FINETUNE_EPOCHS = 3  # 3步就够了 
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
     FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
@@ -544,16 +544,11 @@ def evaluate() -> Optional[Dict[str, object]]:
                 pr_ids = pr_ids.to(device)
                 labels_t = labels.to(device)
                 _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
-                M_prime = bx['M_prime']                  # [B, D]
                 zF = bx['zF']                            # [B, d_spec]
                 y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
-                gamma = torch.sigmoid(M_prime)
-                beta = torch.tanh(M_prime)
-
-                # 原始融合概率（作为基线），注意此处不做任何正向放大
-                y_mod = gamma * y_feat + beta
-                out = backbone.classifier(y_mod)
-                probs_base = torch.sigmoid(out.squeeze(-1))  # [B]
+                out_base = backbone.classifier(y_feat)
+                logit_base = out_base.squeeze(-1)
+                probs_base = torch.sigmoid(logit_base)  # [B]
 
                 # 计算特性拒绝度 R_F：相对于所有训练期原型的最大相似度的补集
                 if protos is not None:
@@ -568,8 +563,9 @@ def evaluate() -> Optional[Dict[str, object]]:
                 else:
                     r_f = torch.zeros(zF.size(0), 1, device=zF.device)
 
-                # 纯负校准：最终概率 = 基线概率 - λ_neg * R_F，裁剪到 [0,1]
-                probs_final = torch.clamp(probs_base - EvalConfig.NEG_LAMBDA * r_f.squeeze(-1), 0.0, 1.0)
+                # 纯负校准（对 logit 做减法，再 sigmoid）：避免直接在概率域破坏排序
+                logit_final = logit_base - EvalConfig.NEG_LAMBDA * r_f.squeeze(-1)
+                probs_final = torch.sigmoid(logit_final)
 
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
