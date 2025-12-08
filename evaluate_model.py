@@ -124,7 +124,7 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 5
+    FINETUNE_EPOCHS = 3
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
     FINETUNE_LR = 5e-4
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
@@ -137,11 +137,9 @@ class EvalConfig:
     GCN_CENTER_LOSS_W = 0.2  # 图中心原型约束权重
     GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
     GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
-    ALPHA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0]
-    ALPHA_TAU_F = 1.0
-    ALPHA_BETA0 = 0.5
-    ALPHA_BETA1 = 0.5
-    I_KAPPA = 2.0
+    # 纯负优化参数（拒绝式校准，不做正向强化）
+    NEG_TAU_F = 1.0  # F原型RBF温度
+    NEG_LAMBDA = 0.2  # 负惩罚强度（对概率做减法校准）
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -522,21 +520,24 @@ def evaluate() -> Optional[Dict[str, object]]:
         loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=prism_collate_fn)
 
         with torch.no_grad():
-            # 预计算该细胞系的 GraphContext 原型均值 mu_c
-            # 通过一次前向获得 mu_ctx，并取该细胞系批次的均值，作为近似原型
-            mu_ctx_accum = []
+            # 预读取该细胞系全部批次，收集旁路的特性向量与原型集合近似
+            zf_all: List[torch.Tensor] = []
+            protos: Optional[torch.Tensor] = None
             for batch in tqdm(loader, desc=f"Warmup[{cell}]", leave=False, dynamic_ncols=True):
                 enh_ids, pr_ids, cells, labels = batch
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 _, bx_w = aux_model(enh_ids, pr_ids, cell_labels=None)
-                mu_ctx_accum.append(bx_w['mu_ctx'])
-            if len(mu_ctx_accum) == 0:
-                mu_c = None
-            else:
-                mu_c = torch.cat(mu_ctx_accum, dim=0).mean(dim=0, keepdim=True)  # [1, d_spec]
+                zf_all.append(bx_w['zF'])
+                # 原型集合来自 GraphContext.prototypes（训练期权重），在评估端仅做只读引用
+                if protos is None:
+                    try:
+                        protos = aux_model.graph_ctx.prototypes.detach().to(device)  # [C, K, d_spec]
+                    except Exception:
+                        protos = None
+            zf_all = torch.cat(zf_all, dim=0) if len(zf_all) > 0 else None
 
-            # 正式预测阶段：方向性 α 与 I_approx 融合
+            # 正式预测阶段：纯负拒绝式校准（不做正向强化）
             for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
                 enh_ids, pr_ids, cells, labels = batch
                 enh_ids = enh_ids.to(device)
@@ -545,42 +546,34 @@ def evaluate() -> Optional[Dict[str, object]]:
                 _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
                 M_prime = bx['M_prime']                  # [B, D]
                 zF = bx['zF']                            # [B, d_spec]
-                zG = bx['zG']                            # [B, Dg]
-                zI = bx['zI']                            # [B, Di]
                 y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
                 gamma = torch.sigmoid(M_prime)
                 beta = torch.tanh(M_prime)
 
-                # 构造方向性 α：基于 F 与细胞原型的 RBF 距离；叠加共性校准项
-                if mu_c is not None:
-                    d2 = torch.sum((zF - mu_c.to(zF.device))**2, dim=-1, keepdim=True)
-                    alpha_f = torch.exp(- d2 / max(EvalConfig.ALPHA_TAU_F, 1e-6))  # [B,1]
+                # 原始融合概率（作为基线），注意此处不做任何正向放大
+                y_mod = gamma * y_feat + beta
+                out = backbone.classifier(y_mod)
+                probs_base = torch.sigmoid(out.squeeze(-1))  # [B]
+
+                # 计算特性拒绝度 R_F：相对于所有训练期原型的最大相似度的补集
+                if protos is not None:
+                    C, K, Dspec = protos.size()
+                    P = protos.view(C * K, Dspec)  # [C*K, d_spec]
+                    # pairwise 距离的近似：展开后广播 (B, C*K, d_spec)
+                    # 为避免内存爆炸，这里采用逐块计算（简单实现用矩阵运算）：
+                    d2 = torch.cdist(zF, P, p=2) ** 2  # [B, C*K]
+                    w = torch.exp(- d2 / max(EvalConfig.NEG_TAU_F, 1e-6))  # [B, C*K]
+                    rho_f = torch.max(w, dim=-1, keepdim=True).values  # [B,1]
+                    r_f = 1.0 - rho_f  # [B,1]
                 else:
-                    alpha_f = torch.ones(zF.size(0), 1, device=zF.device)
-                # 共性校准：以批次均值近似 \bar{z}_G，并取非负余弦
-                zG_bar = torch.mean(zG, dim=0, keepdim=True)  # [1,Dg]
-                num = torch.sum(zG * zG_bar, dim=-1, keepdim=True)
-                den = torch.clamp(torch.norm(zG, dim=-1, keepdim=True) * torch.norm(zG_bar, dim=-1, keepdim=True), min=1e-6)
-                s_g = torch.clamp(num / den, min=0.0, max=1.0)  # [B,1]
-                alpha = alpha_f * (EvalConfig.ALPHA_BETA0 + EvalConfig.ALPHA_BETA1 * s_g)  # [B,1]
-                alpha = torch.clamp(alpha, 0.0, 1.0)
+                    r_f = torch.zeros(zF.size(0), 1, device=zF.device)
 
-                # 交互近似 I_approx：用批次标准化的 ||zI|| 经 Sigmoid 映射
-                norm_i = torch.norm(zI, dim=-1, keepdim=True)
-                m_i = torch.mean(norm_i)
-                s_i = torch.std(norm_i) if torch.isfinite(torch.std(norm_i)) else torch.tensor(1.0, device=norm_i.device)
-                i_approx = torch.sigmoid(EvalConfig.I_KAPPA * ( (norm_i - m_i) / (s_i + 1e-6) ))  # [B,1]
-
-                # 方向性 FiLM 融合与交互偏置
-                y_mod_dir = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
-                out = backbone.classifier(y_mod_dir)
-                logits = out.squeeze(-1)
-                probs = torch.sigmoid(logits)
-                probs = torch.clamp(probs + 0.05 * (i_approx.squeeze(-1) - 0.5), 0.0, 1.0)
+                # 纯负校准：最终概率 = 基线概率 - λ_neg * R_F，裁剪到 [0,1]
+                probs_final = torch.clamp(probs_base - EvalConfig.NEG_LAMBDA * r_f.squeeze(-1), 0.0, 1.0)
 
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
-                per_cell[cell]["preds"].append(probs.detach().cpu().numpy())
+                per_cell[cell]["preds"].append(probs_final.detach().cpu().numpy())
                 per_cell[cell]["labels"].append(labels_t.cpu().numpy())
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
