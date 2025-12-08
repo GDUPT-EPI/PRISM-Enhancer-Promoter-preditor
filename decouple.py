@@ -213,9 +213,7 @@ def main():
             gcn_center = extras['gcn_center']
             gcn_margin = extras['gcn_margin']
             gcn_smooth = extras['gcn_smooth']
-            
-            # 环境一致性 (Environmental Consistency): 同一batch属于同一细胞系的特性趋同
-            # 这里利用gcn_smooth作为一致性约束的体现
+            # 将图平滑视为一致性项（图内一致性替代跨批一致性）
             consist_loss = gcn_smooth
 
             # 正交约束：来自FootprintExpert
@@ -274,11 +272,11 @@ def main():
 
         # 记录与绘图
         avg_total = total_loss_epoch / max(1, n_batches)
-        # history['total'].append(avg_total)
-        # history['spec'].append(spec_loss_epoch / max(1, n_batches))
-        # history['adv'].append(adv_loss_epoch / max(1, n_batches))
-        # history['orth'].append(orth_loss_epoch / max(1, n_batches))
-        # history['consist'].append(consist_loss_epoch / max(1, n_batches))
+        history['total'].append(avg_total)
+        history['spec'].append(spec_loss_epoch / max(1, n_batches))
+        history['adv'].append(adv_loss_epoch / max(1, n_batches))
+        history['orth'].append(orth_loss_epoch / max(1, n_batches))
+        history['consist'].append(consist_loss_epoch / max(1, n_batches))
         history['gcn_center'].append(gcn_center_epoch / max(1, n_batches))
         history['gcn_margin'].append(gcn_margin_epoch / max(1, n_batches))
         history['gcn_smooth'].append(gcn_smooth_epoch / max(1, n_batches))

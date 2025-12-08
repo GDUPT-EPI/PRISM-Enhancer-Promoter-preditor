@@ -517,94 +517,49 @@ def evaluate() -> Optional[Dict[str, object]]:
         sampler = _Sampler(idxs, bs)
         loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=prism_collate_fn)
 
-        # ========== 测试时适应 (TTA) 与拒绝策略 ==========
-        # 1. 收集环境特征 M' 的统计量（用于OOD拒绝）
-        m_primes = []
-        with torch.no_grad():
-            # 预跑一轮收集 M' 分布
-            for batch in loader:
-                enh_ids, pr_ids, _, _ = batch
-                enh_ids = enh_ids.to(device)
-                pr_ids = pr_ids.to(device)
+        ADAPT_STEPS = 3
+        ADAPT_LR = 0.05
+        for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
+            enh_ids, pr_ids, cells, labels = batch
+            enh_ids = enh_ids.to(device)
+            pr_ids = pr_ids.to(device)
+            labels_t = labels.to(device)
+            with torch.no_grad():
                 _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
-                m_primes.append(bx['M_prime'].cpu())
-        
-        m_prime_all = torch.cat(m_primes, dim=0)
-        # 计算环境特征的熵（通过softmax模拟概率分布）或模长作为不确定性指标
-        # 简化：使用 M' 的 L2 范数反向衡量置信度（模长越大，特征越显著？）
-        # 或者：利用辅助分类头的最大概率（置信度）
-        # 这里采用数学反思结论：熵最小化。我们计算 M' 经过 softmax 后的熵。
-        probs_m = torch.softmax(m_prime_all, dim=-1)
-        entropy = -(probs_m * torch.log(probs_m + 1e-9)).sum(dim=-1)
-        # 拒绝阈值：熵过高的样本视为背景噪音或OOD
-        # 策略：拒绝熵最高的 10% 样本（视为噪音）
-        threshold_entropy = torch.quantile(entropy, 0.90)
-        
-        valid_indices = (entropy <= threshold_entropy).nonzero(as_tuple=True)[0]
-        # 仅对 valid_indices 对应的样本进行最终预测
-        # 注意：dataset索引需要映射。这里简化处理，直接按loader顺序对应。
-        # 实际上loader顺序是固定的（sampler按idxs顺序切片）。
-        
-        # 2. 正式预测（仅保留通过拒绝策略的样本）
-        current_idx = 0
-        valid_mask_ptr = 0
-        
-        with torch.no_grad():
-            for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
-                enh_ids, pr_ids, cells, labels = batch
-                enh_ids = enh_ids.to(device)
-                pr_ids = pr_ids.to(device)
-                labels_t = labels.to(device)
-                
-                bs_curr = enh_ids.size(0)
-                # 检查当前batch中有哪些样本是valid的
-                # 全局索引范围: [current_idx, current_idx + bs_curr)
-                # 构造当前batch的valid掩码
-                batch_valid_mask = []
-                for i in range(bs_curr):
-                    global_i = current_idx + i
-                    # 检查 global_i 是否在 valid_indices 中
-                    #由于valid_indices是有序的，可以用指针加速，或者直接判断
-                    # 简单方式：构建全局布尔掩码
-                    pass 
-                
-                # 更高效：直接利用之前计算的 entropy 切片
-                batch_entropy = entropy[current_idx : current_idx + bs_curr].to(device)
-                keep_mask = batch_entropy <= threshold_entropy
-                
-                if not keep_mask.any():
-                    current_idx += bs_curr
-                    continue
-                
-                # 仅计算保留样本
-                enh_ids = enh_ids[keep_mask]
-                pr_ids = pr_ids[keep_mask]
-                labels_t = labels_t[keep_mask]
-                
-                if enh_ids.size(0) == 0:
-                    current_idx += bs_curr
-                    continue
-
-                _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
-                M_prime = bx['M_prime']
-                y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
-                gamma = torch.sigmoid(M_prime)
-                beta = torch.tanh(M_prime)
-                if cell not in per_cell:
-                    per_cell[cell] = {"preds": [], "labels": []}
-                # alpha 网格集成，按AUPR择优
-                preds_grid = []
-                for alpha in EvalConfig.ALPHA_GRID:
-                    y_mod = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
-                    out = backbone.classifier(y_mod)
-                    preds_a = torch.sigmoid(out).squeeze(-1).detach().cpu().numpy()
-                    preds_grid.append(preds_a)
-                labs = labels_t.cpu().numpy()
-                # 暂存；待会儿我们在细胞系级汇总进行AUPR选择
-                per_cell[cell]["preds"].append(np.stack(preds_grid, axis=-1))
-                per_cell[cell]["labels"].append(labs)
-                
-                current_idx += bs_curr
+                M_prime_base = bx['M_prime'].detach()
+                y_feat_fixed, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
+                y_feat_fixed = y_feat_fixed.detach()
+            delta = torch.zeros_like(M_prime_base, requires_grad=True)
+            opt_adapt = torch.optim.SGD([delta], lr=ADAPT_LR)
+            for _ in range(ADAPT_STEPS):
+                opt_adapt.zero_grad()
+                M_adapt = M_prime_base + delta
+                gamma_a = torch.sigmoid(M_adapt)
+                beta_a = torch.tanh(M_adapt)
+                y_mod_a = gamma_a * y_feat_fixed + beta_a
+                out_a = backbone.classifier(y_mod_a).squeeze(-1)
+                p_a = torch.sigmoid(out_a)
+                eps = 1e-6
+                ent = -(p_a * torch.log(p_a + eps) + (1 - p_a) * torch.log(1 - p_a + eps)).mean()
+                ent.backward()
+                opt_adapt.step()
+            M_final = M_prime_base + delta.detach()
+            y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
+            gamma = torch.sigmoid(M_final)
+            beta = torch.tanh(M_final)
+            if cell not in per_cell:
+                per_cell[cell] = {"preds": [], "labels": []}
+            # alpha 网格集成，按AUPR择优
+            preds_grid = []
+            for alpha in EvalConfig.ALPHA_GRID:
+                y_mod = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
+                out = backbone.classifier(y_mod)
+                preds_a = torch.sigmoid(out).squeeze(-1).detach().cpu().numpy()
+                preds_grid.append(preds_a)
+            labs = labels_t.cpu().numpy()
+            # 暂存；待会儿我们在细胞系级汇总进行AUPR选择
+            per_cell[cell]["preds"].append(np.stack(preds_grid, axis=-1))
+            per_cell[cell]["labels"].append(labs)
 
         pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
 
