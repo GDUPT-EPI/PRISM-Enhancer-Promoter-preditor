@@ -124,7 +124,7 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')  # 旁路初始权重
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')  # 微调后保存路径
-    FINETUNE_STEPS_PER_CELL = 30  # 每个细胞系进行三步快速微调
+    FINETUNE_STEPS_PER_CELL = 30  # 每个细胞系进行n步微调
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))  # 微调批量（尽可能使用全样本，通过梯度累积实现）
     FINETUNE_LR = 5e-5  # 微调学习率（小步快跑，避免数值震荡）
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
@@ -380,9 +380,14 @@ def finetune_auxiliary_on_test_cells(
         if total_batches <= 0:
             pbar_cells.set_postfix({"cell": cell, "batches": 0})
             continue
-        # 累计间隔设置为将全部批次划分为约 FINETUNE_STEPS_PER_CELL 次参数更新
-        accum_interval = max(1, int(np.ceil(total_batches / float(EvalConfig.FINETUNE_STEPS_PER_CELL))))
-        expected_updates = int(np.ceil(total_batches / float(accum_interval)))
+        update_steps = max(1, int(EvalConfig.FINETUNE_STEPS_PER_CELL))
+        boundaries = []
+        for s in range(1, update_steps):
+            b = int(np.ceil(s * total_batches / float(update_steps)))
+            if b > 0 and b <= total_batches:
+                boundaries.append(b)
+        boundaries = sorted(list(set(boundaries + [total_batches])))
+        expected_updates = update_steps
         optimizer.zero_grad()
         batch_counter = 0
         update_counter = 0
@@ -426,15 +431,15 @@ def finetune_auxiliary_on_test_cells(
                 "accum": f"{batch_counter}/{accum_interval}",
             })
 
-            # 达到累计间隔或最后一批次时执行参数更新，并在外层进度条显示已完成的更新步数
-            if (batch_counter % accum_interval == 0) or (batch_counter == total_batches):
+            # 到达计划边界时执行参数更新
+            if (batch_counter in boundaries):
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
                 optimizer.step()
                 optimizer.zero_grad()
                 update_counter += 1
                 pbar_cells.set_postfix({
                     "cell": cell,
-                    "updates": f"{update_counter}/{expected_updates}",
+                    "updates": f"{min(update_counter, expected_updates)}/{expected_updates}",
                 })
 
         # 该细胞系微调完成后，关闭内层进度条，外层进度条自动前进一格（由迭代驱动）
