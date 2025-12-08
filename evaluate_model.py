@@ -353,13 +353,18 @@ def evaluate() -> Optional[Dict[str, object]]:
     init_path = FinetuneConfig.BYPASS_INIT_PATH
     if os.path.exists(init_path):
         sd = torch.load(init_path, map_location=device)
-        if isinstance(sd, dict) and 'auxiliary' in sd:
-            bypass.load_state_dict(sd['auxiliary'], strict=False)
-        else:
-            try:
-                bypass.load_state_dict(sd, strict=False)
-            except Exception:
-                pass
+        # 兼容不同细胞系数量：只加载形状匹配的权重，跳过类别相关参数
+        def _safe_load_auxiliary_partial(model: AuxiliaryModel, state: dict) -> None:
+            current = model.state_dict()
+            filtered = {}
+            for k, v in state.items():
+                if k in current and tuple(current[k].shape) == tuple(v.shape):
+                    filtered[k] = v
+            model.load_state_dict(filtered, strict=False)
+        if isinstance(sd, dict) and 'auxiliary' in sd and isinstance(sd['auxiliary'], dict):
+            _safe_load_auxiliary_partial(bypass, sd['auxiliary'])
+        elif isinstance(sd, dict):
+            _safe_load_auxiliary_partial(bypass, sd)
     # 2) 冻结除快速适应所需模块外的参数（避免过拟合、提升效率）
     for p in bypass.parameters():
         p.requires_grad = False
@@ -391,8 +396,9 @@ def evaluate() -> Optional[Dict[str, object]]:
             _, extras = bypass(x_en, x_pr, cell_labels=y_cell)
             spec_loss = torch.nn.functional.cross_entropy(extras['spec_logits'], y_cell)
             adv_loss = torch.nn.functional.cross_entropy(extras['adv_logits'], y_cell)
+            # 忽略center项：避免误用同一批的μ导致局部最优；保留smooth/margin
             g_smooth = extras.get('gcn_smooth', torch.tensor(0.0, device=device))
-            g_center = extras.get('gcn_center', torch.tensor(0.0, device=device))
+            g_center = torch.tensor(0.0, device=device)  # 微调阶段不显式聚合到中心
             g_margin = extras.get('gcn_margin', torch.tensor(0.0, device=device))
             total = (
                 FinetuneConfig.FT_SPEC_W * spec_loss +
