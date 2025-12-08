@@ -452,48 +452,59 @@ def evaluate() -> Optional[Dict[str, object]]:
     device = EvalConfig.DEVICE  # 设备
     df, e_seq, p_seq = load_prism_data("test")  # 加载测试数据
     dataset = PRISMDataset(df, e_seq, p_seq)  # 构建数据集
-    bs = EvalConfig.BATCH_SIZE  # 批量大小
-    sampler = CellBatchSampler(dataset, batch_size=bs, shuffle=EvalConfig.SHUFFLE)  # 细胞系批采样器
-    loader = DataLoader(  # 数据加载器
-        dataset=dataset,
-        batch_sampler=sampler,
-        num_workers=EvalConfig.NUM_WORKERS,
-        pin_memory=EvalConfig.PIN_MEMORY,
-        collate_fn=collate_fn,
-    )
     backbone = PRISMBackbone().to(device)  # 模型加载到设备
     _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
-    # 旁路微调并注入主干
-    all_cells = sorted(df['cell_line'].unique().tolist())
-    aux_model = finetune_auxiliary_on_test_cells(dataset, all_cells, device)
-    injected_n = inject_auxiliary_into_backbone(backbone, aux_model)
-    # 再次保存联合权重，便于后续复现与对比
-    try:
-        save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
-        os.makedirs(save_dir, exist_ok=True)
-        torch.save({'backbone': backbone.state_dict(), 'auxiliary': (aux_model.state_dict() if aux_model is not None else None)}, EvalConfig.FINETUNE_SAVE_PATH)
-    except Exception:
-        pass
     backbone.eval()  # 评估模式
-    all_preds: List[np.ndarray] = []  # 汇总预测概率
-    all_labels: List[np.ndarray] = []  # 汇总标签
-    per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}  # 分细胞系缓存
-    with torch.no_grad():  # 关闭梯度
-        for batch in tqdm(loader, desc="Predict domain-kl/test"):  # 迭代批次
-            enh_ids, pr_ids, labels, cells = batch  # 取批
-            enh_ids = enh_ids.to(device)  # 移动设备
-            pr_ids = pr_ids.to(device)  # 移动设备
-            labels_t = labels.to(device)  # 标签设备
-            outputs, _ = backbone(enh_ids, pr_ids)  # 前向预测
-            preds = outputs.squeeze(-1).detach().cpu().numpy()  # 概率
-            labs = labels_t.cpu().numpy()  # 标签
-            all_preds.append(preds)  # 汇总
-            all_labels.append(labs)  # 汇总
-            cell = cells[0] if len(cells) > 0 else "UNKNOWN"  # 细胞系名
-            if cell not in per_cell:  # 初始化细胞系项
-                per_cell[cell] = {"preds": [], "labels": []}
-            per_cell[cell]["preds"].append(preds)  # 添加预测
-            per_cell[cell]["labels"].append(labs)  # 添加标签
+
+    # 逐细胞系：导入 → 微调 → 注入 → 推理
+    all_cells = sorted(df['cell_line'].unique().tolist())
+    per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}
+    all_preds: List[np.ndarray] = []
+    all_labels: List[np.ndarray] = []
+
+    pbar_eval = tqdm(all_cells, desc="Per-cell evaluate", leave=True, dynamic_ncols=True)
+    for cell in pbar_eval:
+        idxs = dataset.cell_line_groups.get(cell, [])
+        if len(idxs) == 0:
+            pbar_eval.set_postfix({"cell": cell, "n": 0})
+            continue
+
+        aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
+        _ = inject_auxiliary_into_backbone(backbone, aux_model)
+
+        # 针对该细胞系构建仅该细胞的数据加载器
+        bs = EvalConfig.BATCH_SIZE
+        def _iter_indices(indices: List[int], bs: int):
+            for i in range(0, len(indices), bs):
+                yield indices[i:i+bs]
+        class _Sampler:
+            def __init__(self, indices: List[int], bs: int):
+                self.indices = indices
+                self.bs = bs
+            def __iter__(self):
+                return _iter_indices(self.indices, self.bs)
+            def __len__(self):
+                return max(1, (len(self.indices) + self.bs - 1) // self.bs)
+        sampler = _Sampler(idxs, bs)
+        loader = DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=EvalConfig.NUM_WORKERS, pin_memory=EvalConfig.PIN_MEMORY, collate_fn=collate_fn)
+
+        with torch.no_grad():
+            for batch in tqdm(loader, desc=f"Predict [{cell}]", leave=False, dynamic_ncols=True):
+                enh_ids, pr_ids, labels, cells = batch
+                enh_ids = enh_ids.to(device)
+                pr_ids = pr_ids.to(device)
+                labels_t = labels.to(device)
+                outputs, _ = backbone(enh_ids, pr_ids)
+                preds = outputs.squeeze(-1).detach().cpu().numpy()
+                labs = labels_t.cpu().numpy()
+                all_preds.append(preds)
+                all_labels.append(labs)
+                if cell not in per_cell:
+                    per_cell[cell] = {"preds": [], "labels": []}
+                per_cell[cell]["preds"].append(preds)
+                per_cell[cell]["labels"].append(labs)
+
+        pbar_eval.set_postfix({"cell": cell, "n": len(idxs)})
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
