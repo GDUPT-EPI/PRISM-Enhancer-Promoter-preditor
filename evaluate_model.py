@@ -124,9 +124,9 @@ class EvalConfig:
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
     AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
     FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
-    FINETUNE_EPOCHS = 30
+    FINETUNE_EPOCHS = 15
     FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
-    FINETUNE_LR = 5e-5  # 微调学习率（小步快跑，避免数值震荡）
+    FINETUNE_LR = 5e-4  # 微调学习率（小步快跑，避免数值震荡）
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
     # 损失权重（与旁路训练保持一致的语义，但数值更保守）
