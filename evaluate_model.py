@@ -22,9 +22,10 @@ from config import (  # 集中配置导入
 )
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler  # 数据加载与采样
 from models.PRISMModel import PRISMBackbone  # 模型主干
-from models.AuxiliaryModel import AuxiliaryModel  # 旁路解耦模型
 from models.pleat.embedding import KMerTokenizer  # K-mer分词器
 from torch.nn.utils.rnn import pad_sequence  # 序列填充
+from models.AuxiliaryModel import AuxiliaryModel  # 旁路网络
+from models.layers.footprint import FootprintExpert  # 正交约束工具
 
 
 def find_optimal_threshold(labels: np.ndarray, predictions: np.ndarray, 
@@ -108,7 +109,7 @@ class EvalConfig:
     SHUFFLE = False  # 评估不打乱
 
     THRESHOLD = 0.3  # 二值化阈值
-    OUTPUT_DIR_NAME = "compete/fff"  # 输出目录名称
+    OUTPUT_DIR_NAME = "compete/ddd"  # 输出目录名称
     PLOT_PR = True  # 是否绘制PR曲线
     PLOT_ROC = True  # 是否绘制ROC曲线
     
@@ -119,32 +120,22 @@ class EvalConfig:
     THRESHOLD_STEPS = 99  # 搜索步数
     PLOT_THRESHOLD_METRICS = True  # 是否绘制阈值-指标曲线
 
-
-class FinetuneConfig:
-    """旁路推理微调配置（仅用于评估阶段，避免污染全局配置）
-
-    说明：每个细胞系视为陌生域，对旁路网络进行快速适应，不使用0/1互作标签。
-    仅使用细胞系标签驱动特性分类（spec）与共性对抗（inv），可选加入图平滑等轻量约束。
-    """
-
-    # 微调步数（每个细胞系）
-    FT_STEPS_PER_CELL = 3
-    # 每个细胞系微调采样数（支持集大小）
-    FT_SAMPLES_PER_CELL = 64
-    # 每步随机采样的批大小
-    FT_BATCH_PER_STEP = 32
-    # 学习率
-    FT_LEARNING_RATE = 2e-4
-    # 损失权重（仅用于微调）
-    FT_SPEC_W = 1.0
-    FT_INV_W = 1.0
-    FT_SMOOTH_W = 0.2
-    FT_CENTER_W = 0.2
-    FT_MARGIN_W = 0.2
-    # 旁路初始权重路径（训练阶段的保存地址）
-    BYPASS_INIT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
-    # 微调后权重保存路径
-    FT_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
+    # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
+    AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')  # 旁路初始权重
+    FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')  # 微调后保存路径
+    FINETUNE_STEPS_PER_CELL = 3  # 每个细胞系进行三步快速微调
+    FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))  # 微调批量（尽可能使用全样本，通过梯度累积实现）
+    FINETUNE_LR = 5e-5  # 微调学习率（小步快跑，避免数值震荡）
+    FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
+    GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
+    # 损失权重（与旁路训练保持一致的语义，但数值更保守）
+    BYPASS_SPEC_WEIGHT = 1.0  # 特性分类损失权重（使模型理解细胞系特征）
+    BYPASS_INV_WEIGHT = 1.0  # 领域对抗损失权重（G子空间去域）
+    BYPASS_ORTHO_WEIGHT = 0.2  # 三元子空间正交约束权重
+    BYPASS_CONSIST_WEIGHT = 0.2  # 一致性损失权重（采用图平滑替代跨批一致性）
+    GCN_CENTER_LOSS_W = 0.2  # 图中心原型约束权重
+    GCN_MARGIN_LOSS_W = 0.2  # 图边界间隔约束权重
+    GCN_SMOOTH_LOSS_W = 0.4  # 图平滑一致性约束权重
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -204,53 +195,159 @@ def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, to
     return enh_ids, pr_ids, labels_t, cells  # 返回拼接结果
 
 
-def _encode_ids_for_sequences(enh_seqs: List[str], pr_seqs: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
-    """将序列列表编码为固定长度的token ID张量（不返回标签）。
+# ========================= 旁路微调工具函数 =========================
+def _build_cell_label_tensor(cells: List[str], all_cells: List[str]) -> torch.Tensor:
+    """将细胞系名称映射为索引张量
 
-    与 `collate_fn` 的长度与PAD策略一致，保证与主干/旁路的卷积池化层匹配。
+    说明：仅用于旁路网络的特性/对抗损失，不涉及EP互作标签，避免数据泄露。
     """
-    tokenizer = KMerTokenizer()
-    enh_ids_list = [tokenizer.encode(s) for s in enh_seqs]
-    pr_ids_list = [tokenizer.encode(s) for s in pr_seqs]
-    K = CNN_KERNEL_SIZE
-    P = POOL_KERNEL_SIZE
-    pad_id = DNA_EMBEDDING_PADDING_IDX
-    min_req = K + P - 1
-    max_len_en = max(int(x.size(0)) for x in enh_ids_list) if enh_ids_list else min_req
-    max_len_pr = max(int(x.size(0)) for x in pr_ids_list) if pr_ids_list else min_req
-    adj_base_en = max(1, max_len_en - (K - 1))
-    adj_base_pr = max(1, max_len_pr - (K - 1))
-    target_len_en = (K - 1) + ((adj_base_en + P - 1) // P) * P
-    target_len_pr = (K - 1) + ((adj_base_pr + P - 1) // P) * P
-    target_len_en = max(min_req, min(target_len_en, MAX_ENHANCER_LENGTH))
-    target_len_pr = max(min_req, min(target_len_pr, MAX_PROMOTER_LENGTH))
-    proc_en = []
-    for ids in enh_ids_list:
-        L = int(ids.size(0))
-        if L > target_len_en:
-            s = (L - target_len_en) // 2
-            ids = ids[s:s + target_len_en]
-        proc_en.append(ids)
-    proc_pr = []
-    for ids in pr_ids_list:
-        L = int(ids.size(0))
-        if L > target_len_pr:
-            s = (L - target_len_pr) // 2
-            ids = ids[s:s + target_len_pr]
-        proc_pr.append(ids)
-    enh_ids = pad_sequence(proc_en, batch_first=True, padding_value=pad_id)
-    pr_ids = pad_sequence(proc_pr, batch_first=True, padding_value=pad_id)
-    if enh_ids.size(1) < target_len_en:
-        enh_ids = torch.nn.functional.pad(enh_ids, (0, target_len_en - enh_ids.size(1)), value=pad_id)
-    if pr_ids.size(1) < target_len_pr:
-        pr_ids = torch.nn.functional.pad(pr_ids, (0, target_len_pr - pr_ids.size(1)), value=pad_id)
-    return enh_ids, pr_ids
-
-
-def _build_cell_label_tensor(cells: List[str], name_to_idx: Dict[str, int]) -> torch.Tensor:
-    """将细胞系名称映射为索引张量（用于旁路spec/adv损失）"""
-    idxs = [int(name_to_idx.get(x, 0)) for x in cells]
+    name_to_idx = {c: i for i, c in enumerate(all_cells)}
+    idxs = [name_to_idx.get(x, 0) for x in cells]
     return torch.tensor(idxs, dtype=torch.long)
+
+
+def _load_auxiliary_checkpoint(aux_model: AuxiliaryModel, path: str, device: torch.device) -> bool:
+    """加载旁路网络初始权重
+
+    支持保存格式：{'auxiliary': state_dict} 或直接 state_dict。
+    """
+    try:
+        if not os.path.exists(path):
+            return False
+        sd = torch.load(path, map_location=device)
+        if isinstance(sd, dict) and 'auxiliary' in sd:
+            aux_model.load_state_dict(sd['auxiliary'], strict=False)
+            return True
+        elif isinstance(sd, dict):
+            aux_model.load_state_dict(sd, strict=False)
+            return True
+        else:
+            aux_model.load_state_dict(sd, strict=False)
+            return True
+    except Exception:
+        return False
+
+
+def _cell_subset_loader(dataset: PRISMDataset, cell: str, batch_size: int) -> DataLoader:
+    """为指定细胞系创建仅包含该细胞的DataLoader（评估期微调使用）
+
+    不读取EP互作标签，不参与损失计算，仅用于构建输入序列与细胞系索引。
+    """
+    idxs = dataset.cell_line_groups.get(cell, [])
+    # 自定义简单采样器：顺序遍历该细胞系全部样本，按batch切片
+    def _iter_indices(indices: List[int], bs: int):
+        for i in range(0, len(indices), bs):
+            yield indices[i:i+bs]
+    class _Sampler:
+        def __init__(self, indices: List[int], bs: int):
+            self.indices = indices
+            self.bs = bs
+        def __iter__(self):
+            return _iter_indices(self.indices, self.bs)
+        def __len__(self):
+            return max(1, (len(self.indices) + self.bs - 1) // self.bs)
+    sampler = _Sampler(idxs, batch_size)
+    return DataLoader(dataset=dataset, batch_sampler=sampler, num_workers=0, pin_memory=True, collate_fn=collate_fn)
+
+
+def _compute_aux_losses(aux_model: AuxiliaryModel, enh_ids: torch.Tensor, pr_ids: torch.Tensor, cell_t: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    """计算旁路网络微调阶段使用的损失项
+
+    仅使用细胞系监督：spec/adv 与图约束；不涉及EP互作0/1标签，避免泄露。
+    """
+    pred_prob, extras = aux_model(enh_ids, pr_ids, cell_labels=cell_t)
+    spec_loss = extras['spec_loss']
+    adv_loss = extras['adv_loss']
+    gcn_center = extras['gcn_center']
+    gcn_margin = extras['gcn_margin']
+    gcn_smooth = extras['gcn_smooth']
+    # 正交约束：使用FootprintExpert提供的三元子空间约束
+    fp_enh: FootprintExpert = aux_model.fp_enh
+    fp_pr: FootprintExpert = aux_model.fp_pr
+    orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
+    orth_loss = orth_loss + 0.0 * fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
+
+    total = (
+        EvalConfig.BYPASS_SPEC_WEIGHT * spec_loss +
+        EvalConfig.BYPASS_INV_WEIGHT * adv_loss +
+        EvalConfig.BYPASS_ORTHO_WEIGHT * orth_loss +
+        EvalConfig.BYPASS_CONSIST_WEIGHT * gcn_smooth +
+        EvalConfig.GCN_CENTER_LOSS_W * gcn_center +
+        EvalConfig.GCN_MARGIN_LOSS_W * gcn_margin +
+        EvalConfig.GCN_SMOOTH_LOSS_W * gcn_smooth
+    )
+    return total, extras
+
+
+def finetune_auxiliary_on_test_cells(
+    dataset: PRISMDataset,
+    all_cells: List[str],
+    device: torch.device,
+) -> Optional[AuxiliaryModel]:
+    """按细胞系进行三步快速微调（尽可能覆盖全样本，使用梯度累积），返回微调后的旁路模型
+
+    流程：
+    1. 构建旁路网络并加载初始权重
+    2. 对每个细胞系：遍历该细胞系全部样本，进行梯度累积，仅在累计的间隔上执行 `optimizer.step()` 共3次
+    3. 不使用EP互作标签；仅细胞系监督与图一致性、正交约束
+    4. 保存最终微调权重
+    """
+    if len(all_cells) == 0:
+        return None
+    aux_model = AuxiliaryModel(num_cell_types=len(all_cells)).to(device)
+    _ = _load_auxiliary_checkpoint(aux_model, EvalConfig.AUX_CHECKPOINT_PATH, device)
+    aux_model.train()
+    optimizer = torch.optim.AdamW(aux_model.parameters(), lr=EvalConfig.FINETUNE_LR, weight_decay=EvalConfig.FINETUNE_WEIGHT_DECAY)
+
+    for cell in all_cells:
+        loader = _cell_subset_loader(dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE)
+        # 计算累计间隔：确保总更新步数约为3步
+        total_batches = len(loader)
+        if total_batches <= 0:
+            continue
+        accum_interval = max(1, int(np.ceil(total_batches / float(EvalConfig.FINETUNE_STEPS_PER_CELL))))
+        optimizer.zero_grad()
+        batch_counter = 0
+        for batch in loader:
+            enh_ids, pr_ids, labels_t, cells = batch
+            # 构造细胞系监督索引
+            cell_t = _build_cell_label_tensor(cells, all_cells)
+            enh_ids = enh_ids.to(device)
+            pr_ids = pr_ids.to(device)
+            cell_t = cell_t.to(device)
+            # 计算损失（不使用labels_t）
+            loss, _ = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+            loss.backward()
+            batch_counter += 1
+            if (batch_counter % accum_interval == 0) or (batch_counter == total_batches):
+                torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
+                optimizer.step()
+                optimizer.zero_grad()
+
+    # 保存微调后的权重
+    save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save({'auxiliary': aux_model.state_dict()}, EvalConfig.FINETUNE_SAVE_PATH)
+    return aux_model
+
+
+def inject_auxiliary_into_backbone(backbone: PRISMBackbone, aux_model: AuxiliaryModel) -> int:
+    """将旁路网络中与主干结构一致的参数注入到主干（embedding/CNN），返回成功注入的参数个数
+
+    注入范围：`enh_embedding`, `pr_embedding`, `enh_cnn`, `pr_cnn`
+    """
+    if aux_model is None:
+        return 0
+    aux_sd = aux_model.state_dict()
+    back_sd = backbone.state_dict()
+    injected = 0
+    for k in list(aux_sd.keys()):
+        if (k.startswith('enh_embedding') or k.startswith('pr_embedding') or k.startswith('enh_cnn') or k.startswith('pr_cnn')) and (k in back_sd):
+            if aux_sd[k].shape == back_sd[k].shape:
+                back_sd[k] = aux_sd[k]
+                injected += 1
+    backbone.load_state_dict(back_sd, strict=False)
+    return injected
 
 
 def _find_latest_checkpoint(save_dir: str) -> Tuple[int, Optional[str], Optional[str]]:
@@ -342,102 +439,18 @@ def evaluate() -> Optional[Dict[str, object]]:
     )
     backbone = PRISMBackbone().to(device)  # 模型加载到设备
     _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
-    backbone.eval()  # 评估模式
-
-    # ========== 旁路网络：加载→按细胞系快速微调（三步）→保存微调权重 ==========
-    # 1) 细胞系标签映射（用于旁路spec/adv损失）
-    unique_cells = dataset.cell_lines if hasattr(dataset, 'cell_lines') else sorted(df['cell_line'].unique().tolist())
-    name_to_idx = {c: i for i, c in enumerate(unique_cells)}
-    num_cells = len(unique_cells)
-    bypass = AuxiliaryModel(num_cell_types=num_cells).to(device)
-    init_path = FinetuneConfig.BYPASS_INIT_PATH
-    if os.path.exists(init_path):
-        sd = torch.load(init_path, map_location=device)
-        # 兼容不同细胞系数量：只加载形状匹配的权重，跳过类别相关参数
-        def _safe_load_auxiliary_partial(model: AuxiliaryModel, state: dict) -> None:
-            current = model.state_dict()
-            filtered = {}
-            for k, v in state.items():
-                if k in current and tuple(current[k].shape) == tuple(v.shape):
-                    filtered[k] = v
-            model.load_state_dict(filtered, strict=False)
-        if isinstance(sd, dict) and 'auxiliary' in sd and isinstance(sd['auxiliary'], dict):
-            _safe_load_auxiliary_partial(bypass, sd['auxiliary'])
-        elif isinstance(sd, dict):
-            _safe_load_auxiliary_partial(bypass, sd)
-        print(f"已加载旁路初始权重(部分键): {init_path}")
-    # 2) 冻结除快速适应所需模块外的参数（避免过拟合、提升效率）
-    for p in bypass.parameters():
-        p.requires_grad = False
-    for mod in [bypass.spec_head, bypass.adv_head, bypass.graph_ctx, bypass.ctx_mlp]:
-        for p in mod.parameters():
-            p.requires_grad = True
-    bypass.train()
-    # 3) 每个细胞系进行三步微调（不使用0/1互作标签）
-    print("开始按细胞系微调旁路网络（三步/细胞系，禁用EP互作标签）")
-    opt = torch.optim.AdamW(filter(lambda t: t.requires_grad, bypass.parameters()), lr=FinetuneConfig.FT_LEARNING_RATE)
-    for cell_name, indices in tqdm(dataset.cell_line_groups.items(), desc="Finetune per cell", leave=True):
-        # 支持集采样：全量采集该细胞系的所有样本作为支持集（避免信息不足）
-        sel = indices
-        tqdm.write(f"细胞系: {cell_name} | 支持集样本数: {len(sel)} | 步数: {FinetuneConfig.FT_STEPS_PER_CELL}")
-        # 取原始序列
-        enh_list = [dataset.e_sequences[dataset.pairs_df.iloc[i]['enhancer_name']] for i in sel]
-        pr_list = [dataset.p_sequences[dataset.pairs_df.iloc[i]['promoter_name']] for i in sel]
-        enh_ids, pr_ids = _encode_ids_for_sequences(enh_list, pr_list)
-        enh_ids = enh_ids.to(device)
-        pr_ids = pr_ids.to(device)
-        cell_idx = name_to_idx.get(cell_name, 0)
-        # 三步微调：每步使用全量支持集进行一次更新（确保充分利用支持样本）
-        B_total = enh_ids.size(0)
-        for step in tqdm(range(FinetuneConfig.FT_STEPS_PER_CELL), desc=f"{cell_name} steps", leave=False):
-            bs = B_total
-            perm = torch.arange(B_total, device=device)
-            x_en = enh_ids  # 全量
-            x_pr = pr_ids  # 全量
-            y_cell = torch.full((bs,), cell_idx, dtype=torch.long, device=device)
-            opt.zero_grad()
-            _, extras = bypass(x_en, x_pr, cell_labels=y_cell)
-            # 使用模型内部计算的一致损失项，保持与训练脚本一致
-            spec_loss = extras.get('spec_loss', torch.nn.functional.cross_entropy(extras['spec_logits'], y_cell))
-            adv_loss = extras.get('adv_loss', torch.nn.functional.cross_entropy(extras['adv_logits'], y_cell))
-            # 忽略center项：避免误用同一批的μ导致局部最优；保留smooth/margin
-            g_smooth = extras.get('gcn_smooth', torch.tensor(0.0, device=device))
-            g_center = extras.get('gcn_center', torch.tensor(0.0, device=device))
-            g_margin = extras.get('gcn_margin', torch.tensor(0.0, device=device))
-            total = (
-                FinetuneConfig.FT_SPEC_W * spec_loss +
-                FinetuneConfig.FT_INV_W * adv_loss +
-                FinetuneConfig.FT_SMOOTH_W * g_smooth +
-                FinetuneConfig.FT_CENTER_W * g_center +
-                FinetuneConfig.FT_MARGIN_W * g_margin
-            )
-            total.backward()
-            torch.nn.utils.clip_grad_norm_(filter(lambda t: t.requires_grad, bypass.parameters()), max_norm=1.0)
-            opt.step()
-            # 输出每步的微调状态（不涉及EP标签）
-            try:
-                spec_acc = float(extras.get('spec_acc', torch.tensor(0.0)).detach().item())
-            except Exception:
-                spec_acc = 0.0
-            try:
-                adv_acc = float(extras.get('adv_acc', torch.tensor(0.0)).detach().item())
-            except Exception:
-                adv_acc = 0.0
-            tqdm.write(f"  [Step {step+1}/{FinetuneConfig.FT_STEPS_PER_CELL}] spec={float(spec_loss.detach().item()):.4f}, adv={float(adv_loss.detach().item()):.4f}, smooth={float(g_smooth.detach().item()):.4f}, center={float(g_center.detach().item()):.4f}, margin={float(g_margin.detach().item()):.4f}, spec_acc={spec_acc:.3f}, adv_acc={adv_acc:.3f}")
-    # 4) 保存微调后的旁路权重
-    ft_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune')
-    os.makedirs(ft_dir, exist_ok=True)
-    torch.save({'auxiliary': bypass.state_dict()}, FinetuneConfig.FT_SAVE_PATH)
-    print(f"旁路微调完成，已保存权重: {FinetuneConfig.FT_SAVE_PATH}")
-    bypass.eval()
-    # 正式导入微调后的权重（确保推理使用微调结果）
+    # 旁路微调并注入主干
+    all_cells = sorted(df['cell_line'].unique().tolist())
+    aux_model = finetune_auxiliary_on_test_cells(dataset, all_cells, device)
+    injected_n = inject_auxiliary_into_backbone(backbone, aux_model)
+    # 再次保存联合权重，便于后续复现与对比
     try:
-        sd_ft = torch.load(FinetuneConfig.FT_SAVE_PATH, map_location=device)
-        if isinstance(sd_ft, dict) and 'auxiliary' in sd_ft and isinstance(sd_ft['auxiliary'], dict):
-            bypass.load_state_dict(sd_ft['auxiliary'], strict=False)
-            print("已正式导入微调后的旁路权重用于推理")
+        save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save({'backbone': backbone.state_dict(), 'auxiliary': (aux_model.state_dict() if aux_model is not None else None)}, EvalConfig.FINETUNE_SAVE_PATH)
     except Exception:
         pass
+    backbone.eval()  # 评估模式
     all_preds: List[np.ndarray] = []  # 汇总预测概率
     all_labels: List[np.ndarray] = []  # 汇总标签
     per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}  # 分细胞系缓存
@@ -446,16 +459,9 @@ def evaluate() -> Optional[Dict[str, object]]:
             enh_ids, pr_ids, labels, cells = batch  # 取批
             enh_ids = enh_ids.to(device)  # 移动设备
             pr_ids = pr_ids.to(device)  # 移动设备
-            labels_t = labels.to(device)  # 标签设备（仅用于评估，不用于微调）
-            # 使用旁路M'进行FiLM调制后再分类
-            y_feat, _ = backbone.extract_pooled_feature(enh_ids, pr_ids)
-            _, bx = bypass(enh_ids, pr_ids, cell_labels=None)  # 推理时不使用细胞标签
-            M_prime = bx['M_prime']  # [B, OUT_CHANNELS]
-            gamma = torch.sigmoid(M_prime)
-            beta = torch.tanh(M_prime)
-            y_mod = gamma * y_feat + beta
-            outputs = backbone.classifier(y_mod)
-            preds = torch.sigmoid(outputs).squeeze(-1).detach().cpu().numpy()  # 概率
+            labels_t = labels.to(device)  # 标签设备
+            outputs, _ = backbone(enh_ids, pr_ids)  # 前向预测
+            preds = outputs.squeeze(-1).detach().cpu().numpy()  # 概率
             labs = labels_t.cpu().numpy()  # 标签
             all_preds.append(preds)  # 汇总
             all_labels.append(labs)  # 汇总
