@@ -365,6 +365,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             _safe_load_auxiliary_partial(bypass, sd['auxiliary'])
         elif isinstance(sd, dict):
             _safe_load_auxiliary_partial(bypass, sd)
+        print(f"已加载旁路初始权重(部分键): {init_path}")
     # 2) 冻结除快速适应所需模块外的参数（避免过拟合、提升效率）
     for p in bypass.parameters():
         p.requires_grad = False
@@ -373,10 +374,12 @@ def evaluate() -> Optional[Dict[str, object]]:
             p.requires_grad = True
     bypass.train()
     # 3) 每个细胞系进行三步微调（不使用0/1互作标签）
+    print("开始按细胞系微调旁路网络（三步/细胞系，禁用EP互作标签）")
     opt = torch.optim.AdamW(filter(lambda t: t.requires_grad, bypass.parameters()), lr=FinetuneConfig.FT_LEARNING_RATE)
     for cell_name, indices in dataset.cell_line_groups.items():
         # 支持集采样
         sel = indices[:FinetuneConfig.FT_SAMPLES_PER_CELL]
+        print(f"细胞系: {cell_name} | 支持集样本数: {len(sel)} | 步数: {FinetuneConfig.FT_STEPS_PER_CELL}")
         # 取原始序列
         enh_list = [dataset.e_sequences[dataset.pairs_df.iloc[i]['enhancer_name']] for i in sel]
         pr_list = [dataset.p_sequences[dataset.pairs_df.iloc[i]['promoter_name']] for i in sel]
@@ -414,7 +417,16 @@ def evaluate() -> Optional[Dict[str, object]]:
     ft_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune')
     os.makedirs(ft_dir, exist_ok=True)
     torch.save({'auxiliary': bypass.state_dict()}, FinetuneConfig.FT_SAVE_PATH)
+    print(f"旁路微调完成，已保存权重: {FinetuneConfig.FT_SAVE_PATH}")
     bypass.eval()
+    # 正式导入微调后的权重（确保推理使用微调结果）
+    try:
+        sd_ft = torch.load(FinetuneConfig.FT_SAVE_PATH, map_location=device)
+        if isinstance(sd_ft, dict) and 'auxiliary' in sd_ft and isinstance(sd_ft['auxiliary'], dict):
+            bypass.load_state_dict(sd_ft['auxiliary'], strict=False)
+            print("已正式导入微调后的旁路权重用于推理")
+    except Exception:
+        pass
     all_preds: List[np.ndarray] = []  # 汇总预测概率
     all_labels: List[np.ndarray] = []  # 汇总标签
     per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}  # 分细胞系缓存
