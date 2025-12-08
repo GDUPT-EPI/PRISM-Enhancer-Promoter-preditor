@@ -373,6 +373,119 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         result = self.classifier(y)
         return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
 
+    def extract_pooled_feature(
+        self,
+        enhancer_ids: torch.Tensor,
+        promoter_ids: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """提取主干网络的池化特征用于FiLM调制
+
+        输入DNA ID序列，执行与`forward`同样的编码与注意力流程，
+        在分类器之前返回池化后的特征`y`，以及自适应注意力损失`total_adaptive_loss`。
+
+        Args:
+            enhancer_ids: 增强子ID，形状`[B, L_en]`
+            promoter_ids: 启动子ID，形状`[B, L_pr]`
+
+        Returns:
+            (y, total_adaptive_loss):
+                - y: 分类器输入的池化特征，形状`[B, OUT_CHANNELS]`
+                - total_adaptive_loss: 自适应注意力损失标量
+        """
+        K = CNN_KERNEL_SIZE
+        P = POOL_KERNEL_SIZE
+        min_required_length = K + P - 1
+        if enhancer_ids.size(1) < min_required_length:
+            enhancer_ids = F.pad(enhancer_ids, (0, min_required_length - enhancer_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
+        if promoter_ids.size(1) < min_required_length:
+            promoter_ids = F.pad(promoter_ids, (0, min_required_length - promoter_ids.size(1)), value=DNA_EMBEDDING_PADDING_IDX)
+
+        embed_en = self.enh_embedding(enhancer_ids)
+        embed_pr = self.pr_embedding(promoter_ids)
+        enh = self.enh_cnn(embed_en.permute(0, 2, 1))
+        pr = self.pr_cnn(embed_pr.permute(0, 2, 1))
+        enh = enh.permute(2, 0, 1)
+        pr = pr.permute(2, 0, 1)
+
+        B_en = enhancer_ids.size(0)
+        L_en_orig = enhancer_ids.size(1)
+        L_en = enh.size(0)
+        pad_en = (enhancer_ids == DNA_EMBEDDING_PADDING_IDX)
+        enh_pad_mask = torch.zeros(B_en, L_en, dtype=torch.bool, device=enhancer_ids.device)
+        for j in range(L_en):
+            s = j * POOL_KERNEL_SIZE
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_en_orig - 1)
+            enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)
+        enh_attn_mask = torch.zeros(B_en, 1, L_en, L_en, device=enhancer_ids.device, dtype=torch.float32)
+        if enh_pad_mask.any():
+            mask_cols = enh_pad_mask
+            for b in range(B_en):
+                cols = mask_cols[b]
+                if cols.any():
+                    enh_attn_mask[b, 0, :, cols] = float('-inf')
+        pr = pr  # 保持同名变量
+        B_pr = promoter_ids.size(0)
+        L_pr_orig = promoter_ids.size(1)
+        L_pr = pr.size(0)
+        pad_pr = (promoter_ids == DNA_EMBEDDING_PADDING_IDX)
+        pr_pad_mask = torch.zeros(B_pr, L_pr, dtype=torch.bool, device=promoter_ids.device)
+        for j in range(L_pr):
+            s = j * POOL_KERNEL_SIZE
+            e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_pr_orig - 1)
+            pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)
+        pr_attn_mask = torch.zeros(B_pr, 1, L_pr, L_pr, device=promoter_ids.device, dtype=torch.float32)
+        if pr_pad_mask.any():
+            for b in range(B_pr):
+                cols = pr_pad_mask[b]
+                if cols.any():
+                    pr_attn_mask[b, 0, :, cols] = float('-inf')
+
+        enh_pre = self.pre_enh_attn(enh.permute(1, 0, 2), attention_mask=enh_attn_mask)
+        enh = enh_pre.permute(1, 0, 2)
+        pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)
+        pr = pr_pre.permute(1, 0, 2)
+
+        att1, _ = self.cross_attn_1(enh, pr, pr, key_padding_mask=pr_pad_mask)
+        att1 = self.cross_attn_1_dropout(att1)
+        enh_x1 = enh + att1
+
+        total_adaptive_loss = 0.0
+        enh_source = enh
+        x_enh = enh
+        for i, layer in enumerate(self.cbat_layers):
+            if i == 0:
+                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask, residual_input=enh_source)
+            else:
+                x_enh, layer_loss = layer(x_enh, src_mask=enh_attn_mask)
+            total_adaptive_loss += layer_loss
+        pr_source = pr
+        x_pr = pr
+        for i, layer in enumerate(self.pr_cbat_layers):
+            if i == 0:
+                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask, residual_input=pr_source)
+            else:
+                x_pr, layer_loss_pr = layer(x_pr, src_mask=pr_attn_mask)
+            total_adaptive_loss += layer_loss_pr
+
+        att2, _ = self.cross_attn_2(x_enh, x_pr, x_pr, key_padding_mask=pr_pad_mask)
+        att2 = self.cross_attn_2_dropout(att2)
+        enh = enh_x1 + att2
+
+        post_out, post_loss = self.post_cbat(
+            enh.permute(1, 0, 2),
+            attention_mask=enh_attn_mask,
+            position_ids=None,
+            return_loss=True,
+        )
+        total_adaptive_loss += post_loss
+        enh = post_out.permute(1, 0, 2)
+
+        x_seq = enh.permute(1, 0, 2)
+        y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
+        y = self.seq_pool_dropout(y)
+        y = self.classifier_dropout(y)
+        return y, total_adaptive_loss
+
     # 掩码相关逻辑已移除
 
     def compute_loss(  # 计算损失

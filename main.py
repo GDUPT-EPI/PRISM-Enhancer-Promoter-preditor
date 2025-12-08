@@ -1,13 +1,3 @@
-"""
-旁路解耦训练入口（main）
-
-设计说明：
-- 采用 `AuxiliaryModel` 获取子空间 `[zG, zF, zI]` 与整体特征 `M'`；
-- 一致性约束来自图平滑（GCN拉普拉斯），替代基于批次的噪声一致性；
-- 训练流程遵循《解耦对抗算子.md》，包含特性鉴别、域对抗、正交约束与图一致性；
-- 支持从 `save_model/bypass/aux_epoch_5.pth` 导入旁路权重继续训练；
-- 严格遵循集中配置与统一词表管理（6-mer，词表大小4100）。
-"""
 from models.pleat.embedding import KMerTokenizer
 from config import *
 from config import PRISM_SAVE_MODEL_DIR, PRISM_BATCH_SIZE
@@ -15,6 +5,8 @@ from data_loader import load_prism_data, PRISMDataset, RandomBatchSampler
 import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
+from models.PRISMModel import PRISMBackbone
+from models.AuxiliaryModel import AuxiliaryModel
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 import torch
@@ -23,20 +15,13 @@ from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 import re
 import xml.etree.ElementTree as ET
-from models.AuxiliaryModel import AuxiliaryModel
-from models.layers.footprint import FootprintExpert
 
 device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
 
 
 # 配置日志系统
 def setup_logging():
-    """
-    配置日志系统
-
-    Returns:
-        logging.Logger: 已初始化的中文日志记录器
-    """
+    """配置日志系统"""
     log_filename = os.path.join(LOG_DIR, f"prism_pretrain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")  # 日志文件路径
     log_format = '%(asctime)s - %(levelname)s - %(message)s'  # 日志格式
     logging.basicConfig(  # 基础配置
@@ -58,8 +43,7 @@ logger.info(f"预处理线程数: {PREPROCESS_NUM_THREADS}")  # 预处理线程�
 
 
 def prism_collate_fn(batch):
-    """
-    PRISM批处理拼接函数（统一词表管理，6-mer，词表大小4100）
+    """PRISM批处理拼接函数
 
     输入项: `(enhancer_seq, promoter_seq, cell_line, label)`
 
@@ -189,207 +173,206 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
     return latest_epoch
 
 
-def build_cell_label_tensor(cells, all_cells):
-    """
-    将细胞系名称映射为索引张量
+# 过时的MLM验证流程已移除
 
-    Args:
-        cells (list[str]): 当前批次的细胞系名称
-        all_cells (list[str]): 训练集或XML定义的全部细胞系
 
-    Returns:
-        torch.Tensor: 细胞标签索引，形状 `[B]`
-    """
-    name_to_idx = {c: i for i, c in enumerate(all_cells)}
-    idxs = [name_to_idx.get(x, 0) for x in cells]
-    return torch.tensor(idxs, dtype=torch.long)
+# 过时的可分性验证流程已移除
 
 
 def main():  # 主函数
-    """
-    入口函数：加载旁路模型权重并进行解耦对抗训练
-
-    流程遵循《解耦对抗算子.md》：
-    - 使用 `AuxiliaryModel`，得到子空间 `[zG, zF, zI]` 与整体特征 `M'`
-    - 采用特性鉴别损失(F→cell)、域对抗损失(GRL(G)→cell)、正交约束与图一致性约束(GCN平滑)
-    - 从 `save_model/bypass/aux_epoch_5.pth` 导入权重继续训练
-    """
-    logger.info("=" * 80)
-    logger.info("旁路解耦训练开始 (加载已保存的旁路模型权重)")
-    logger.info("=" * 80)
-
-    # 加载PRISM特供数据（作为旁路训练的序列来源）
-    logger.info("加载训练数据 (domain-kl)...")
-    train_pairs_df, train_e_seqs, train_p_seqs = load_prism_data("train")
-    logger.info(f"训练样本数: {len(train_pairs_df)}")
-    logger.info(f"训练细胞系: {', '.join(sorted(train_pairs_df['cell_line'].unique()))}")
-
-    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())
-
-    # 创建数据集与加载器
-    train_dataset = PRISMDataset(train_pairs_df, train_e_seqs, train_p_seqs)
-    train_sampler = RandomBatchSampler(train_dataset, batch_size=BYPASS_BATCH_SIZE, shuffle=True)
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_sampler=train_sampler,
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-        collate_fn=prism_collate_fn,
+    """入口函数"""
+    logger.info("=" * 80)  # 分隔线
+    logger.info("PRISM预训练开始 (Domain-KL数据)")  # 记录日志
+    logger.info("=" * 80)  # 分隔线
+    
+    # 加载PRISM特供数据
+    logger.info("加载训练数据 (domain-kl)...")  # 记录日志
+    train_pairs_df, train_e_seqs, train_p_seqs = load_prism_data("train")  # 加载训练数据
+    logger.info(f"训练样本数: {len(train_pairs_df)}")  # 记录日志
+    logger.info(f"训练细胞系: {', '.join(sorted(train_pairs_df['cell_line'].unique()))}")  # 记录日志
+    
+    unique_cells_train = sorted(train_pairs_df['cell_line'].unique())  # 获取唯一细胞系
+    
+    # 创建数据集
+    train_dataset = PRISMDataset(train_pairs_df, train_e_seqs, train_p_seqs)  # 创建训练数据集
+    
+    train_sampler = RandomBatchSampler(train_dataset, batch_size=PRISM_BATCH_SIZE, shuffle=True)
+    
+    # 创建数据加载器
+    logger.info("创建数据加载器...")  # 记录日志
+    train_loader = DataLoader(  # 创建数据加载器
+        dataset=train_dataset,  # 数据集
+        batch_sampler=train_sampler,  # 采样器
+        num_workers=NUM_WORKERS,  # 工作进程数
+        pin_memory=True,  # 固定内存
+        collate_fn=prism_collate_fn,  # 批处理函数
     )
+    
+    val_loader = None  # 验证加载器为空
+    
+    # 创建模型
+    logger.info("创建PRISM模型...")  # 记录日志
+    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")  # 细胞类型XML路径
+    def load_cell_types(path: str):  # 加载细胞类型函数
+        if os.path.exists(path):  # 如果文件存在
+            try:  # 尝试解析
+                root = ET.parse(path).getroot()  # 解析XML
+                names = []  # 名称列表
+                for node in root.findall(".//type"):  # 遍历类型节点
+                    name = node.get("name")  # 获取名称属性
+                    if name:  # 如果名称不为空
+                        names.append(name.strip())  # 去除空白并收集
+                names = [n for n in names if n]  # 过滤空名称
+                if names:  # 如果有名称
+                    return names  # 返回名称列表
+            except Exception:  # 捕获异常
+                pass  # 忽略
+        return []  # 文件不存在或解析失败时返回空列表
+    fixed_cells = load_cell_types(xml_path)  # 加载固定细胞类型
+    if not fixed_cells:  # 如果没有固定细胞类型
+        fixed_cells = unique_cells_train  # 使用训练数据中的唯一细胞类型
+    label_map = {c: i for i, c in enumerate(fixed_cells)}  # 创建标签映射
+    other_id = label_map.get("OTHER", None)  # 获取OTHER标签ID
+    num_cells = len(fixed_cells)  # 细胞类型数量
+    model = PRISMBackbone(num_classes=num_cells).to(device)  # 创建模型
+    model = model.to(device)  # 移动到设备
 
-    # 细胞类型集合（优先读取XML，如无则使用训练集出现的细胞）
-    xml_path = os.path.join(PROJECT_ROOT, "vocab", "cell_type.xml")
-    def load_cell_types(path: str):
-        if os.path.exists(path):
-            try:
-                root = ET.parse(path).getroot()
-                names = []
-                for node in root.findall(".//type"):
-                    name = node.get("name")
-                    if name:
-                        names.append(name.strip())
-                names = [n for n in names if n]
-                if names:
-                    return names
-            except Exception:
-                pass
-        return []
-
-    fixed_cells = load_cell_types(xml_path)
-    if not fixed_cells:
-        fixed_cells = unique_cells_train
-    num_cells = len(fixed_cells)
-
-    # 构建旁路模型并加载权重
-    model = AuxiliaryModel(num_cell_types=num_cells).to(device)
-    ckpt_dir = os.path.join(PROJECT_ROOT, 'save_model', 'bypass')
-    os.makedirs(ckpt_dir, exist_ok=True)
-    ckpt_path = os.path.join(ckpt_dir, 'aux_epoch_5.pth')
-    start_epoch_offset = 0
-    if os.path.exists(ckpt_path):
-        try:
-            sd = torch.load(ckpt_path, map_location=device)
-            if isinstance(sd, dict) and 'auxiliary' in sd:
-                model.load_state_dict(sd['auxiliary'], strict=False)
-                logger.info(f"已加载旁路权重: {ckpt_path} (key='auxiliary')")
-            elif isinstance(sd, dict):
-                model.load_state_dict(sd, strict=False)
-                logger.info(f"已加载旁路权重: {ckpt_path} (直接state_dict)")
-            else:
-                logger.info(f"旁路权重格式非dict，跳过: {ckpt_path}")
-            start_epoch_offset = 5
-        except Exception as e:
-            logger.info(f"加载旁路权重失败: {e}")
+    # ====== 加载旁路模型权重并冻结（依据解耦对抗算子.md）======
+    bypass_ckpt = os.path.join(PROJECT_ROOT, 'save_model', 'bypass', 'aux_epoch_5.pth')
+    bypass = AuxiliaryModel(num_cell_types=num_cells).to(device)
+    if os.path.exists(bypass_ckpt):
+        sd = torch.load(bypass_ckpt, map_location=device)
+        if isinstance(sd, dict) and 'auxiliary' in sd:
+            bypass.load_state_dict(sd['auxiliary'], strict=False)
+            logger.info(f"已加载旁路权重: {bypass_ckpt}")
+        else:
+            bypass.load_state_dict(sd, strict=False)
+            logger.info(f"已加载旁路权重(直载state): {bypass_ckpt}")
     else:
-        logger.info("未找到 aux_epoch_5.pth，使用随机初始化继续训练")
+        logger.info(f"未找到旁路权重: {bypass_ckpt}，将以随机初始化旁路（仅用于占位）。")
+    for p in bypass.parameters():
+        p.requires_grad = False  # 冻结旁路
+    bypass.eval()
+    
+    # 打印模型信息
+    total_params = sum(p.numel() for p in model.parameters())  # 总参数数
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)  # 可训练参数数
+    logger.info(f"模型总参数: {total_params:,}")  # 记录日志
+    logger.info(f"可训练参数: {trainable_params:,}")  # 记录日志
+    logger.info(f"GPU可用: {torch.cuda.is_available()}")  # 记录日志
+    logger.info(f"模型在GPU上: {next(model.parameters()).is_cuda}")  # 记录日志
+    
+    # 创建优化器和调度器
+    cell_label_map = label_map  # 细胞标签映射
 
-    # 优化器
-    optimizer = torch.optim.AdamW(model.parameters(), lr=BYPASS_LEARNING_RATE, weight_decay=BYPASS_WEIGHT_DECAY)
-    logger.info(f"批量大小: {BYPASS_BATCH_SIZE}")
-    logger.info(f"训练轮数: {BYPASS_EPOCHS}")
-    logger.info(f"学习率: {BYPASS_LEARNING_RATE}")
+    start_epoch = 0  # 起始epoch
 
-    # 训练循环（遵循解耦对抗算子）
-    for epoch_idx in range(BYPASS_EPOCHS):
-        model.train()
-        total_loss_epoch = 0.0
-        spec_loss_epoch = 0.0
-        adv_loss_epoch = 0.0
-        orth_loss_epoch = 0.0
-        consist_loss_epoch = 0.0
-        gcn_center_epoch = 0.0
-        gcn_margin_epoch = 0.0
-        gcn_smooth_epoch = 0.0
-        n_batches = 0
+    optimizer = torch.optim.AdamW(list(model.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)  # 创建优化器
+    total_steps = len(train_loader) * EPOCH  # 总步数
+    scheduler = None  # 调度器为空
+    
+    logger.info(f"批量大小: {PRISM_BATCH_SIZE} (纯随机批次)")
+    logger.info(f"训练轮数: {EPOCH}")  # 记录日志
+    logger.info(f"学习率: {LEARNING_RATE}")  # 记录日志
+    logger.info(f"总训练步数: {total_steps}")  # 记录日志
+    
+    # 训练循环
+    logger.info("=" * 80)  # 分隔线
+    logger.info("开始训练")  # 记录日志
+    logger.info("=" * 80)  # 分隔线
+    
+    os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)  # 创建模型保存目录
+    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)  # 加载恢复状态
+    if start_epoch > 0:  # 如果有起始epoch
+        logger.info(f"从最近权重恢复: epoch {start_epoch}")  # 记录日志
+    else:  # 如果没有起始epoch
+        logger.info("未发现可恢复检查点，将从头开始训练")  # 记录日志
+    if start_epoch >= EPOCH:  # 如果起始epoch大于等于目标epoch
+        logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")  # 记录日志
+    for epoch_idx in range(start_epoch, EPOCH):  # 遍历epoch
+        # 训练
+        logger.info("Loss Weights: ep=1.0")  # 记录日志
+        model.train()  # 设置为训练模式
+        total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0  # 初始化统计变量
+        total_tp = 0; total_fp = 0; total_fn = 0  # 初始化TP、FP、FN
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)  # 创建进度条
+        for batch in pbar:  # 遍历批次
+            enh_ids, pr_ids, cell_lines, labels = batch  # 获取批次数据
+            enh_ids = enh_ids.to(device); pr_ids = pr_ids.to(device)  # 移动到设备
+            # 暂停随机PAD掩码，避免训练初期数值不稳
+            # enh_ids = apply_random_mask(enh_ids)
+            # pr_ids = apply_random_mask(pr_ids)
+            labels = labels.to(device)  # 移动到设备
+            precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
+            # ====== 旁路M'影响分类（FiLM + FourierKAN） ======
+            # 1) 从旁路获取分布特征 M'（冻结旁路）
+            with torch.no_grad():
+                _, bx = bypass(enh_ids, pr_ids, cell_labels=None)  # 不需要细胞标签以推断M'
+                M_prime = bx['M_prime']  # [B, OUT_CHANNELS]
+            # 2) 主干提取池化特征 y（分类器输入）
+            y_feat, adaptive_loss = model.extract_pooled_feature(enh_ids, pr_ids)
+            # 3) FiLM 调制：γ, β 由 M' 映射（简版：直接γ=σ(M'), β=tanh(M')）
+            gamma = torch.sigmoid(M_prime)
+            beta = torch.tanh(M_prime)
+            y_mod = gamma * y_feat + beta
+            # 4) 送入原分类器头（FourierKAN）得到概率
+            ep_outputs = model.classifier(y_mod).squeeze(-1)
+            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)  # 计算损失
+            with torch.no_grad():  # 不计算梯度
+                ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
+                ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率
+                tp = int(((ep_preds == 1) & (labels.long() == 1)).sum().item())  # 真正例
+                fp = int(((ep_preds == 1) & (labels.long() == 0)).sum().item())  # 假正例
+                fn = int(((ep_preds == 0) & (labels.long() == 1)).sum().item())  # 假负例
+                total_tp += tp; total_fp += fp; total_fn += fn  # 累加
+                precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0  # 计算精确率
+                recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0  # 计算召回率
+                f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0  # 计算F1
+            loss = ep_loss  # 损失
+            optimizer.zero_grad();  # 清空梯度
+            loss.backward();  # 反向传播
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()), max_norm=GRAD_CLIP_MAX_NORM);  # 梯度裁剪
+            optimizer.step();  # 更新参数
 
-        pbar = tqdm(train_loader, desc=f"Epoch {start_epoch_offset+epoch_idx+1}/{start_epoch_offset+BYPASS_EPOCHS} [Bypass]", leave=True, dynamic_ncols=True)
-        for batch in pbar:
-            enh_ids, pr_ids, cell_lines, labels_t = batch
-            enh_ids = enh_ids.to(device)
-            pr_ids = pr_ids.to(device)
-            cell_t = build_cell_label_tensor(cell_lines, fixed_cells).to(device)
-
-            optimizer.zero_grad()
-            pred_prob, extras = model(enh_ids, pr_ids, cell_labels=cell_t)
-
-            spec_loss = extras['spec_loss']
-            adv_loss = extras['adv_loss']
-            gcn_center = extras['gcn_center']
-            gcn_margin = extras['gcn_margin']
-            gcn_smooth = extras['gcn_smooth']
-            consist_loss = gcn_smooth  # 图一致性替代批次一致性
-
-            # 正交约束
-            fp_enh: FootprintExpert = model.fp_enh
-            fp_pr: FootprintExpert = model.fp_pr
-            orth_loss = fp_enh.orthogonality_loss(extras['zG'], extras['zF'], extras['zI'])
-            orth_loss = orth_loss + fp_pr.orthogonality_loss(extras['zG'], extras['zF'], extras['zI']) * 0.0
-
-            total_loss = (
-                BYPASS_SPEC_WEIGHT * spec_loss +
-                BYPASS_INV_WEIGHT * adv_loss +
-                BYPASS_ORTHO_WEIGHT * orth_loss +
-                BYPASS_CONSIST_WEIGHT * consist_loss +
-                GCN_CENTER_LOSS_W * gcn_center +
-                GCN_MARGIN_LOSS_W * gcn_margin +
-                GCN_SMOOTH_LOSS_W * gcn_smooth
-            )
-
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_MAX_NORM)
-            optimizer.step()
-
-            tl = float(total_loss.item())
-            sl = float(spec_loss.item())
-            il = float(adv_loss.item())
-            ol = float(orth_loss.item())
-            cl = float(consist_loss.item())
-            total_loss_epoch += tl
-            spec_loss_epoch += sl
-            adv_loss_epoch += il
-            orth_loss_epoch += ol
-            consist_loss_epoch += cl
-            gcn_center_epoch += float(gcn_center.item())
-            gcn_margin_epoch += float(gcn_margin.item())
-            gcn_smooth_epoch += float(gcn_smooth.item())
-            n_batches += 1
-
-            pbar.set_postfix({
-                'total': f"{tl:.4f}",
-                'spec': f"{sl:.4f}",
-                'adv': f"{il:.4f}",
-                'orth': f"{ol:.4f}",
-                'cons': f"{cl:.4f}",
-                'g_center': f"{gcn_center.item():.4f}",
-                'g_margin': f"{gcn_margin.item():.4f}",
-                'g_smooth': f"{gcn_smooth.item():.4f}",
+            total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1  # 累加统计
+            pbar.set_postfix({  # 设置进度条后缀
+                'loss': f'{loss.item():.4f}',  # 损失
+                # 'base': f"{loss_details['base']:.4f}",  # 基础损失
+                # 'adaptive': f"{loss_details['adaptive']:.4f}",  # 自适应损失
+                # 'penalty': f"{loss_details['penalty']:.4f}",  # 惩罚损失
+                'ep_acc': f'{ep_acc:.4f}',  # 准确率
+                'prec': f'{precision:.4f}',  # 精确率
+                'rec': f'{recall:.4f}',  # 召回率
+                'f1': f'{f1:.4f}',  # F1
             })
 
-        # 保存旁路模型权重（延续编号）
-        save_dir = os.path.join(PROJECT_ROOT, 'save_model', 'bypass')
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, f"aux_epoch_{start_epoch_offset+epoch_idx+1}.pth")
-        torch.save({'auxiliary': model.state_dict()}, save_path)
-        logger.info(f"保存旁路权重: {save_path}")
+        avg_loss = total_loss / max(n_batches, 1)  # 平均损失
+        avg_ep_acc = total_ep_acc / max(n_batches, 1)  # 平均准确率
+        epoch_precision = (total_tp / max(total_tp + total_fp, 1)) if (total_tp + total_fp) > 0 else 0.0  # epoch精确率
+        epoch_recall = (total_tp / max(total_tp + total_fn, 1)) if (total_tp + total_fn) > 0 else 0.0  # epoch召回率
+        epoch_f1 = (2 * epoch_precision * epoch_recall / max(epoch_precision + epoch_recall, 1e-6)) if (epoch_precision + epoch_recall) > 0 else 0.0  # epoch F1
+        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, EP Acc: {avg_ep_acc:.4f}, Prec: {epoch_precision:.4f}, Rec: {epoch_recall:.4f}, F1: {epoch_f1:.4f}")  # 记录日志
+        
+        # 保存检查点
+        checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")  # 检查点路径
+        torch.save({'backbone': model.state_dict()}, checkpoint_path)  # 保存模型
+        logger.info(f"保存检查点: {checkpoint_path}")  # 记录日志
+        full_state_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")  # 完整状态路径
+        full_state = {  # 完整状态
+            'model_state': model.state_dict(),  # 模型状态
+            'optimizer_state': optimizer.state_dict(),  # 优化器状态
+            'epoch': epoch_idx + 1,  # epoch
+        }
+        if scheduler is not None:  # 如果调度器不为空
+            full_state['scheduler_state'] = scheduler.state_dict()  # 添加调度器状态
+        torch.save(full_state, full_state_path)  # 保存完整状态
+        logger.info(f"保存完整状态: {full_state_path}")  # 记录日志
 
-        # 汇总日志
-        avg_total = total_loss_epoch / max(1, n_batches)
-        avg_spec = spec_loss_epoch / max(1, n_batches)
-        avg_adv = adv_loss_epoch / max(1, n_batches)
-        avg_orth = orth_loss_epoch / max(1, n_batches)
-        avg_cons = consist_loss_epoch / max(1, n_batches)
-        avg_gc = gcn_center_epoch / max(1, n_batches)
-        avg_gm = gcn_margin_epoch / max(1, n_batches)
-        avg_gs = gcn_smooth_epoch / max(1, n_batches)
-        logger.info(
-            f"Epoch {start_epoch_offset+epoch_idx+1}/{start_epoch_offset+BYPASS_EPOCHS} - "
-            f"total={avg_total:.4f}, spec={avg_spec:.4f}, adv={avg_adv:.4f}, orth={avg_orth:.4f}, cons={avg_cons:.4f}, "
-            f"g_center={avg_gc:.4f}, g_margin={avg_gm:.4f}, g_smooth={avg_gs:.4f}"
-        )
-
-    logger.info("=" * 80)
-    logger.info("旁路解耦训练完成")
-    logger.info("=" * 80)
+        # 移除验证与知识库保存流程
+    
+    logger.info("=" * 80)  # 分隔线
+    logger.info("PRISM预训练完成")  # 记录日志
+    logger.info("=" * 80)  # 分隔线
 
 
 if __name__ == "__main__":  # 如果是主程序
