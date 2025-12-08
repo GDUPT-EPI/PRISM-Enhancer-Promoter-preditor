@@ -122,10 +122,10 @@ class EvalConfig:
     PLOT_THRESHOLD_METRICS = True  # 是否绘制阈值-指标曲线
 
     # ========= 旁路网络微调相关配置（仅在评估阶段使用，避免依赖外部config.py） =========
-    AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')  # 旁路初始权重
-    FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')  # 微调后保存路径
-    FINETUNE_STEPS_PER_CELL = 30  # 每个细胞系进行n步微调
-    FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))  # 微调批量（尽可能使用全样本，通过梯度累积实现）
+    AUX_CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass', 'aux_epoch_5.pth')
+    FINETUNE_SAVE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'finetune', 'finetune.pth')
+    FINETUNE_EPOCHS = 30
+    FINETUNE_BATCH_SIZE = max(8, (PRISM_BATCH_SIZE or BATCH_SIZE))
     FINETUNE_LR = 5e-5  # 微调学习率（小步快跑，避免数值震荡）
     FINETUNE_WEIGHT_DECAY = 1e-4  # 微调权重衰减
     GRAD_CLIP_MAX_NORM = 1.0  # 梯度裁剪阈值
@@ -209,7 +209,6 @@ def _build_cell_label_tensor(cells: List[str], all_cells: List[str]) -> torch.Te
 
 
 def _load_fixed_cells() -> List[str]:
-    """从 `vocab/cell_type.xml` 加载固定细胞类型列表，失败时回退到训练集唯一细胞系"""
     xml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vocab", "cell_type.xml")
     cells: List[str] = []
     if os.path.exists(xml_path):
@@ -229,6 +228,8 @@ def _load_fixed_cells() -> List[str]:
             cells = sorted(train_df['cell_line'].unique().tolist())
         except Exception:
             cells = []
+    if 'OTHER' not in cells:
+        cells.append('OTHER')
     return cells
 
 
@@ -344,7 +345,7 @@ def finetune_auxiliary_on_test_cells(
         return None
     fixed_cells = _load_fixed_cells()
     num_types = len(fixed_cells) if len(fixed_cells) > 0 else len(all_cells)
-    ref_cells = fixed_cells if len(fixed_cells) > 0 else all_cells
+    ref_cells = fixed_cells if len(fixed_cells) > 0 else sorted(all_cells) + (['OTHER'] if 'OTHER' not in all_cells else [])
     aux_model = AuxiliaryModel(num_cell_types=num_types).to(device)
     def _find_latest_aux_checkpoint() -> Optional[str]:
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'save_model', 'bypass')
@@ -372,7 +373,6 @@ def finetune_auxiliary_on_test_cells(
     except Exception:
         train_dataset = None
 
-    # 外层细胞系进度条（实时监视每个细胞系的微调进度）
     pbar_cells = tqdm(all_cells, desc="Finetune per cell", leave=True, dynamic_ncols=True)
     for cell in pbar_cells:
         loader = _cell_subset_loader(dataset, cell, EvalConfig.FINETUNE_BATCH_SIZE)
@@ -380,71 +380,42 @@ def finetune_auxiliary_on_test_cells(
         if total_batches <= 0:
             pbar_cells.set_postfix({"cell": cell, "batches": 0})
             continue
-        update_steps = max(1, int(EvalConfig.FINETUNE_STEPS_PER_CELL))
-        boundaries = []
-        for s in range(1, update_steps):
-            b = int(np.ceil(s * total_batches / float(update_steps)))
-            if b > 0 and b <= total_batches:
-                boundaries.append(b)
-        boundaries = sorted(list(set(boundaries + [total_batches])))
-        expected_updates = update_steps
-        accum_interval = total_batches // update_steps if update_steps > 0 else total_batches
-        optimizer.zero_grad()
-        batch_counter = 0
-        update_counter = 0
-
-        # 内层批次进度条（实时显示损失项与累计状态）
-        pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] batches", leave=False, dynamic_ncols=True)
-        for batch in pbar_batches:
-            enh_ids, pr_ids, labels_t, cells = batch
-            cell_t = _build_cell_label_tensor(cells, ref_cells)
-            enh_ids = enh_ids.to(device)
-            pr_ids = pr_ids.to(device)
-            cell_t = cell_t.to(device)
-            loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
-
-            # 采样辅助批次（来自训练集的其他细胞）以避免spec/adv在单类上退化为0
-            if train_dataset is not None:
-                sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
-            else:
-                sup = None
-            spec_total = extras_main.get('spec_loss', torch.tensor(0.0))
-            adv_total = extras_main.get('adv_loss', torch.tensor(0.0))
-            if sup is not None:
-                s_enh, s_pr, _, s_cells = sup
-                s_cell_t = _build_cell_label_tensor(s_cells, ref_cells).to(device)
-                s_enh = s_enh.to(device)
-                s_pr = s_pr.to(device)
-                loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
-                total_loss = loss_main + loss_sup
-                spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
-                adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
-            else:
-                total_loss = loss_main
-            total_loss.backward()
-            batch_counter += 1
-
-            # 实时显示关键损失项与累计信息
-            pbar_batches.set_postfix({
-                "loss": f"{float(total_loss.item()):.4f}",
-                "spec": f"{float(spec_total.item()):.4f}",
-                "adv": f"{float(adv_total.item()):.4f}",
-                "accum": f"{batch_counter}/{accum_interval}",
-            })
-
-            # 到达计划边界时执行参数更新
-            if (batch_counter in boundaries):
+        for epoch in range(int(EvalConfig.FINETUNE_EPOCHS)):
+            pbar_batches = tqdm(loader, total=total_batches, desc=f"[{cell}] epoch {epoch+1}/{EvalConfig.FINETUNE_EPOCHS}", leave=False, dynamic_ncols=True)
+            for batch in pbar_batches:
+                enh_ids, pr_ids, labels_t, cells = batch
+                cell_t = _build_cell_label_tensor(cells, ref_cells)
+                enh_ids = enh_ids.to(device)
+                pr_ids = pr_ids.to(device)
+                cell_t = cell_t.to(device)
+                loss_main, extras_main = _compute_aux_losses(aux_model, enh_ids, pr_ids, cell_t)
+                if train_dataset is not None:
+                    sup = _sample_support_batch(train_dataset, exclude_cell=cell, batch_size=max(1, EvalConfig.FINETUNE_BATCH_SIZE // 2))
+                else:
+                    sup = None
+                spec_total = extras_main.get('spec_loss', torch.tensor(0.0))
+                adv_total = extras_main.get('adv_loss', torch.tensor(0.0))
+                if sup is not None:
+                    s_enh, s_pr, _, s_cells = sup
+                    s_cell_t = _build_cell_label_tensor(s_cells, ref_cells).to(device)
+                    s_enh = s_enh.to(device)
+                    s_pr = s_pr.to(device)
+                    loss_sup, extras_sup = _compute_aux_losses(aux_model, s_enh, s_pr, s_cell_t)
+                    total_loss = loss_main + loss_sup
+                    spec_total = spec_total + extras_sup.get('spec_loss', torch.tensor(0.0))
+                    adv_total = adv_total + extras_sup.get('adv_loss', torch.tensor(0.0))
+                else:
+                    total_loss = loss_main
+                optimizer.zero_grad()
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(aux_model.parameters(), max_norm=EvalConfig.GRAD_CLIP_MAX_NORM)
                 optimizer.step()
-                optimizer.zero_grad()
-                update_counter += 1
-                pbar_cells.set_postfix({
-                    "cell": cell,
-                    "updates": f"{min(update_counter, expected_updates)}/{expected_updates}",
+                pbar_batches.set_postfix({
+                    "loss": f"{float(total_loss.item()):.4f}",
+                    "spec": f"{float(spec_total.item()):.4f}",
+                    "adv": f"{float(adv_total.item()):.4f}",
                 })
-
-        # 该细胞系微调完成后，关闭内层进度条，外层进度条自动前进一格（由迭代驱动）
-        pbar_batches.close()
+            pbar_batches.close()
 
     # 保存微调后的权重
     save_dir = os.path.dirname(EvalConfig.FINETUNE_SAVE_PATH)
