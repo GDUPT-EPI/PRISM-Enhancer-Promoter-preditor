@@ -144,6 +144,9 @@ class EvalConfig:
     I_KAPPA = 2.0
     LOGIT_I_WEIGHT = 0.2
     LOGIT_C_WEIGHT = 0.2
+    TEMP_SCALE_T = 1.5
+    BACKOFF_ALPHA_TAU = 0.2
+    BACKOFF_I_TAU = 0.4
 
 
 def collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
@@ -585,17 +588,25 @@ def evaluate() -> Optional[Dict[str, object]]:
                 s_i = torch.std(norm_i) if torch.isfinite(torch.std(norm_i)) else torch.tensor(1.0, device=norm_i.device)
                 i_approx = torch.sigmoid(EvalConfig.I_KAPPA * ( (norm_i - m_i) / (s_i + 1e-6) ))  # [B,1]
 
-                # 方向性 FiLM 融合与交互偏置
+                # 方向性 FiLM 融合与交互偏置（logit空间加性 + 温度缩放 + 置信回退）
                 y_mod_dir = (1.0 - alpha) * y_feat + alpha * (gamma * y_feat + beta)
                 out = backbone.classifier(y_mod_dir)
                 logits_dir = out.squeeze(-1)
-                # 对数几率校准：加性偏置注入 I_approx 与原型权重差，保持单调
+                # 基线（无方向性）logit
+                out_base = backbone.classifier(y_feat)
+                logits_base = out_base.squeeze(-1)
+                # 对数几率校准
                 logit_cal = logits_dir + EvalConfig.LOGIT_I_WEIGHT * (i_approx.squeeze(-1) - 0.5)
                 if zF_warm is not None and zF_warm.size(0) > 0:
-                    # 使用 w_c - w_other 近似原型权重差
                     proto_diff = (alpha_f - torch.exp(- torch.cdist(zF, zF_warm.to(zF.device), p=2).pow(2) / max(EvalConfig.ALPHA_TAU_F, 1e-6)).mean(dim=-1, keepdim=True)).squeeze(-1)
                     logit_cal = logit_cal + EvalConfig.LOGIT_C_WEIGHT * proto_diff
-                probs = torch.sigmoid(logit_cal)
+                # 温度缩放
+                logit_temp = logit_cal / max(EvalConfig.TEMP_SCALE_T, 1e-6)
+                probs_cal = torch.sigmoid(logit_temp)
+                # 置信回退到基线
+                probs_base = torch.sigmoid(logits_base)
+                backoff_mask = ((alpha.squeeze(-1) < EvalConfig.BACKOFF_ALPHA_TAU) | (i_approx.squeeze(-1) < EvalConfig.BACKOFF_I_TAU)).float()
+                probs = (1.0 - backoff_mask) * probs_cal + backoff_mask * probs_base
 
                 if cell not in per_cell:
                     per_cell[cell] = {"preds": [], "labels": []}
