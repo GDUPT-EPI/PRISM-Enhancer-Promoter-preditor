@@ -478,7 +478,8 @@ def evaluate() -> Optional[Dict[str, object]]:
         _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)
 
         aux_model = finetune_auxiliary_on_test_cells(dataset, [cell], device)
-        # 按用户要求严格复用主干PRISMBackbone，不将旁路权重注入主干，确保与decouple一致性
+        injected = inject_auxiliary_into_backbone(backbone, aux_model)
+        aux_model.eval()
 
         # 针对该细胞系构建仅该细胞的数据加载器
         bs = EvalConfig.BATCH_SIZE
@@ -502,8 +503,14 @@ def evaluate() -> Optional[Dict[str, object]]:
                 enh_ids = enh_ids.to(device)
                 pr_ids = pr_ids.to(device)
                 labels_t = labels.to(device)
-                outputs, _ = backbone(enh_ids, pr_ids)
-                preds = outputs.squeeze(-1).detach().cpu().numpy()
+                _, bx = aux_model(enh_ids, pr_ids, cell_labels=None)
+                M_prime = bx['M_prime']
+                y_feat, adaptive_loss = backbone.extract_pooled_feature(enh_ids, pr_ids)
+                gamma = torch.sigmoid(M_prime)
+                beta = torch.tanh(M_prime)
+                y_mod = gamma * y_feat + beta
+                ep_outputs = backbone.classifier(y_mod)
+                preds = torch.sigmoid(ep_outputs).squeeze(-1).detach().cpu().numpy()
                 labs = labels_t.cpu().numpy()
                 all_preds.append(preds)
                 all_labels.append(labs)
