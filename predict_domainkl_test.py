@@ -106,13 +106,13 @@ class EvalConfig:
     PIN_MEMORY = True  # 加速CPU→GPU拷贝
     SHUFFLE = False  # 评估不打乱
 
-    THRESHOLD = 0.3  # 二值化阈值
+    THRESHOLD = 0.25  # 二值化阈值
     OUTPUT_DIR_NAME = "compete/fff"  # 输出目录名称
     PLOT_PR = True  # 是否绘制PR曲线
     PLOT_ROC = True  # 是否绘制ROC曲线
     
     # 阈值寻找相关配置
-    FIND_OPTIMAL_THRESHOLD = True  # 是否启用阈值寻找
+    FIND_OPTIMAL_THRESHOLD = False  # 是否启用阈值寻找
     OPTIMIZE_METRIC = "f1"  # 优化指标，可选'f1', 'precision', 'recall', 'accuracy'
     THRESHOLD_RANGE = (0.01, 0.99)  # 阈值搜索范围
     THRESHOLD_STEPS = 99  # 搜索步数
