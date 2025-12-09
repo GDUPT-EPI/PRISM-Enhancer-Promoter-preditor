@@ -355,8 +355,10 @@ class RoPE_AdaptAttention(nn.Module):
         if attention_mask is not None and attention_mask.numel() > 1:
             attn_logits = attn_logits + attention_mask
         attn_weights = torch.softmax(attn_logits, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
         attn_weights = self.dropout(attn_weights)
         out = torch.matmul(attn_weights, v)
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         out = out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.out_proj(out)
         
@@ -534,12 +536,13 @@ class RoPE_CausalBlockAttention(nn.Module):
         if attention_mask is not None:
             attn = attn + attention_mask
         
-        # Softmax归一化
         attn = attn.softmax(dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
         attn = self.dropout(attn)
         
         # 加权求和: [B, H, L, L] @ [B, H, L, d_head] -> [B, H, L, d_head]
         out = torch.matmul(attn, v)
+        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         
         # 恢复形状: [B, H, L, d_head] -> [B, L, H, d_head] -> [B, L, D]
         out = out.transpose(1, 2).contiguous().view(B, L, D)

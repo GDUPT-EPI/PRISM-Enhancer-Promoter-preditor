@@ -512,7 +512,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         Returns:
             总损失或(损失, 细节)
         """
-        base_loss = self.criterion(outputs, labels)  # 基础损失
+        base_loss = self.criterion(outputs, labels)  # 基础损失（要求outputs为概率）
         penalty_loss = self.spec_penalty(outputs, labels)  # 惩罚损失
         total = base_loss + adaptive_loss +  penalty_loss  # 总损失
         if return_details:  # 如果需要返回细节
