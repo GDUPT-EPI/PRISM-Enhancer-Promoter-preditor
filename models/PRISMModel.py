@@ -332,7 +332,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
         y_p_init, _ = self.seq_pool(pr.permute(1, 0, 2), key_padding_mask=pr_pad_mask)
-        anchors = self.anchor_proj(y_p_init).view(y_p_init.size(0), -1, OUT_CHANNELS)
+        anchors = self.anchor_proj(y_p_init).view(y_p_init.size(0), max(1, (ANCHOR_COUNT if 'ANCHOR_COUNT' in globals() else 2)), OUT_CHANNELS)
         anchors = anchors.permute(1, 0, 2)
         combined = torch.cat([pr, anchors, enh], dim=0)
         combined_seq = combined.permute(1, 0, 2)
@@ -359,7 +359,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
 
         # 对称 P←E 分支
         y_e_init, _ = self.seq_pool(enh.permute(1, 0, 2), key_padding_mask=enh_pad_mask)
-        anchors_e = self.anchor_proj(y_e_init).view(y_e_init.size(0), -1, OUT_CHANNELS).permute(1, 0, 2)
+        anchors_e = self.anchor_proj(y_e_init).view(y_e_init.size(0), max(1, (ANCHOR_COUNT if 'ANCHOR_COUNT' in globals() else 2)), OUT_CHANNELS).permute(1, 0, 2)
         combined2 = torch.cat([enh, anchors_e, pr], dim=0)
         combined2_seq = combined2.permute(1, 0, 2)
         L_total2 = combined2_seq.size(1)

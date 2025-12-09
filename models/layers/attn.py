@@ -217,7 +217,8 @@ class RoPE_AdaptAttention(nn.Module):
         
         # 全局重要性：与全局query的注意力
         query = self.global_query.expand(B, -1)  # [B, D]
-        global_attn = torch.matmul(query.unsqueeze(1), x.transpose(1, 2)).squeeze(1)  # [B, L]
+        global_attn = torch.matmul(query.unsqueeze(1), x.transpose(1, 2)).squeeze(1)
+        global_attn = torch.nan_to_num(global_attn, neginf=-50.0, posinf=50.0)
         global_sim = torch.softmax(global_attn * self.scale, dim=-1)
         
         # 自适应权重
@@ -278,12 +279,14 @@ class RoPE_AdaptAttention(nn.Module):
         return final_score, debug_info
 
     def _sparsemax(self, z: torch.Tensor) -> torch.Tensor:
+        z = torch.nan_to_num(z, neginf=-1e5, posinf=1e5)
         z_sorted, _ = torch.sort(z, dim=-1, descending=True)
-        k = torch.arange(1, z.shape[-1] + 1, device=z.device, dtype=z.dtype).unsqueeze(0).expand(z.shape[0], -1)
+        ranks = torch.arange(1, z.shape[-1] + 1, device=z.device, dtype=z.dtype).unsqueeze(0).expand(z.shape[0], -1)
         z_cumsum = torch.cumsum(z_sorted, dim=-1)
-        cond = 1 + k * z_sorted > z_cumsum
-        k_z = cond.sum(dim=-1, keepdim=True)
-        tau = (torch.gather(z_cumsum, dim=-1, index=k_z - 1) - 1) / k_z.clamp_min(1)
+        cond = 1 + ranks * z_sorted > z_cumsum
+        k_z = cond.sum(dim=-1, keepdim=True).clamp(min=1)
+        idx = (k_z - 1).clamp(min=0, max=z.shape[-1] - 1).to(torch.long)
+        tau = (torch.gather(z_cumsum, dim=-1, index=idx) - 1) / k_z.to(z.dtype)
         return torch.clamp(z - tau, min=0.0)
     
     def _adaptive_loss(self, scores: torch.Tensor, contrib: torch.Tensor) -> torch.Tensor:
@@ -350,7 +353,9 @@ class RoPE_AdaptAttention(nn.Module):
         
         # Step 4: 温度软稀疏选择（连续权重）
         if self.use_sparsemax:
-            weights = self._sparsemax(scores / self.sparse_temp.clamp_min(1e-6))
+            safe_scores = torch.nan_to_num(scores, neginf=-1e3, posinf=1e3)
+            temp = self.sparse_temp.clamp_min(1e-3)
+            weights = self._sparsemax(safe_scores / temp)
             denom = weights.sum(dim=-1, keepdim=True).clamp(min=1e-6)
             weights = weights / denom
         else:
@@ -359,8 +364,11 @@ class RoPE_AdaptAttention(nn.Module):
         # Step 5: 加权注意力（列偏置）
         attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,L,L]
         log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)
+        log_w = torch.nan_to_num(log_w, neginf=-20.0, posinf=20.0)
         attn_logits = attn_logits + log_w
         if attention_mask is not None and attention_mask.numel() > 1:
+            if attention_mask.dtype != attn_logits.dtype:
+                attention_mask = attention_mask.to(attn_logits.dtype)
             attn_logits = attn_logits + attention_mask
         attn_weights = torch.softmax(attn_logits, dim=-1)
         attn_weights = self.dropout(attn_weights)
