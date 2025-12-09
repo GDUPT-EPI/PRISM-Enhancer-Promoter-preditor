@@ -400,7 +400,9 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
         y = self.classifier_dropout(y)  # 应用分类器前的Dropout
         result = self.classifier(y)
-        return torch.sigmoid(result), total_adaptive_loss  # 返回sigmoid结果和损失
+        prob = torch.sigmoid(result)
+        prob = torch.nan_to_num(prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        return prob, total_adaptive_loss
 
     def extract_pooled_feature(
         self,
@@ -528,8 +530,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         Returns:
             总损失或(损失, 细节)
         """
-        base_loss = self.criterion(outputs, labels)  # 基础损失
-        penalty_loss = self.spec_penalty(outputs, labels)  # 惩罚损失
+        outputs = torch.nan_to_num(outputs, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        labels = torch.nan_to_num(labels, nan=0.0).clamp(0.0, 1.0)
+        base_loss = self.criterion(outputs, labels)
+        penalty_loss = self.spec_penalty(outputs, labels)
         total = base_loss + adaptive_loss +  penalty_loss  # 总损失
         if return_details:  # 如果需要返回细节
             return total, {  # 返回总损失和细节
