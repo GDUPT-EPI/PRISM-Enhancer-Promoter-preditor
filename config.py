@@ -40,7 +40,7 @@ POOL_KERNEL_SIZE = 24  # 池化核大小
 OUT_CHANNELS = 64  # 卷积输出通道数
 
 # Transformer相关参数 - 集中管理避免冲突
-TRANSFORMER_LAYERS = 2  # 每个enhancer/promoter的transformer层数
+TRANSFORMER_LAYERS = 2  # CBAT的transformer层数
 TRANSFORMER_HEADS = 4   # 多头注意力头数
 TRANSFORMER_FF_DIM = 128  # 前馈网络维度 (从128修改为256以匹配checkpoint)
 
