@@ -362,7 +362,7 @@ class RoPE_AdaptAttention(nn.Module):
             weights = torch.softmax(scores / self.sparse_temp.clamp_min(1e-6), dim=-1)
         
         # Step 5: 加权注意力（列偏置）
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,L,L]
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)
         log_w = torch.nan_to_num(log_w, neginf=-20.0, posinf=20.0)
         attn_logits = attn_logits + log_w
@@ -370,7 +370,17 @@ class RoPE_AdaptAttention(nn.Module):
             if attention_mask.dtype != attn_logits.dtype:
                 attention_mask = attention_mask.to(attn_logits.dtype)
             attn_logits = attn_logits + attention_mask
+            mask_exp = attention_mask.expand(B, self.num_heads, L, L)
+            mask_bool = mask_exp != 0
+        else:
+            mask_bool = None
+        attn_logits = torch.nan_to_num(attn_logits, nan=0.0, posinf=1e4, neginf=-1e4)
         attn_weights = torch.softmax(attn_logits, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
+        if mask_bool is not None:
+            row_all_masked = mask_bool.all(dim=-1)
+            attn_weights = attn_weights.masked_fill(mask_bool, 0.0)
+            attn_weights = attn_weights * (~row_all_masked).unsqueeze(-1).to(attn_weights.dtype)
         attn_weights = self.dropout(attn_weights)
         out = torch.matmul(attn_weights, v)  # [B,H,L,d]
         out = out.transpose(1, 2).contiguous().view(B, L, D)
@@ -385,6 +395,8 @@ class RoPE_AdaptAttention(nn.Module):
                 else:
                     self.contrib_ema = self.ema_decay * self.contrib_ema + (1 - self.ema_decay) * contrib_full
             adaptive_loss = self._adaptive_loss(scores, self.contrib_ema) * self.loss_weight
+            if not torch.isfinite(adaptive_loss):
+                adaptive_loss = torch.tensor(0.0, device=x.device)
             return out, adaptive_loss
         else:
             if return_loss:

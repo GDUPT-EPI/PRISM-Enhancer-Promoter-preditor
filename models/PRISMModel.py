@@ -402,6 +402,9 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         result = self.classifier(y)
         prob = torch.sigmoid(result)
         prob = torch.nan_to_num(prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        if not torch.isfinite(prob).all():
+            prob = torch.sigmoid(result.detach())
+            prob = torch.nan_to_num(prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         return prob, total_adaptive_loss
 
     def extract_pooled_feature(
@@ -531,6 +534,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             总损失或(损失, 细节)
         """
         outputs = torch.nan_to_num(outputs, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        outputs = outputs.detach() if not torch.isfinite(outputs).all() else outputs
         labels = torch.nan_to_num(labels, nan=0.0).clamp(0.0, 1.0)
         base_loss = self.criterion(outputs, labels)
         penalty_loss = self.spec_penalty(outputs, labels)
