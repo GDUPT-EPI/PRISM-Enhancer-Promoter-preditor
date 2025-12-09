@@ -332,31 +332,31 @@ class RoPE_AdaptAttention(nn.Module):
         cos, sin = self.rope(q, seq_len=L, position_ids=position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        # Step 4: 温度软稀疏选择（连续权重）
-        target = self.sparsity_target
-        temperature = 1.5
-        s_min = scores.min(dim=-1, keepdim=True).values
-        s_max = scores.max(dim=-1, keepdim=True).values
-        low = s_min
-        high = s_max
-        for _ in range(10):
-            tau = (low + high) / 2.0
-            weights = torch.sigmoid((scores - tau) / temperature)
-            mean_w = weights.mean(dim=-1, keepdim=True)
-            high = torch.where(mean_w > target, high, tau)
-            low = torch.where(mean_w > target, tau, low)
-        tau = (low + high) / 2.0
-        weights = torch.sigmoid((scores - tau) / temperature)  # [B, L]
+        logits = scores
+        B, L = logits.shape
+        z = logits
+        z_sorted, _ = torch.sort(z, dim=-1, descending=True)
+        k_vec = torch.arange(1, L + 1, device=z.device).unsqueeze(0).expand(B, -1)
+        z_cumsum = torch.cumsum(z_sorted, dim=-1)
+        rhs = 1 + k_vec * z_sorted
+        is_gt = rhs > z_cumsum
+        k_max = is_gt.sum(dim=-1)
+        idx = (k_max - 1).clamp(min=0).unsqueeze(1)
+        z_cumsum_k = z_cumsum.gather(1, idx)
+        tau = (z_cumsum_k - 1) / k_max.unsqueeze(1).clamp_min(1)
+        weights = (z - tau).clamp(min=0)
+        denom = weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        weights = weights / denom
         
         # Step 5: 加权注意力（列偏置）
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,L,L]
-        log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)  # [B,1,1,L]
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)
         attn_logits = attn_logits + log_w
         if attention_mask is not None and attention_mask.numel() > 1:
             attn_logits = attn_logits + attention_mask
         attn_weights = torch.softmax(attn_logits, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        out = torch.matmul(attn_weights, v)  # [B,H,L,d]
+        out = torch.matmul(attn_weights, v)
         out = out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.out_proj(out)
         
