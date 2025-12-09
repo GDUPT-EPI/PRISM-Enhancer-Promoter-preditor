@@ -644,7 +644,7 @@ def evaluate() -> Optional[Dict[str, object]]:
                 out = backbone.classifier(y_mod_dir)
                 logits_dir = out.squeeze(-1)
                 # 基线（无方向性）概率直接取主干前向，确保与基线评估一致
-                out_base_pred, _ = backbone(enh_ids, pr_ids)
+                out_base_pred, _, _ = backbone(enh_ids, pr_ids)
                 probs_base = out_base_pred.squeeze(-1)
                 # 仍保留基线logit用于锚定与温度缩放的一致性计算
                 out_base = backbone.classifier(y_feat)

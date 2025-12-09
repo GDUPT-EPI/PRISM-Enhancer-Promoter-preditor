@@ -275,7 +275,7 @@ def evaluate() -> Optional[Dict[str, object]]:
             enh_ids = enh_ids.to(device)  # 移动设备
             pr_ids = pr_ids.to(device)  # 移动设备
             labels_t = labels.to(device)  # 标签设备
-            outputs, _ = backbone(enh_ids, pr_ids)  # 前向预测
+            outputs, _, _ = backbone(enh_ids, pr_ids)  # 前向预测
             preds = outputs.squeeze(-1).detach().cpu().numpy()  # 概率
             labs = labels_t.cpu().numpy()  # 标签
             all_preds.append(preds)  # 汇总
