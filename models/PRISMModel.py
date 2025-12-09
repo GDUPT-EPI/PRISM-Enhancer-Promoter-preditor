@@ -131,17 +131,20 @@ class SequencePooling(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.proj = nn.Linear(d_model, 1)
 
-    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None, temperature: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         xn = self.norm(x)
         w = self.proj(xn).squeeze(-1)
         if key_padding_mask is not None:
             w = w.masked_fill(key_padding_mask, -1e9)
-        w = torch.softmax(w, dim=-1)
+        if temperature is not None:
+            w = torch.softmax(w / temperature.clamp_min(1e-6).unsqueeze(-1), dim=-1)
+        else:
+            w = torch.softmax(w, dim=-1)
         w = torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
         w = w.masked_fill((key_padding_mask if key_padding_mask is not None else torch.zeros_like(w, dtype=torch.bool)), 0.0)
         denom = w.sum(dim=-1, keepdim=True).clamp(min=1e-6)
         w = w / denom
-        return (x * w.unsqueeze(-1)).sum(dim=1)
+        return (x * w.unsqueeze(-1)).sum(dim=1), w
 
 class ContextSelfAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, num_layers: int, dropout: float):
@@ -237,6 +240,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             lr=LEARNING_RATE,  # 学习率
             weight_decay=WEIGHT_DECAY,  # 权重衰减
         )
+        self.anchor_temp = nn.Linear(OUT_CHANNELS, 1)
 
 
     def forward(  # 前向传播
@@ -340,7 +344,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         total_adaptive_loss = cb_loss
 
         x_seq = enh_x1.permute(1, 0, 2)
-        y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
+        x_seq_p = pr.permute(1, 0, 2)
+        y_p, _ = self.seq_pool(x_seq_p, key_padding_mask=pr_pad_mask)
+        temp = F.softplus(self.anchor_temp(y_p)).squeeze(-1) + 1.0
+        y, _ = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask, temperature=temp)
         y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
         y = self.classifier_dropout(y)  # 应用分类器前的Dropout
         result = self.classifier(y)
@@ -442,7 +449,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         total_adaptive_loss = cb_loss
 
         x_seq = enh_x1.permute(1, 0, 2)
-        y = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask)
+        x_seq_p = pr.permute(1, 0, 2)
+        y_p, _ = self.seq_pool(x_seq_p, key_padding_mask=pr_pad_mask)
+        temp = F.softplus(self.anchor_temp(y_p)).squeeze(-1) + 1.0
+        y, _ = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask, temperature=temp)
         y = self.seq_pool_dropout(y)
         y = self.classifier_dropout(y)
         return y, total_adaptive_loss

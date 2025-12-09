@@ -332,74 +332,44 @@ class RoPE_AdaptAttention(nn.Module):
         cos, sin = self.rope(q, seq_len=L, position_ids=position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        # Step 4: Token选择（Top-k稀疏化）
-        k_select = max(1, int(L * self.sparsity_target))
+        # Step 4: 温度软稀疏选择（连续权重）
+        target = self.sparsity_target
+        temperature = 1.5
+        s_min = scores.min(dim=-1, keepdim=True).values
+        s_max = scores.max(dim=-1, keepdim=True).values
+        low = s_min
+        high = s_max
+        for _ in range(10):
+            tau = (low + high) / 2.0
+            weights = torch.sigmoid((scores - tau) / temperature)
+            mean_w = weights.mean(dim=-1, keepdim=True)
+            high = torch.where(mean_w > target, high, tau)
+            low = torch.where(mean_w > target, tau, low)
+        tau = (low + high) / 2.0
+        weights = torch.sigmoid((scores - tau) / temperature)  # [B, L]
         
-        # 选择top-k indices
-        topk_scores, topk_idx = torch.topk(scores, k_select, dim=-1, sorted=False)  # [B, k]
-        
-        # 高效gather操作
-        batch_idx = torch.arange(B, device=x.device).view(B, 1, 1, 1)  # [B,1,1,1]
-        head_idx = torch.arange(self.num_heads, device=x.device).view(1, self.num_heads, 1, 1)  # [1,H,1,1]
-        token_idx = topk_idx.view(B, 1, k_select, 1)  # [B,1,k,1]
-        
-        # 扩展索引
-        token_idx_exp = token_idx.expand(B, self.num_heads, k_select, self.head_dim)
-        
-        q_selected = torch.gather(q, 2, token_idx_exp)  # [B, H, k, d]
-        k_selected = torch.gather(k, 2, token_idx_exp)
-        v_selected = torch.gather(v, 2, token_idx_exp)
-        
-        # Step 5: 稀疏注意力计算
-        attn = torch.matmul(q_selected, k_selected.transpose(-2, -1)) * self.scale  # [B,H,k,k]
-        
-        # 处理attention_mask（如果需要）
+        # Step 5: 加权注意力（列偏置）
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,L,L]
+        log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)  # [B,1,1,L]
+        attn_logits = attn_logits + log_w
         if attention_mask is not None and attention_mask.numel() > 1:
-            # 简化：对选中的token，mask通常不需要调整（EP任务中序列无padding）
-            pass
-        
-        attn_weights = torch.softmax(attn, dim=-1)
+            attn_logits = attn_logits + attention_mask
+        attn_weights = torch.softmax(attn_logits, dim=-1)
         attn_weights = self.dropout(attn_weights)
-        
-        out_selected = torch.matmul(attn_weights, v_selected)  # [B, H, k, d]
-        
-        # Step 6: 恢复完整序列
-        # 创建全零输出（未选中token输出0，依赖residual connection）
-        out_full = torch.zeros(B, self.num_heads, L, self.head_dim, 
-                              device=x.device, dtype=x.dtype)
-        
-        # Scatter回去
-        out_full.scatter_(2, token_idx_exp, out_selected)
-        
-        # Reshape & 输出投影
-        out = out_full.transpose(1, 2).contiguous().view(B, L, D)
+        out = torch.matmul(attn_weights, v)  # [B,H,L,d]
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.out_proj(out)
         
-        # Step 7: 计算自适应损失
+        # Step 6: 自适应损失
         if return_loss and self.training:
-            # 更新贡献度EMA（使用注意力权重的统计量）
             with torch.no_grad():
-                # 使用选中token的平均注意力权重作为贡献度代理
-                contrib_selected = attn_weights.mean(dim=(1, 2))  # [B, k]
-                
-                # 扩展到完整序列
-                contrib_full = torch.zeros(B, L, device=x.device)
-                contrib_full.scatter_(1, topk_idx, contrib_selected)
-                
-                # EMA更新
+                contrib_full = attn_weights.mean(dim=(1, 2))  # [B, L]
                 if self.contrib_ema is None or self.contrib_ema.shape != contrib_full.shape:
                     self.contrib_ema = contrib_full
                 else:
-                    self.contrib_ema = (
-                        self.ema_decay * self.contrib_ema + 
-                        (1 - self.ema_decay) * contrib_full
-                    )
-            
-            adaptive_loss = self._adaptive_loss(scores, self.contrib_ema)
-            adaptive_loss = adaptive_loss * self.loss_weight
-            
+                    self.contrib_ema = self.ema_decay * self.contrib_ema + (1 - self.ema_decay) * contrib_full
+            adaptive_loss = self._adaptive_loss(scores, self.contrib_ema) * self.loss_weight
             return out, adaptive_loss
-        
         else:
             if return_loss:
                 return out, torch.tensor(0.0, device=x.device, requires_grad=True)
@@ -420,12 +390,14 @@ class RoPE_CausalBlockAttention(nn.Module):
         self,
         d_model: int,
         num_heads: int,
-        block_size: int = 128,              # Block大小
+        block_size: int = 128,
         max_seq_len: int = None,
         dropout: float = None,
         rope_base: float = None,
         rope_scaling_type: str = None,
         rope_training_length: int = None,
+        use_block_mask: bool = True,
+        window_size: int | None = None,
     ):
         super().__init__()
         assert d_model % num_heads == 0, f"d_model={d_model} 必须能被 num_heads={num_heads} 整除"
@@ -434,6 +406,8 @@ class RoPE_CausalBlockAttention(nn.Module):
         self.head_dim = d_model // num_heads
         self.scale = self.head_dim ** -0.5
         self.block_size = block_size
+        self.use_block_mask = use_block_mask
+        self.window_size = window_size
         
         # 标准投影层
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
@@ -452,7 +426,6 @@ class RoPE_CausalBlockAttention(nn.Module):
         
         self.dropout = nn.Dropout(dropout or RoPEConfig.ROPE_DROPOUT)
         
-        # Causal Block Mask缓存
         self.register_buffer("causal_block_mask_cached", torch.empty(0), persistent=False)
         self.cached_mask_seq_len = 0
     
@@ -509,6 +482,14 @@ class RoPE_CausalBlockAttention(nn.Module):
             self.cached_mask_seq_len = seq_len
         
         return self.causal_block_mask_cached
+
+    def _get_window_mask(self, seq_len: int, device: torch.device, window_size: int) -> torch.Tensor:
+        idx = torch.arange(seq_len, device=device)
+        dist = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()
+        allow = dist <= window_size
+        attn_mask = torch.zeros(1, 1, seq_len, seq_len, device=device, dtype=torch.get_default_dtype())
+        attn_mask.masked_fill_(~allow, float("-inf"))
+        return attn_mask
     
     def forward(
         self,
@@ -542,9 +523,12 @@ class RoPE_CausalBlockAttention(nn.Module):
         # 计算注意力分数: [B, H, L, L]
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         
-        # 应用Causal Block Mask: [B, H, L, L] + [1, 1, L, L]
-        causal_block_mask = self._get_causal_block_mask(L, x.device)
-        attn = attn + causal_block_mask
+        if self.use_block_mask:
+            causal_block_mask = self._get_causal_block_mask(L, x.device)
+            attn = attn + causal_block_mask
+        elif self.window_size is not None and self.window_size > 0:
+            window_mask = self._get_window_mask(L, x.device, self.window_size)
+            attn = attn + window_mask
         
         # 应用额外的attention_mask（如padding mask）
         if attention_mask is not None:
@@ -623,8 +607,17 @@ class CBAT(nn.Module):
             nn.Conv2d(d_model, d_model, kernel_size=1, bias=False),
             nn.BatchNorm2d(d_model),
         )
+        ms_kernels = [7, 15, 31]
+        self.ms_convs = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(d_model, d_model, kernel_size=k, padding=k//2, groups=d_model, bias=False),
+                nn.GELU(),
+                nn.Conv1d(d_model, d_model, kernel_size=1, bias=False),
+            )
+            for k in ms_kernels
+        ])
+        self.ms_fuse = nn.Conv1d(d_model * len(ms_kernels), d_model, kernel_size=1, bias=False)
         
-        # RoPE Causal Block Attention
         self.causal_block_attn = RoPE_CausalBlockAttention(
             d_model=d_model,
             num_heads=num_heads,
@@ -634,6 +627,8 @@ class CBAT(nn.Module):
             rope_base=rope_base,
             rope_scaling_type=rope_scaling_type,
             rope_training_length=rope_training_length,
+            use_block_mask=False,
+            window_size=128,
         )
         
         # 1x1 Conv
@@ -642,11 +637,13 @@ class CBAT(nn.Module):
             nn.BatchNorm2d(d_model),
         )
         
-        # Gate for Module 1 (门控融合)
         self.gate_1 = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid(),
         )
+        self.gate_1_proj = nn.Linear(d_model * 2, d_model)
+        self.gate_temp1 = nn.Parameter(torch.tensor(2.0))
+        self.alpha1 = nn.Parameter(torch.tensor(0.1))
         
         # ============ Module 2 组件 ============
         
@@ -675,11 +672,13 @@ class CBAT(nn.Module):
             nn.Dropout(dropout or RoPEConfig.ROPE_DROPOUT),
         )
         
-        # Gate for Module 2
         self.gate_2 = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid(),
         )
+        self.gate_2_proj = nn.Linear(d_model * 2, d_model)
+        self.gate_temp2 = nn.Parameter(torch.tensor(2.0))
+        self.alpha2 = nn.Parameter(torch.tensor(0.1))
         
         # Layer Norms
         self.norm_1 = nn.LayerNorm(d_model)
@@ -722,6 +721,13 @@ class CBAT(nn.Module):
         
         # [B, D, L] -> [B, L, D]
         return x_flat.transpose(1, 2).contiguous()
+
+    def _ms_conv(self, x: torch.Tensor) -> torch.Tensor:
+        x1d = x.transpose(1, 2)
+        outs = [m(x1d) for m in self.ms_convs]
+        xcat = torch.cat(outs, dim=1)
+        xf = self.ms_fuse(xcat)
+        return xf.transpose(1, 2)
     
     def forward(
         self,
@@ -749,57 +755,19 @@ class CBAT(nn.Module):
         # Pre-norm
         x_norm = self.norm_1(x)  # [B, L, D]
         
-        # 转2D: [B, L, D] -> [B, D, H, W]
-        x_2d = self._to_2d(x_norm)
-        
-        # 7x7 Conv (同时作为残差路径)
-        residual_7x7 = self.conv_7x7(x_2d)  # [B, D, H, W]
-        
-        # 可分离3x3
-        x_2d = self.separable_conv(residual_7x7)  # [B, D, H, W]
-        
-        # 转1D: [B, D, H, W] -> [B, L, D]
-        x_1d = self._to_1d_with_length(x_2d, original_length)
-        
-        # Causal Block Attention
+        residual_1 = x_norm
+        x_main = self._ms_conv(x_norm)
         x_attn = self.causal_block_attn(
-            x_1d,
+            x_main,
             attention_mask=attention_mask,
             position_ids=position_ids,
-        )  # [B, L, D]
-        
-        # 残差连接1: 7*7和CausalBlock之间
-        residual_7x7_1d = self._to_1d_with_length(residual_7x7, original_length)
-        x_attn = x_attn + residual_7x7_1d  # [B, L, D]
-        
-        # 转2D
-        x_2d = self._to_2d(x_attn)  # [B, D, H, W]
-        
-        # 1x1 Conv
-        x_2d = self.conv_1x1(x_2d)  # [B, D, H, W]
-        
-        # 转1D准备gate
-        x_main = self._to_1d_with_length(x_2d, original_length)
-        residual_1 = self._to_1d_with_length(residual_7x7, original_length)
-        
-        # Gate融合 (主路径 vs 7x7残差)
-        gate_input = torch.cat([x_main, residual_1], dim=-1)  # [B, L, 2D]
-        gate_weight = self.gate_1(gate_input)  # [B, L, D]
-        x_out_1 = gate_weight * x_main + (1 - gate_weight) * residual_1  # [B, L, D]
-        
-        # 残差连接2: CausalBlock和模块一门控之间
-        x_out_1 = x_out_1 + x_attn  # [B, L, D]
-        
-        # 全局残差连接 - 确保维度匹配
-        if x_out_1.shape[1] != identity.shape[1]:
-            # 如果维度不匹配，截断或填充identity
-            if x_out_1.shape[1] > identity.shape[1]:
-                x_out_1 = x_out_1[:, :identity.shape[1], :]
-            else:
-                padding_size = identity.shape[1] - x_out_1.shape[1]
-                x_out_1 = torch.nn.functional.pad(x_out_1, (0, 0, 0, padding_size))
-        
-        x_out_1 = x_out_1 + identity  # [B, L, D]
+        )
+        gate_input = torch.cat([x_main, residual_1], dim=-1)
+        gate_logits = self.gate_1_proj(gate_input)
+        gate_weight = torch.sigmoid(gate_logits / self.gate_temp1)
+        x_out_1 = gate_weight * x_main + (1 - gate_weight) * residual_1
+        x_out_1 = x_out_1 + self.alpha1 * x_attn
+        x_out_1 = x_out_1 + identity
         
         # ============ Module 2 ============
         
@@ -838,13 +806,11 @@ class CBAT(nn.Module):
         x_ffn = self.norm_3(x_adapt)  # [B, L, D]
         x_ffn = self.ffn(x_ffn)  # [B, L, D]
         
-        # Gate融合 (FFN输出 vs AdaptAttn残差)
-        gate_input = torch.cat([x_ffn, residual_2], dim=-1)  # [B, L, 2D]
-        gate_weight = self.gate_2(gate_input)  # [B, L, D]
-        x_out_2 = gate_weight * x_ffn + (1 - gate_weight) * residual_2  # [B, L, D]
-        
-        # 残差连接3: 模块一门控和模块二门控之间
-        x_out_2 = x_out_2 + x_out_1  # [B, L, D]
+        gate_input = torch.cat([x_ffn, residual_2], dim=-1)
+        gate_logits2 = self.gate_2_proj(gate_input)
+        gate_weight2 = torch.sigmoid(gate_logits2 / self.gate_temp2)
+        x_out_2 = gate_weight2 * x_ffn + (1 - gate_weight2) * residual_2
+        x_out_2 = x_out_2 + x_out_1
         
         # 全局残差连接 - 确保维度匹配
         if x_out_2.shape[1] != x_out_1.shape[1]:
