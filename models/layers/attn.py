@@ -53,11 +53,16 @@ class RoPEAttention(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        
         if attention_mask is not None:
-            attn = attn + attention_mask
-        
+            mask_exp = attention_mask.expand(B, self.num_heads, L, L)
+            mask_bool = mask_exp != 0
+            attn = attn.masked_fill(mask_bool, -1e9)
         attn = attn.softmax(dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
+        if attention_mask is not None:
+            row_all_masked = mask_bool.all(dim=-1)
+            attn = attn.masked_fill(mask_bool, 0.0)
+            attn = attn * (~row_all_masked).unsqueeze(-1).to(attn.dtype)
         attn = self.dropout(attn)
         
         out = torch.matmul(attn, v)

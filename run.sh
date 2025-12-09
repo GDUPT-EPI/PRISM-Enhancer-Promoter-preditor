@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 运行PRISM.py脚本
-python evaluate_model.py
+python PRISM.py
 
 # 关机
 shutdown -h now

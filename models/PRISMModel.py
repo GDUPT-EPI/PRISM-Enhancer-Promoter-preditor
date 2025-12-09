@@ -137,6 +137,7 @@ class SequencePooling(nn.Module):
         if key_padding_mask is not None:
             w = w.masked_fill(key_padding_mask, -1e9)
         w = torch.softmax(w, dim=-1)
+        w = torch.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
         w = w.masked_fill((key_padding_mask if key_padding_mask is not None else torch.zeros_like(w, dtype=torch.bool)), 0.0)
         denom = w.sum(dim=-1, keepdim=True).clamp(min=1e-6)
         w = w / denom
@@ -276,6 +277,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             s = j * POOL_KERNEL_SIZE  # 起点
             e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_en_orig - 1)  # 终点
             enh_pad_mask[:, j] = pad_en[:, s:e+1].all(dim=-1)  # 设置掩码
+        if enh_pad_mask.any():
+            for b in range(B_en):
+                if enh_pad_mask[b].all():
+                    enh_pad_mask[b, -1] = False
         enh_attn_mask = torch.zeros(B_en, 1, L_en, L_en, device=enhancer_ids.device, dtype=torch.float32)  # 增强子注意力掩码
         if enh_pad_mask.any():  # 如果有填充
             mask_cols = enh_pad_mask  # 掩码列
@@ -294,6 +299,10 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             s = j * POOL_KERNEL_SIZE  # 起点
             e = min(s + POOL_KERNEL_SIZE + CNN_KERNEL_SIZE - 2, L_pr_orig - 1)  # 终点
             pr_pad_mask[:, j] = pad_pr[:, s:e+1].all(dim=-1)  # 设置掩码
+        if pr_pad_mask.any():
+            for b in range(B_pr):
+                if pr_pad_mask[b].all():
+                    pr_pad_mask[b, -1] = False
         pr_attn_mask = torch.zeros(B_pr, 1, L_pr, L_pr, device=promoter_ids.device, dtype=torch.float32)  # 启动子注意力掩码
         if pr_pad_mask.any():  # 如果有填充
             for b in range(B_pr):  # 遍历批次
