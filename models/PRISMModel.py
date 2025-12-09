@@ -11,11 +11,31 @@ from config import *
 from models.pleat.embedding import create_dna_embedding_layer
 from models.pleat.RoPE import RoPEConfig
 from models.layers.attn import *
-from models.layers.FourierKAN import FourierKAN
+from models.layers.FourierKAN import FourierKAN, FourierEnergyKAN
 # ISAB 上下文结构不再使用，直接序列池化分类
 from models.pleat.adaptive_immax import AdaptiveIMMAXLoss
 from models.pleat.SpeculationPenalty import SpeculationPenaltyLoss
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
+from torch.autograd import Function
+
+class GradientReversalLayer(Function):
+    """
+    Gradient Reversal Layer (GRL)
+    Forward: identity
+    Backward: scale * -1
+    """
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        output = grad_output.neg() * ctx.alpha
+        return output, None
+
+def grad_reverse(x, alpha=1.0):
+    return GradientReversalLayer.apply(x, alpha)
 
 
 class CBATTransformerEncoderLayer(nn.Module):  # 定义CBAT Transformer编码器层类
@@ -235,6 +255,24 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         self.seq_pool = SequencePooling(d_model=OUT_CHANNELS)
         self.seq_pool_dropout = nn.Dropout(p=SEQ_POOL_DROPOUT)  # 序列池化后的Dropout
         self.classifier_dropout = nn.Dropout(p=CLASSIFIER_DROPOUT)  # 分类器前的Dropout
+        
+        # 内势 U_I 生成器 (绝对不变量)
+        self.U_I_generator = FourierEnergyKAN(
+            in_features=OUT_CHANNELS,
+            out_features=1,
+            grid_size=5,
+            width=2 * OUT_CHANNELS + 1,
+            non_negative=False,  # U_I 可以是负的
+        )
+        
+        # 域判别器 (用于清洗 U_I 中的环境信息)
+        self.domain_discriminator = nn.Sequential(
+            nn.Linear(OUT_CHANNELS, OUT_CHANNELS),
+            nn.ReLU(),
+            nn.Linear(OUT_CHANNELS, num_classes if num_classes else 2) # 预测细胞系
+        )
+        
+        # 保留旧的classifier以兼容权重加载，但forward中不使用
         self.classifier = FourierKAN(  # KAN分类头
             in_features=OUT_CHANNELS,  # 输入特征数
             out_features=1,  # 输出特征数
@@ -258,7 +296,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         self,
         enhancer_ids: torch.Tensor,  # 增强子ID
         promoter_ids: torch.Tensor,  # 启动子ID
-    ) -> Tuple[torch.Tensor, torch.Tensor]:  # 返回类型
+        cell_labels: Optional[torch.Tensor] = None, # 细胞系标签 (用于GRL训练)
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:  # 返回类型
         """前向传播
 
         编码E/P序列、进行跨序列交互与CBAT增强，输出互作概率。
@@ -266,9 +305,13 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         Args:
             enhancer_ids: 增强子序列ID，形状 `[B, L_en]`
             promoter_ids: 启动子序列ID，形状 `[B, L_pr]`
+            cell_labels: 细胞系标签 [B]
 
         Returns:
-            (prob, adaptive_loss): 概率与自适应注意力损失
+            (prob, adaptive_loss, aux_outputs): 
+            prob: 预测概率 (仅基于 U_I)
+            adaptive_loss: 自适应注意力损失
+            aux_outputs: 辅助输出字典 {'z_I': 特征, 'domain_logits': 域预测, 'U_I': 内势}
         """
         K = CNN_KERNEL_SIZE  # 卷积核大小
         P = POOL_KERNEL_SIZE  # 池化核大小
@@ -348,7 +391,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         if L_pr > 0 and L_en > 0:
             start_e = L_pr + anchors.size(0)
             cross_mask[:, 0, start_e:start_e+L_en, start_e:start_e+L_en] = float('-inf')
-        attn_out, cb_loss = self.cross_attn_1(
+        attn_out, cb_loss, z_I_1 = self.cross_attn_1(
             combined_seq,
             attention_mask=cross_mask,
             return_loss=True,
@@ -374,7 +417,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         if L_en > 0 and L_pr > 0:
             start_p = L_en + anchors_e.size(0)
             cross_mask2[:, 0, start_p:start_p+L_pr, start_p:start_p+L_pr] = float('-inf')
-        attn_out2, cb_loss2 = self.cross_attn_2(
+        attn_out2, cb_loss2, z_I_2 = self.cross_attn_2(
             combined2_seq,
             attention_mask=cross_mask2,
             return_loss=True,
@@ -398,14 +441,36 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         # 方向一致性正则
         total_adaptive_loss = total_adaptive_loss + ((y - y_p_dir).pow(2).mean() * 0.05)
         y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
-        y = self.classifier_dropout(y)  # 应用分类器前的Dropout
-        result = self.classifier(y)
-        prob = torch.sigmoid(result)
-        prob = torch.nan_to_num(prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        if not torch.isfinite(prob).all():
-            prob = torch.sigmoid(result.detach())
-            prob = torch.nan_to_num(prob, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
-        return prob, total_adaptive_loss
+        
+        # ========== 正交解耦架构核心 ==========
+        
+        # 1. 提取内势特征 z_I
+        # y 已经是池化后的序列特征，作为 z_I
+        z_I = y
+        
+        # 2. 对抗训练 (Gradient Reversal)
+        # 强迫 z_I 剔除环境信息
+        if self.training:
+            z_I_reversed = grad_reverse(z_I, alpha=1.0)
+            domain_logits = self.domain_discriminator(z_I_reversed)
+        else:
+            domain_logits = None
+            
+        # 3. 计算内势 U_I (Intrinsic Potential)
+        U_I = self.U_I_generator(z_I) # [B, 1]
+        
+        # 4. 生成预测 (仅基于 U_I，环境阻抗 R_E 由外部模块提供)
+        # Backbone 必须有能力独立预测 (当 R_E=0 时)
+        logits = U_I
+        prob = torch.sigmoid(logits)
+        
+        aux_outputs = {
+            'z_I': z_I,
+            'domain_logits': domain_logits,
+            'U_I': U_I
+        }
+
+        return prob, total_adaptive_loss, aux_outputs
 
     def extract_pooled_feature(
         self,

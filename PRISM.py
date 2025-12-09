@@ -6,6 +6,8 @@ import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
 from models.PRISMModel import PRISMBackbone
+from models.layers.FourierKAN import FourierEnergyKAN
+from models.AuxiliaryModel import AuxiliaryModel
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch.nn.functional as F
 import torch
@@ -127,7 +129,7 @@ def _find_latest_epoch(save_dir: str) -> int:  # 查找最新epoch
             epochs.append(int(m2.group(1)))  # 添加epoch
     return max(epochs) if epochs else 0  # 返回最大epoch或0
 
-def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):  # 加载恢复状态
+def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Module, env_model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler: ReduceLROnPlateau):  # 加载恢复状态
     latest_epoch = _find_latest_epoch(save_dir)  # 查找最新epoch
     if latest_epoch <= 0:
         return 0
@@ -141,6 +143,8 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
             logger.info(f"加载完整状态: {full_path} (epoch={state_epoch})")
             if 'model_state' in state:
                 model.load_state_dict(state['model_state'], strict=False)
+            if 'env_model_state' in state:
+                env_model.load_state_dict(state['env_model_state'], strict=False)
             if 'optimizer_state' in state:
                 try:
                     saved_opt = state['optimizer_state']
@@ -168,6 +172,8 @@ def _load_resume_state(save_dir: str, device: torch.device, model: torch.nn.Modu
                     model.load_state_dict(sd['backbone'], strict=False)
                 else:
                     model.load_state_dict(sd, strict=False)
+                if 'env_model' in sd:
+                    env_model.load_state_dict(sd['env_model'], strict=False)
             logger.info(f"加载模型检查点: {model_path} (epoch={latest_epoch})")
     return latest_epoch
 
@@ -236,9 +242,31 @@ def main():  # 主函数
     model = PRISMBackbone(num_classes=num_cells).to(device)  # 创建模型
     model = model.to(device)  # 移动到设备
     
+    # 辅助模型 (环境阻抗 R_E) - 直接在 PRISM.py 中构建简单版本，避免过多文件依赖循环
+    class EnvResistanceModel(torch.nn.Module):
+        def __init__(self, num_cells, d_model):
+            super().__init__()
+            self.cell_emb = torch.nn.Embedding(num_cells, d_model)
+            self.resistance_generator = FourierEnergyKAN(
+                in_features=d_model, 
+                out_features=1, 
+                grid_size=5, 
+                width=2 * d_model + 1,
+                non_negative=True # 阻抗必须非负
+            )
+        
+        def forward(self, cell_ids):
+            # 获取细胞系原型 (Prototype)
+            z_F = self.cell_emb(cell_ids)
+            # 计算阻抗 R_E
+            R_E = self.resistance_generator(z_F)
+            return R_E, z_F
+
+    env_model = EnvResistanceModel(num_cells, OUT_CHANNELS).to(device)
+    
     # 打印模型信息
-    total_params = sum(p.numel() for p in model.parameters())  # 总参数数
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)  # 可训练参数数
+    total_params = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in env_model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) + sum(p.numel() for p in env_model.parameters() if p.requires_grad)
     logger.info(f"模型总参数: {total_params:,}")  # 记录日志
     logger.info(f"可训练参数: {trainable_params:,}")  # 记录日志
     logger.info(f"GPU可用: {torch.cuda.is_available()}")  # 记录日志
@@ -249,7 +277,11 @@ def main():  # 主函数
 
     start_epoch = 0  # 起始epoch
 
-    optimizer = torch.optim.AdamW(list(model.parameters()), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)  # 创建优化器
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(env_model.parameters()), 
+        lr=LEARNING_RATE, 
+        weight_decay=WEIGHT_DECAY
+    )  # 创建优化器
     total_steps = len(train_loader) * EPOCH  # 总步数
     scheduler = None  # 调度器为空
     
@@ -264,7 +296,7 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     
     os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)  # 创建模型保存目录
-    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, optimizer, scheduler)  # 加载恢复状态
+    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, env_model, optimizer, scheduler)  # 加载恢复状态
     if start_epoch > 0:  # 如果有起始epoch
         logger.info(f"从最近权重恢复: epoch {start_epoch}")  # 记录日志
     else:  # 如果没有起始epoch
@@ -273,8 +305,9 @@ def main():  # 主函数
         logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")  # 记录日志
     for epoch_idx in range(start_epoch, EPOCH):  # 遍历epoch
         # 训练
-        logger.info("Loss Weights: ep=1.0")  # 记录日志
+        logger.info("Loss Weights: ep=1.0, orth=0.1, domain=0.1")  # 记录日志
         model.train()  # 设置为训练模式
+        env_model.train()
         total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0  # 初始化统计变量
         total_tp = 0; total_fp = 0; total_fn = 0  # 初始化TP、FP、FN
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)  # 创建进度条
@@ -285,10 +318,48 @@ def main():  # 主函数
             # enh_ids = apply_random_mask(enh_ids)
             # pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)  # 移动到设备
+            
+            # 将细胞系名称转换为ID
+            cell_ids = torch.tensor([label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device)
+            
             precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
-            ep_outputs, adaptive_loss = model(enh_ids, pr_ids)  # 前向传播
-            ep_outputs = ep_outputs.squeeze(-1)  # 压缩维度
-            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)  # 计算损失
+            
+            # 1. 前向传播 Backbone (获取 U_I 和特征 z_I)
+            _, adaptive_loss, aux_outputs = model(enh_ids, pr_ids, cell_labels=cell_ids)
+            U_I = aux_outputs['U_I'].squeeze(-1) # [B]
+            z_I = aux_outputs['z_I'] # [B, D]
+            domain_logits = aux_outputs['domain_logits'] # [B, NumCells]
+            
+            # 2. 前向传播 Environment Model (获取 R_E 和特征 z_F)
+            R_E, z_F = env_model(cell_ids)
+            R_E = R_E.squeeze(-1) # [B]
+            
+            # 3. 能量耗散计算: Logits = U_I - R_E
+            # Boltzmann分布: P(y=1) = sigmoid((U_I - R_E)/T)
+            logits = U_I - R_E
+            ep_outputs = torch.sigmoid(logits)
+            
+            # 4. 计算损失
+            
+            # A. 主任务损失 (BCE)
+            main_loss = F.binary_cross_entropy(ep_outputs, labels.float())
+            
+            # B. 正交损失 (Orthogonality Loss)
+            # 强迫 z_I 与 z_F 正交
+            # z_I: [B, D], z_F: [B, D]
+            # Normalize vectors to focus on direction
+            z_I_norm = F.normalize(z_I, p=2, dim=1)
+            z_F_norm = F.normalize(z_F, p=2, dim=1)
+            orth_loss = torch.abs(torch.sum(z_I_norm * z_F_norm, dim=1)).mean()
+            
+            # C. 域对抗损失 (Domain Adversarial Loss)
+            # 强迫 z_I 不包含细胞系信息 (maximize entropy of domain prediction)
+            # 由于使用了 GRL，我们只需要最小化 CrossEntropy
+            domain_loss = F.cross_entropy(domain_logits, cell_ids)
+            
+            # D. 总损失
+            loss = main_loss + 0.1 * orth_loss + 0.1 * domain_loss + adaptive_loss
+            
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
                 ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率
@@ -299,7 +370,7 @@ def main():  # 主函数
                 precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0  # 计算精确率
                 recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0  # 计算召回率
                 f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0  # 计算F1
-            loss = ep_loss  # 损失
+            # loss = ep_loss  # 损失 (Fixed bug: removed this line)
             optimizer.zero_grad();  # 清空梯度
             loss.backward();  # 反向传播
             torch.nn.utils.clip_grad_norm_(list(model.parameters()), max_norm=GRAD_CLIP_MAX_NORM);  # 梯度裁剪
@@ -308,9 +379,8 @@ def main():  # 主函数
             total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1  # 累加统计
             pbar.set_postfix({  # 设置进度条后缀
                 'loss': f'{loss.item():.4f}',  # 损失
-                # 'base': f"{loss_details['base']:.4f}",  # 基础损失
-                # 'adaptive': f"{loss_details['adaptive']:.4f}",  # 自适应损失
-                # 'penalty': f"{loss_details['penalty']:.4f}",  # 惩罚损失
+                'orth': f'{orth_loss.item():.4f}',
+                'dom': f'{domain_loss.item():.4f}',
                 'ep_acc': f'{ep_acc:.4f}',  # 准确率
                 'prec': f'{precision:.4f}',  # 精确率
                 'rec': f'{recall:.4f}',  # 召回率
@@ -326,11 +396,12 @@ def main():  # 主函数
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")  # 检查点路径
-        torch.save({'backbone': model.state_dict()}, checkpoint_path)  # 保存模型
+        torch.save({'backbone': model.state_dict(), 'env_model': env_model.state_dict()}, checkpoint_path)  # 保存模型
         logger.info(f"保存检查点: {checkpoint_path}")  # 记录日志
         full_state_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")  # 完整状态路径
         full_state = {  # 完整状态
             'model_state': model.state_dict(),  # 模型状态
+            'env_model_state': env_model.state_dict(), # 环境模型状态
             'optimizer_state': optimizer.state_dict(),  # 优化器状态
             'epoch': epoch_idx + 1,  # epoch
         }

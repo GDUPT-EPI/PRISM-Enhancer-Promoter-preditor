@@ -589,6 +589,10 @@ class CBAT(nn.Module):
     结构:
     - Module 1: 7x7conv -> sep_3x3 -> CausalBlockAttn -> 1x1conv -> gate (residual from 7x7)
     - Module 2: AdaptAttn -> FFN -> gate (residual from AdaptAttn)
+    
+    Features:
+    - 支持正交损失计算 (Orthogonal Loss Support)
+    - 返回中间特征用于解耦约束
     """
     
     def __init__(
@@ -770,7 +774,7 @@ class CBAT(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         return_loss: bool = True,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """
         Args:
             x: [B, L, D] 输入序列
@@ -779,7 +783,8 @@ class CBAT(nn.Module):
             return_loss: 是否返回adaptive loss
             
         Returns:
-            output [B, L, D] 或 (output, adaptive_loss)
+            output [B, L, D] 或 (output, adaptive_loss) 或 (output, adaptive_loss, feature_z)
+            feature_z: 用于正交损失计算的中间特征 [B, L, D]
         """
         B, L, D = x.shape
         original_length = L  # 保存原始长度
@@ -809,6 +814,10 @@ class CBAT(nn.Module):
         
         # Pre-norm
         x_norm = self.norm_2(x_out_1)  # [B, L, D]
+        
+        # 提取中间特征用于正交解耦约束
+        # 这里我们选择Module 1输出经过Norm后的特征作为"物理交互特征"的代表
+        feature_z = x_norm
         
         # Adaptive Attention (返回loss)
         if return_loss and self.training:
@@ -870,6 +879,6 @@ class CBAT(nn.Module):
                     return_loss=False,
                 )
                 output = 0.9 * output + 0.1 * out_dense
-            return output, adaptive_loss
+            return output, adaptive_loss, feature_z
         else:
             return output

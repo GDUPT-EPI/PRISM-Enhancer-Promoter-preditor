@@ -130,6 +130,41 @@ class FourierKAN(nn.Module):
         
         return out
 
+class FourierEnergyKAN(nn.Module):
+    """
+    Fourier Energy Operator: 专门用于计算物理势能和环境阻抗
+    
+    Energy(z) = FourierKAN(z)
+    
+    特点:
+    - 强制输出非负能量 (Softplus)
+    - 可用于 U_I (内势) 和 R_E (阻抗) 的计算
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int = 1,
+        grid_size: int = 5,
+        width: Optional[int] = None,
+        non_negative: bool = False,  # 是否强制非负 (用于阻抗 R_E)
+    ):
+        super().__init__()
+        self.kan = FourierKAN(
+            in_features=in_features,
+            out_features=out_features,
+            grid_size=grid_size,
+            width=width
+        )
+        self.non_negative = non_negative
+        if non_negative:
+            self.softplus = nn.Softplus()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        energy = self.kan(x)
+        if self.non_negative:
+            energy = self.softplus(energy)
+        return energy
+
 
 # # ============ 完整训练示例 ============
 # if __name__ == "__main__":
