@@ -286,9 +286,9 @@ def main():  # 主函数
             # pr_ids = apply_random_mask(pr_ids)
             labels = labels.to(device)  # 移动到设备
             precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
-            ep_outputs, adaptive_loss = model(enh_ids, pr_ids)
-            ep_outputs = ep_outputs.squeeze(-1)
-            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)
+            ep_outputs, adaptive_loss = model(enh_ids, pr_ids)  # 前向传播
+            ep_outputs = ep_outputs.squeeze(-1)  # 压缩维度
+            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)  # 计算损失
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
                 ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率

@@ -223,6 +223,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
             dropout=TRANSFORMER_DROPOUT,
         )
+        self.cross_attn_1_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)
         self.cross_attn_2 = CBAT(
             d_model=OUT_CHANNELS,
             num_heads=TRANSFORMER_HEADS,
@@ -230,7 +231,6 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             max_seq_len=RoPEConfig.ROPE_MAX_SEQ_LEN,
             dropout=TRANSFORMER_DROPOUT,
         )
-        self.cross_attn_1_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)
         self.cross_attn_2_dropout = nn.Dropout(p=CROSS_ATTN_DROPOUT)
         self.seq_pool = SequencePooling(d_model=OUT_CHANNELS)
         self.seq_pool_dropout = nn.Dropout(p=SEQ_POOL_DROPOUT)  # 序列池化后的Dropout
@@ -249,7 +249,9 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             weight_decay=WEIGHT_DECAY,  # 权重衰减
         )
         self.anchor_temp = nn.Linear(OUT_CHANNELS, 1)
-        self.fuse_gate = nn.Sequential(nn.LayerNorm(OUT_CHANNELS * 2), nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS), nn.Sigmoid())
+        self.dir_gate_proj = nn.Linear(OUT_CHANNELS * 2, OUT_CHANNELS)
+        self.dir_gate_temp = nn.Parameter(torch.tensor(1.0))
+        self.anchor_proj = nn.Linear(OUT_CHANNELS, OUT_CHANNELS * (ANCHOR_COUNT if 'ANCHOR_COUNT' in globals() else 2))
 
 
     def forward(  # 前向传播
@@ -329,10 +331,14 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         pr_pre = self.pre_pr_attn(pr.permute(1, 0, 2), attention_mask=pr_attn_mask)  # 启动子预注意力
         pr = pr_pre.permute(1, 0, 2)  # 转置维度
 
-        combined = torch.cat([pr, enh], dim=0)
+        y_p_init, _ = self.seq_pool(pr.permute(1, 0, 2), key_padding_mask=pr_pad_mask)
+        anchors = self.anchor_proj(y_p_init).view(y_p_init.size(0), -1, OUT_CHANNELS)
+        anchors = anchors.permute(1, 0, 2)
+        combined = torch.cat([pr, anchors, enh], dim=0)
         combined_seq = combined.permute(1, 0, 2)
         L_total = combined_seq.size(1)
-        combined_pad_mask = torch.cat([pr_pad_mask, enh_pad_mask], dim=1)
+        anchor_pad_mask = torch.zeros(enhancer_ids.size(0), anchors.size(0), dtype=torch.bool, device=enhancer_ids.device)
+        combined_pad_mask = torch.cat([pr_pad_mask, anchor_pad_mask, enh_pad_mask], dim=1)
         cross_mask = torch.zeros(B_en, 1, L_total, L_total, device=enhancer_ids.device, dtype=torch.float32)
         if combined_pad_mask.any():
             for b in range(B_en):
@@ -340,47 +346,57 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 if cols.any():
                     cross_mask[b, 0, :, cols] = float('-inf')
         if L_pr > 0 and L_en > 0:
-            cross_mask[:, 0, L_pr:L_pr+L_en, L_pr:L_pr+L_en] = float('-inf')
+            start_e = L_pr + anchors.size(0)
+            cross_mask[:, 0, start_e:start_e+L_en, start_e:start_e+L_en] = float('-inf')
         attn_out, cb_loss = self.cross_attn_1(
             combined_seq,
             attention_mask=cross_mask,
             return_loss=True,
         )
-        att1 = attn_out[:, L_pr:L_pr+L_en, :].permute(1, 0, 2)
+        att1 = attn_out[:, L_pr+anchors.size(0):L_pr+anchors.size(0)+L_en, :].permute(1, 0, 2)
         att1 = self.cross_attn_1_dropout(att1)
         enh_x1 = enh + att1
 
-        combined2 = torch.cat([enh, pr], dim=0)
+        # 对称 P←E 分支
+        y_e_init, _ = self.seq_pool(enh.permute(1, 0, 2), key_padding_mask=enh_pad_mask)
+        anchors_e = self.anchor_proj(y_e_init).view(y_e_init.size(0), -1, OUT_CHANNELS).permute(1, 0, 2)
+        combined2 = torch.cat([enh, anchors_e, pr], dim=0)
         combined2_seq = combined2.permute(1, 0, 2)
         L_total2 = combined2_seq.size(1)
-        combined2_pad_mask = torch.cat([enh_pad_mask, pr_pad_mask], dim=1)
-        cross_mask2 = torch.zeros(B_en, 1, L_total2, L_total2, device=enhancer_ids.device, dtype=torch.float32)
+        anchor_e_pad_mask = torch.zeros(promoter_ids.size(0), anchors_e.size(0), dtype=torch.bool, device=promoter_ids.device)
+        combined2_pad_mask = torch.cat([enh_pad_mask, anchor_e_pad_mask, pr_pad_mask], dim=1)
+        cross_mask2 = torch.zeros(B_pr, 1, L_total2, L_total2, device=promoter_ids.device, dtype=torch.float32)
         if combined2_pad_mask.any():
-            for b in range(B_en):
+            for b in range(B_pr):
                 cols = combined2_pad_mask[b]
                 if cols.any():
                     cross_mask2[b, 0, :, cols] = float('-inf')
         if L_en > 0 and L_pr > 0:
-            cross_mask2[:, 0, L_en:L_en+L_pr, L_en:L_en+L_pr] = float('-inf')  # 屏蔽P→P
+            start_p = L_en + anchors_e.size(0)
+            cross_mask2[:, 0, start_p:start_p+L_pr, start_p:start_p+L_pr] = float('-inf')
         attn_out2, cb_loss2 = self.cross_attn_2(
             combined2_seq,
             attention_mask=cross_mask2,
             return_loss=True,
         )
-        att2 = attn_out2[:, L_en:L_en+L_pr, :].permute(1, 0, 2)  # 取P段
+        att2 = attn_out2[:, L_en+anchors_e.size(0):L_en+anchors_e.size(0)+L_pr, :].permute(1, 0, 2)
         att2 = self.cross_attn_2_dropout(att2)
         pr_x1 = pr + att2
 
         total_adaptive_loss = cb_loss + cb_loss2
 
         x_seq = enh_x1.permute(1, 0, 2)
-        x_seq_p = pr_x1.permute(1, 0, 2)
+        x_seq_p = pr.permute(1, 0, 2)
         y_p, _ = self.seq_pool(x_seq_p, key_padding_mask=pr_pad_mask)
         temp = F.softplus(self.anchor_temp(y_p)).squeeze(-1) + 1.0
-        y_e, _ = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask, temperature=temp)
-        fuse_in = torch.cat([y_e, y_p], dim=-1)
-        g = self.fuse_gate(fuse_in)
-        y = g * y_e + (1 - g) * y_p
+        y, _ = self.seq_pool(x_seq, key_padding_mask=enh_pad_mask, temperature=temp)
+        temp2 = F.softplus(self.anchor_temp(y_e_init)).squeeze(-1) + 1.0
+        y_p_dir, _ = self.seq_pool(pr_x1.permute(1, 0, 2), key_padding_mask=pr_pad_mask, temperature=temp2)
+        dir_gate_in = torch.cat([y, y_p_dir], dim=-1)
+        dir_gate = torch.sigmoid(self.dir_gate_proj(dir_gate_in) / self.dir_gate_temp.clamp_min(0.5))
+        y = dir_gate * y + (1 - dir_gate) * y_p_dir
+        # 方向一致性正则
+        total_adaptive_loss = total_adaptive_loss + ((y - y_p_dir).pow(2).mean() * 0.05)
         y = self.seq_pool_dropout(y)  # 应用序列池化后的Dropout
         y = self.classifier_dropout(y)  # 应用分类器前的Dropout
         result = self.classifier(y)
@@ -512,10 +528,8 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         Returns:
             总损失或(损失, 细节)
         """
-        outputs = torch.nan_to_num(outputs, nan=0.5, posinf=1.0, neginf=0.0)
-        outputs = outputs.clamp(1e-6, 1.0 - 1e-6)
-        base_loss = self.criterion(outputs, labels)
-        penalty_loss = self.spec_penalty(outputs, labels)
+        base_loss = self.criterion(outputs, labels)  # 基础损失
+        penalty_loss = self.spec_penalty(outputs, labels)  # 惩罚损失
         total = base_loss + adaptive_loss +  penalty_loss  # 总损失
         if return_details:  # 如果需要返回细节
             return total, {  # 返回总损失和细节

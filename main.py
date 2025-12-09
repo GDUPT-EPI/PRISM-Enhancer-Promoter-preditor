@@ -316,8 +316,8 @@ def main():  # 主函数
             beta = torch.tanh(M_prime)
             y_mod = gamma * y_feat + beta
             # 4) 送入原分类器头（FourierKAN）得到概率
-            ep_outputs = torch.sigmoid(model.classifier(y_mod)).squeeze(-1)
-            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)
+            ep_outputs = model.classifier(y_mod).squeeze(-1)
+            ep_loss, loss_details = model.compute_loss(ep_outputs, labels.float(), adaptive_loss, return_details=True)  # 计算损失
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
                 ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率

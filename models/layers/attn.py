@@ -1,3 +1,8 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from typing import Optional, Tuple, Union
 from models.pleat.RoPE import *
 
 
@@ -124,6 +129,7 @@ class RoPE_AdaptAttention(nn.Module):
         )
         
         self.dropout = nn.Dropout(dropout or RoPEConfig.ROPE_DROPOUT)
+        self.sparse_temp = nn.Parameter(torch.tensor(1.0))
         
         # Adaptive组件
         
@@ -163,6 +169,7 @@ class RoPE_AdaptAttention(nn.Module):
         # 7. 梯度贡献度缓存（EMA）
         self.register_buffer('contrib_ema', None)
         self.ema_decay = 0.9
+        self.use_sparsemax = True
         
     def _position_modulation(self, L: int, device: torch.device) -> torch.Tensor:
         """
@@ -269,6 +276,15 @@ class RoPE_AdaptAttention(nn.Module):
         }
         
         return final_score, debug_info
+
+    def _sparsemax(self, z: torch.Tensor) -> torch.Tensor:
+        z_sorted, _ = torch.sort(z, dim=-1, descending=True)
+        k = torch.arange(1, z.shape[-1] + 1, device=z.device, dtype=z.dtype).unsqueeze(0).expand(z.shape[0], -1)
+        z_cumsum = torch.cumsum(z_sorted, dim=-1)
+        cond = 1 + k * z_sorted > z_cumsum
+        k_z = cond.sum(dim=-1, keepdim=True)
+        tau = (torch.gather(z_cumsum, dim=-1, index=k_z - 1) - 1) / k_z.clamp_min(1)
+        return torch.clamp(z - tau, min=0.0)
     
     def _adaptive_loss(self, scores: torch.Tensor, contrib: torch.Tensor) -> torch.Tensor:
         """
@@ -332,33 +348,23 @@ class RoPE_AdaptAttention(nn.Module):
         cos, sin = self.rope(q, seq_len=L, position_ids=position_ids)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        logits = scores
-        B, L = logits.shape
-        z = logits
-        z_sorted, _ = torch.sort(z, dim=-1, descending=True)
-        k_vec = torch.arange(1, L + 1, device=z.device).unsqueeze(0).expand(B, -1)
-        z_cumsum = torch.cumsum(z_sorted, dim=-1)
-        rhs = 1 + k_vec * z_sorted
-        is_gt = rhs > z_cumsum
-        k_max = is_gt.sum(dim=-1)
-        idx = (k_max - 1).clamp(min=0).unsqueeze(1)
-        z_cumsum_k = z_cumsum.gather(1, idx)
-        tau = (z_cumsum_k - 1) / k_max.unsqueeze(1).clamp_min(1)
-        weights = (z - tau).clamp(min=0)
-        denom = weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        weights = weights / denom
+        # Step 4: 温度软稀疏选择（连续权重）
+        if self.use_sparsemax:
+            weights = self._sparsemax(scores / self.sparse_temp.clamp_min(1e-6))
+            denom = weights.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+            weights = weights / denom
+        else:
+            weights = torch.softmax(scores / self.sparse_temp.clamp_min(1e-6), dim=-1)
         
         # Step 5: 加权注意力（列偏置）
-        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B,H,L,L]
         log_w = torch.log(weights.clamp_min(1e-6)).unsqueeze(1).unsqueeze(2)
         attn_logits = attn_logits + log_w
         if attention_mask is not None and attention_mask.numel() > 1:
             attn_logits = attn_logits + attention_mask
         attn_weights = torch.softmax(attn_logits, dim=-1)
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
         attn_weights = self.dropout(attn_weights)
-        out = torch.matmul(attn_weights, v)
-        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        out = torch.matmul(attn_weights, v)  # [B,H,L,d]
         out = out.transpose(1, 2).contiguous().view(B, L, D)
         out = self.out_proj(out)
         
@@ -536,13 +542,12 @@ class RoPE_CausalBlockAttention(nn.Module):
         if attention_mask is not None:
             attn = attn + attention_mask
         
+        # Softmax归一化
         attn = attn.softmax(dim=-1)
-        attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
         attn = self.dropout(attn)
         
         # 加权求和: [B, H, L, L] @ [B, H, L, d_head] -> [B, H, L, d_head]
         out = torch.matmul(attn, v)
-        out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         
         # 恢复形状: [B, H, L, d_head] -> [B, L, H, d_head] -> [B, L, D]
         out = out.transpose(1, 2).contiguous().view(B, L, D)
@@ -687,6 +692,8 @@ class CBAT(nn.Module):
         self.norm_1 = nn.LayerNorm(d_model)
         self.norm_2 = nn.LayerNorm(d_model)
         self.norm_3 = nn.LayerNorm(d_model)
+        self.norm_gate1 = nn.LayerNorm(2 * d_model)
+        self.norm_gate2 = nn.LayerNorm(2 * d_model)
         
     def _to_2d(self, x: torch.Tensor) -> torch.Tensor:
         """[B, L, D] -> [B, D, H, W]"""
@@ -766,10 +773,11 @@ class CBAT(nn.Module):
             position_ids=position_ids,
         )
         gate_input = torch.cat([x_main, residual_1], dim=-1)
+        gate_input = self.norm_gate1(gate_input)
         gate_logits = self.gate_1_proj(gate_input)
-        gate_weight = torch.sigmoid(gate_logits / self.gate_temp1)
+        gate_weight = torch.sigmoid(gate_logits / self.gate_temp1.clamp_min(0.5))
         x_out_1 = gate_weight * x_main + (1 - gate_weight) * residual_1
-        x_out_1 = x_out_1 + self.alpha1 * x_attn
+        x_out_1 = x_out_1 + self.alpha1.clamp_max(0.2) * x_attn
         x_out_1 = x_out_1 + identity
         
         # ============ Module 2 ============
@@ -810,8 +818,9 @@ class CBAT(nn.Module):
         x_ffn = self.ffn(x_ffn)  # [B, L, D]
         
         gate_input = torch.cat([x_ffn, residual_2], dim=-1)
+        gate_input = self.norm_gate2(gate_input)
         gate_logits2 = self.gate_2_proj(gate_input)
-        gate_weight2 = torch.sigmoid(gate_logits2 / self.gate_temp2)
+        gate_weight2 = torch.sigmoid(gate_logits2 / self.gate_temp2.clamp_min(0.5))
         x_out_2 = gate_weight2 * x_ffn + (1 - gate_weight2) * residual_2
         x_out_2 = x_out_2 + x_out_1
         
@@ -825,8 +834,17 @@ class CBAT(nn.Module):
                 x_out_2 = torch.nn.functional.pad(x_out_2, (0, 0, 0, padding_size))
         
         output = x_out_2 + x_out_1  # [B, L, D]
-        
+
         if return_loss:
+            if self.training and torch.rand(()) < 0.05:
+                x_global = self.norm_3(output)
+                out_dense = self.adaptive_attn(
+                    x_global,
+                    attention_mask=None,
+                    position_ids=None,
+                    return_loss=False,
+                )
+                output = 0.9 * output + 0.1 * out_dense
             return output, adaptive_loss
         else:
             return output
