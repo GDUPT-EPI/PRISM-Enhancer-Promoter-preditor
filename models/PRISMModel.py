@@ -536,9 +536,27 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         outputs = torch.nan_to_num(outputs, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         outputs = outputs.detach() if not torch.isfinite(outputs).all() else outputs
         labels = torch.nan_to_num(labels, nan=0.0).clamp(0.0, 1.0)
+        
+        # 确保 adaptive_loss 是 finite 的 tensor
+        if isinstance(adaptive_loss, torch.Tensor):
+            if not torch.isfinite(adaptive_loss).all():
+                 adaptive_loss = torch.tensor(0.0, device=outputs.device)
+        elif not np.isfinite(adaptive_loss):
+            adaptive_loss = 0.0
+            
         base_loss = self.criterion(outputs, labels)
+        if not torch.isfinite(base_loss).all():
+             base_loss = torch.tensor(0.0, device=outputs.device, requires_grad=True)
+
         penalty_loss = self.spec_penalty(outputs, labels)
+        if not torch.isfinite(penalty_loss).all():
+             penalty_loss = torch.tensor(0.0, device=outputs.device, requires_grad=True)
+
         total = base_loss + adaptive_loss +  penalty_loss  # 总损失
+        
+        if not torch.isfinite(total).all():
+             total = torch.tensor(0.0, device=outputs.device, requires_grad=True)
+             
         if return_details:  # 如果需要返回细节
             return total, {  # 返回总损失和细节
                 'base': float(base_loss.detach().item()),  # 基础损失

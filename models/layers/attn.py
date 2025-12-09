@@ -551,6 +551,9 @@ class RoPE_CausalBlockAttention(nn.Module):
         # 计算注意力分数: [B, H, L, L]
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         
+        # 数值稳定性处理
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=1e4, neginf=-1e4)
+
         if self.use_block_mask:
             causal_block_mask = self._get_causal_block_mask(L, x.device)
             attn = attn + causal_block_mask
@@ -563,7 +566,9 @@ class RoPE_CausalBlockAttention(nn.Module):
             attn = attn + attention_mask
         
         # Softmax归一化
+        attn = torch.nan_to_num(attn, nan=-1e9)
         attn = attn.softmax(dim=-1)
+        attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
         attn = self.dropout(attn)
         
         # 加权求和: [B, H, L, L] @ [B, H, L, d_head] -> [B, H, L, d_head]
