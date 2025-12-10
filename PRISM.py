@@ -242,31 +242,12 @@ def main():  # 主函数
     model = PRISMBackbone(num_classes=num_cells).to(device)  # 创建模型
     model = model.to(device)  # 移动到设备
     
-    # 辅助模型 (环境阻抗 R_E) - 直接在 PRISM.py 中构建简单版本，避免过多文件依赖循环
-    class EnvResistanceModel(torch.nn.Module):
-        def __init__(self, num_cells, d_model):
-            super().__init__()
-            self.cell_emb = torch.nn.Embedding(num_cells, d_model)
-            self.resistance_generator = FourierEnergyKAN(
-                in_features=d_model, 
-                out_features=1, 
-                grid_size=5, 
-                width=2 * d_model + 1,
-                non_negative=True # 阻抗必须非负
-            )
-        
-        def forward(self, cell_ids):
-            # 获取细胞系原型 (Prototype)
-            z_F = self.cell_emb(cell_ids)
-            # 计算阻抗 R_E
-            R_E = self.resistance_generator(z_F)
-            return R_E, z_F
-
-    env_model = EnvResistanceModel(num_cells, OUT_CHANNELS).to(device)
+    # EnvResistanceModel 已集成到 PRISMBackbone 中，不再需要独立的 EnvResistanceModel 类
+    # env_model = EnvResistanceModel(num_cells, OUT_CHANNELS).to(device)
     
     # 打印模型信息
-    total_params = sum(p.numel() for p in model.parameters()) + sum(p.numel() for p in env_model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad) + sum(p.numel() for p in env_model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"模型总参数: {total_params:,}")  # 记录日志
     logger.info(f"可训练参数: {trainable_params:,}")  # 记录日志
     logger.info(f"GPU可用: {torch.cuda.is_available()}")  # 记录日志
@@ -278,7 +259,7 @@ def main():  # 主函数
     start_epoch = 0  # 起始epoch
 
     optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(env_model.parameters()), 
+        model.parameters(), 
         lr=LEARNING_RATE, 
         weight_decay=WEIGHT_DECAY
     )  # 创建优化器
@@ -296,7 +277,8 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     
     os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)  # 创建模型保存目录
-    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, env_model, optimizer, scheduler)  # 加载恢复状态
+    # EnvModel 已经集成进 Model，无需单独加载
+    start_epoch = _load_resume_state(PRISM_SAVE_MODEL_DIR, device, model, None, optimizer, scheduler)  # 加载恢复状态
     if start_epoch > 0:  # 如果有起始epoch
         logger.info(f"从最近权重恢复: epoch {start_epoch}")  # 记录日志
     else:  # 如果没有起始epoch
@@ -305,9 +287,9 @@ def main():  # 主函数
         logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")  # 记录日志
     for epoch_idx in range(start_epoch, EPOCH):  # 遍历epoch
         # 训练
-        logger.info("Loss Weights: ep=1.0, orth=0.1, domain=0.1")  # 记录日志
+        logger.info("Loss Weights: ep=1.0, orth=0.1, domain=0.1, sparse=0.01")  # 记录日志
         model.train()  # 设置为训练模式
-        env_model.train()
+        # env_model.train()
         total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0  # 初始化统计变量
         total_tp = 0; total_fp = 0; total_fn = 0  # 初始化TP、FP、FN
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)  # 创建进度条
@@ -324,42 +306,26 @@ def main():  # 主函数
             
             precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
             
-            # 1. 前向传播 Backbone (获取 U_I 和特征 z_I)
-            _, adaptive_loss, aux_outputs = model(enh_ids, pr_ids, cell_labels=cell_ids)
-            U_I = aux_outputs['U_I'].squeeze(-1) # [B]
-            z_I = aux_outputs['z_I'] # [B, D]
+            # 1. 前向传播 Backbone (现在包含完整的能量耗散系统)
+            # 自动处理 U_I, R_E, T 并计算 logits
+            ep_outputs, adaptive_loss, aux_outputs = model(enh_ids, pr_ids, cell_labels=cell_ids)
+            
             domain_logits = aux_outputs['domain_logits'] # [B, NumCells]
             
-            # 2. 前向传播 Environment Model (获取 R_E 和特征 z_F)
-            R_E, z_F = env_model(cell_ids)
-            R_E = R_E.squeeze(-1) # [B]
-            
-            # 3. 能量耗散计算: Logits = U_I - R_E
-            # Boltzmann分布: P(y=1) = sigmoid((U_I - R_E)/T)
-            logits = U_I - R_E
-            ep_outputs = torch.sigmoid(logits)
-            
-            # 4. 计算损失
+            # 2. 计算损失
             
             # A. 主任务损失 (Use model's compute_loss instead of BCE)
-            main_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss=adaptive_loss)
+            # 内部已包含: Base Loss, Adaptive Loss, Penalty Loss, Sparse Loss, Orth Loss
+            main_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss=adaptive_loss, aux_outputs=aux_outputs)
             
-            # B. 正交损失 (Orthogonality Loss)
-            # 强迫 z_I 与 z_F 正交
-            # z_I: [B, D], z_F: [B, D]
-            # Normalize vectors to focus on direction
-            z_I_norm = F.normalize(z_I, p=2, dim=1)
-            z_F_norm = F.normalize(z_F, p=2, dim=1)
-            orth_loss = torch.abs(torch.sum(z_I_norm * z_F_norm, dim=1)).mean()
-            
-            # C. 域对抗损失 (Domain Adversarial Loss)
+            # B. 域对抗损失 (Domain Adversarial Loss)
             # 强迫 z_I 不包含细胞系信息 (maximize entropy of domain prediction)
             # 由于使用了 GRL，我们只需要最小化 CrossEntropy
             domain_loss = F.cross_entropy(domain_logits, cell_ids)
             
-            # D. 总损失
-            # main_loss already includes adaptive_loss, so we don't add it again
-            loss = main_loss + 0.1 * orth_loss + 0.1 * domain_loss
+            # C. 总损失
+            # main_loss already includes other components
+            loss = main_loss + 0.1 * domain_loss
             
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
@@ -371,7 +337,7 @@ def main():  # 主函数
                 precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0  # 计算精确率
                 recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0  # 计算召回率
                 f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0  # 计算F1
-            # loss = ep_loss  # 损失 (Fixed bug: removed this line)
+            
             optimizer.zero_grad();  # 清空梯度
             loss.backward();  # 反向传播
             torch.nn.utils.clip_grad_norm_(list(model.parameters()), max_norm=GRAD_CLIP_MAX_NORM);  # 梯度裁剪
@@ -380,13 +346,14 @@ def main():  # 主函数
             total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1  # 累加统计
             pbar.set_postfix({  # 设置进度条后缀
                 'loss': f'{loss.item():.4f}',  # 损失
-                'orth': f'{orth_loss.item():.4f}',
                 'dom': f'{domain_loss.item():.4f}',
                 'ep_acc': f'{ep_acc:.4f}',  # 准确率
                 'prec': f'{precision:.4f}',  # 精确率
                 'rec': f'{recall:.4f}',  # 召回率
                 'f1': f'{f1:.4f}',  # F1
+                'T': f"{aux_outputs.get('T', torch.tensor(1.0)).item():.2f}" # 温度
             })
+
 
         avg_loss = total_loss / max(n_batches, 1)  # 平均损失
         avg_ep_acc = total_ep_acc / max(n_batches, 1)  # 平均准确率

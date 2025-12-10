@@ -271,6 +271,23 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
             nn.ReLU(),
             nn.Linear(OUT_CHANNELS, num_classes if num_classes else 2) # 预测细胞系
         )
+
+        # 5. 环境阻抗 R_E 生成器模块 (新增)
+        # 细胞系Embedding (用于生成 R_E)
+        self.cell_embedding = nn.Embedding(num_classes if num_classes else 2, OUT_CHANNELS)
+        
+        # 阻抗生成器 (必须非负)
+        self.resistance_generator = FourierEnergyKAN(
+            in_features=OUT_CHANNELS,
+            out_features=1,
+            grid_size=5,
+            width=2 * OUT_CHANNELS + 1,
+            non_negative=True, # 关键：阻抗必须非负
+        )
+        
+        # 6. 温度系数 T (可学习)
+        self.temperature = nn.Parameter(torch.tensor(1.0))
+
         
         # 保留旧的classifier以兼容权重加载，但forward中不使用
         self.classifier = FourierKAN(  # KAN分类头
@@ -459,15 +476,29 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         # 3. 计算内势 U_I (Intrinsic Potential)
         U_I = self.U_I_generator(z_I) # [B, 1]
         
-        # 4. 生成预测 (仅基于 U_I，环境阻抗 R_E 由外部模块提供)
-        # Backbone 必须有能力独立预测 (当 R_E=0 时)
-        logits = U_I
+        # 4. 计算环境阻抗 R_E (Environmental Resistance)
+        if cell_labels is not None:
+            z_F = self.cell_embedding(cell_labels) # [B, D]
+            R_E = self.resistance_generator(z_F) # [B, 1]
+        else:
+            # 推理模式下，如果不知道细胞系，假设阻抗为0 (即最坏情况/最敏感模式)
+            # 或者应该由外部传入指定的细胞系
+            z_F = torch.zeros_like(z_I)
+            R_E = torch.zeros_like(U_I)
+
+        # 5. 能量耗散系统预测
+        # P(y=1) = sigmoid( (U_I - R_E) / T )
+        T = F.softplus(self.temperature) # T > 0
+        logits = (U_I - R_E) / T
         prob = torch.sigmoid(logits)
         
         aux_outputs = {
             'z_I': z_I,
+            'z_F': z_F,
             'domain_logits': domain_logits,
-            'U_I': U_I
+            'U_I': U_I,
+            'R_E': R_E,
+            'T': T
         }
 
         return prob, total_adaptive_loss, aux_outputs
@@ -583,16 +614,18 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         outputs: torch.Tensor,  # 输出
         labels: torch.Tensor,  # 标签
         adaptive_loss: torch.Tensor | float = 0.0,  # 自适应损失
+        aux_outputs: Dict[str, torch.Tensor] = None, # 辅助输出
         return_details: bool = False,  # 是否返回细节
     ) -> torch.Tensor | Tuple[torch.Tensor, dict]:  # 返回类型
         """计算总损失
 
-        组成：`AdaptiveIMMAX`基础损失 + 自适应注意力损失 + 投机惩罚损失。
+        组成：`AdaptiveIMMAX`基础损失 + 自适应注意力损失 + 投机惩罚损失 + 稀疏阻抗损失 + 正交损失 + 域对抗损失。
 
         Args:
             outputs: 预测概率 `[B]` 或 `[B,1]`
             labels: 二分类标签 `[B]`
             adaptive_loss: 自适应注意力损失
+            aux_outputs: 辅助输出字典 (z_I, z_F, R_E 等)
             return_details: 返回损失细节
 
         Returns:
@@ -617,7 +650,38 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
         if not torch.isfinite(penalty_loss).all():
              penalty_loss = torch.tensor(0.0, device=outputs.device, requires_grad=True)
 
-        total = base_loss + adaptive_loss +  penalty_loss  # 总损失
+        # ========== 能量耗散系统新增损失 ==========
+        sparse_loss = torch.tensor(0.0, device=outputs.device)
+        orth_loss = torch.tensor(0.0, device=outputs.device)
+        domain_loss = torch.tensor(0.0, device=outputs.device)
+        
+        if aux_outputs is not None:
+            # 1. 稀疏阻抗损失 (L1 Regularization on R_E)
+            # 鼓励 R_E 尽可能为 0，只在必要时抑制假阳性
+            if 'R_E' in aux_outputs:
+                R_E = aux_outputs['R_E']
+                sparse_loss = 0.01 * torch.mean(torch.abs(R_E))
+            
+            # 2. 正交损失 (z_I ⊥ z_F)
+            # 物理势能特征与环境特征应当正交
+            if 'z_I' in aux_outputs and 'z_F' in aux_outputs:
+                z_I = aux_outputs['z_I']
+                z_F = aux_outputs['z_F']
+                # Normalize vectors to focus on direction
+                z_I_norm = F.normalize(z_I, p=2, dim=1)
+                z_F_norm = F.normalize(z_F, p=2, dim=1)
+                orth_loss = 0.1 * torch.abs(torch.sum(z_I_norm * z_F_norm, dim=1)).mean()
+
+            # 3. 域对抗损失 (Domain Adversarial Loss)
+            # 已经包含在 adaptive_loss 或者独立计算，这里如果不为None则加入
+            if 'domain_logits' in aux_outputs and aux_outputs['domain_logits'] is not None:
+                 # 注意：这里需要外部传入 cell_labels 才能计算，
+                 # 但 PRISMModel.compute_loss 接口没有 cell_labels。
+                 # 通常域对抗损失在 training loop 中独立计算。
+                 # 这里为了接口统一，暂时不加，由外部控制。
+                 pass
+
+        total = base_loss + adaptive_loss + penalty_loss + sparse_loss + orth_loss # + domain_loss  # 总损失
         
         if not torch.isfinite(total).all():
              total = torch.tensor(0.0, device=outputs.device, requires_grad=True)
@@ -627,5 +691,7 @@ class PRISMBackbone(nn.Module):  # 定义PRISM主干网络类
                 'base': float(base_loss.detach().item()),  # 基础损失
                 'adaptive': float((adaptive_loss.detach().item() if isinstance(adaptive_loss, torch.Tensor) else adaptive_loss)),  # 自适应损失
                 'penalty': float(penalty_loss.detach().item()),  # 惩罚损失
+                'sparse': float(sparse_loss.detach().item()),
+                'orth': float(orth_loss.detach().item()),
             }
         return total
