@@ -337,9 +337,9 @@ def evaluate() -> Optional[Dict[str, object]]:
         threshold = EvalConfig.THRESHOLD
     
     bin_preds = (all_preds >= threshold).astype(int)  # 二值化
-    f1 = f1_score(all_labels, bin_preds)  # F1
-    rec = recall_score(all_labels, bin_preds)  # 召回
-    prec = precision_score(all_labels, bin_preds)  # 精度
+    f1 = f1_score(all_labels, bin_preds, zero_division=0)  # F1
+    rec = recall_score(all_labels, bin_preds, zero_division=0)  # 召回
+    prec = precision_score(all_labels, bin_preds, zero_division=0)  # 精度
     pr_p, pr_r, _ = precision_recall_curve(all_labels, all_preds)  # PR曲线数据
     if EvalConfig.PLOT_PR:  # 绘制PR
         plt.figure()  # 新图
@@ -388,9 +388,9 @@ def evaluate() -> Optional[Dict[str, object]]:
             cb = (cp >= threshold).astype(int)  # 使用全局阈值
             cell_threshold = threshold
             
-        cf1 = f1_score(cl, cb) if cl.size > 0 else float("nan")  # F1
-        cr = recall_score(cl, cb) if cl.size > 0 else float("nan")  # 召回
-        cpr = precision_score(cl, cb) if cl.size > 0 else float("nan")  # 精度
+        cf1 = f1_score(cl, cb, zero_division=0) if cl.size > 0 else float("nan")  # F1
+        cr = recall_score(cl, cb, zero_division=0) if cl.size > 0 else float("nan")  # 召回
+        cpr = precision_score(cl, cb, zero_division=0) if cl.size > 0 else float("nan")  # 精度
         per_cell_results[c] = {  # 存储结果
             "aupr": caupr,
             "auc": cauc,
