@@ -364,12 +364,11 @@ def main():  # 主函数
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")  # 检查点路径
-        torch.save({'backbone': model.state_dict(), 'env_model': env_model.state_dict()}, checkpoint_path)  # 保存模型
+        torch.save({'backbone': model.state_dict()}, checkpoint_path)  # 保存模型
         logger.info(f"保存检查点: {checkpoint_path}")  # 记录日志
         full_state_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_full_epoch_{epoch_idx+1}.pt")  # 完整状态路径
         full_state = {  # 完整状态
             'model_state': model.state_dict(),  # 模型状态
-            'env_model_state': env_model.state_dict(), # 环境模型状态
             'optimizer_state': optimizer.state_dict(),  # 优化器状态
             'epoch': epoch_idx + 1,  # epoch
         }
