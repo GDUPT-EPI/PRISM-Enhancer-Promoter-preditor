@@ -106,8 +106,8 @@ class EvalConfig:
     PIN_MEMORY = True  # 加速CPU→GPU拷贝
     SHUFFLE = False  # 评估不打乱
 
-    THRESHOLD = 0.4  # 二值化阈值
-    OUTPUT_DIR_NAME = "compete/ffff"  # 输出目录名称
+    THRESHOLD = 0.45  # 二值化阈值
+    OUTPUT_DIR_NAME = "compete/enhanceratlas"  # 输出目录名称
     PLOT_PR = True  # 是否绘制PR曲线
     PLOT_ROC = True  # 是否绘制ROC曲线
     
