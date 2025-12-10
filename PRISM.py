@@ -341,8 +341,8 @@ def main():  # 主函数
             
             # 4. 计算损失
             
-            # A. 主任务损失 (BCE)
-            main_loss = F.binary_cross_entropy(ep_outputs, labels.float())
+            # A. 主任务损失 (Use model's compute_loss instead of BCE)
+            main_loss = model.compute_loss(ep_outputs, labels.float(), adaptive_loss=adaptive_loss)
             
             # B. 正交损失 (Orthogonality Loss)
             # 强迫 z_I 与 z_F 正交
@@ -358,7 +358,8 @@ def main():  # 主函数
             domain_loss = F.cross_entropy(domain_logits, cell_ids)
             
             # D. 总损失
-            loss = main_loss + 0.1 * orth_loss + 0.1 * domain_loss + adaptive_loss
+            # main_loss already includes adaptive_loss, so we don't add it again
+            loss = main_loss + 0.1 * orth_loss + 0.1 * domain_loss
             
             with torch.no_grad():  # 不计算梯度
                 ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
