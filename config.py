@@ -13,8 +13,8 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
 DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目录
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
-SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/CBAT")
-PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, "save_model/enhanceratlas")
+SAVEMODEL_NAME = 'CBAT'
+PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, f"{SAVEMODEL_NAME}")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在

@@ -7,7 +7,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score, f1_score, re
 from torch.utils.data import DataLoader  # 数据加载器
 from tqdm import tqdm  # 进度条
 from typing import List, Tuple, Dict, Optional  # 类型注解
-
+from config import *
 from config import (  # 集中配置导入
     DEVICE,
     PRISM_SAVE_MODEL_DIR,
