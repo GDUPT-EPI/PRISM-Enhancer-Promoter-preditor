@@ -9,7 +9,7 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # 数据路径配置
-DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
+# DATA_DIR = os.path.join(PROJECT_ROOT, "dataset")
 DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目录
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
@@ -18,7 +18,7 @@ PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, f"{SAVEMODEL_NAME}")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
 # 确保目录存在
-for dir_path in [DATA_DIR, DOMAIN_KL_DIR, CACHE_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
+for dir_path in [DOMAIN_KL_DIR, CACHE_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
 # 训练参数配置
