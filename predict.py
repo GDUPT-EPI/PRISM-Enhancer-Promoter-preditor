@@ -298,10 +298,10 @@ def evaluate() -> Optional[Dict[str, object]]:
                 per_cell[cell] = {"preds": [], "labels": []}
             per_cell[cell]["preds"].append(preds)  # 添加预测
             per_cell[cell]["labels"].append(labs)  # 添加标签
-            if total_batches is not None:
-                _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}/{total_batches}")
-            else:
-                _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}")
+            # if total_batches is not None:
+            #     _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}/{total_batches}")
+            # else:
+            #     _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}")
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
