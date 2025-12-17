@@ -1,0 +1,237 @@
+{
+  "mathematical_perspectives": {
+    "cell_line_generalization": {
+      "perspective": "最优传输视角下的分布对齐",
+      "questions": [
+        "Domain Adaptation的理论界？",
+        "Wasserstein距离在细胞系分布对齐中的作用？",
+        "如何构建有效的域不变表示？"
+      ],
+      "mathematical_frameworks": [
+        "Wasserstein GAN",
+        "Domain Adversarial Neural Networks (DANN)",
+        "Maximum Mean Discrepancy (MMD)"
+      ]
+    },
+    "T0_S1_S2_competition": {
+      "perspective": "三玩家博弈",
+      "questions": [
+        "纳什均衡的存在性与稳定性？",
+        "梯度动力学在博弈优化中的行为？",
+        "如何避免模式坍缩到平凡解？"
+      ],
+      "mathematical_frameworks": [
+        "Game Theory",
+        "Min-Max Optimization",
+        "Gradient Descent-Ascent Dynamics"
+      ]
+    },
+    "energy_dissipation": {
+      "perspective": "Lyapunov函数的构造",
+      "questions": [
+        "梯度流的收敛速率？",
+        "能量景观的拓扑性质？",
+        "如何保证优化过程的稳定性？"
+      ],
+      "mathematical_frameworks": [
+        "Lyapunov Stability Theory",
+        "Energy-Based Models",
+        "Hamiltonian Mechanics"
+      ]
+    }
+  },
+  "analysis_frameworks": {
+    "representation_geometry": {
+      "description": "表征几何分析框架",
+      "key_questions": [
+        "当前嵌入空间是否具备正确的度量结构？",
+        "类间距离 vs 类内距离的分离度？",
+        "表征是否坍缩到低维子空间？"
+      ],
+      "mathematical_tools": [
+        "Riemannian Geometry",
+        "Manifold Learning",
+        "Metric Learning"
+      ]
+    },
+    "optimization_landscape": {
+      "description": "优化景观分析框架",
+      "key_questions": [
+        "损失函数的曲率特征？",
+        "是否陷入鞍点而非局部最优？",
+        "Hessian谱告诉我们什么？"
+      ],
+      "mathematical_tools": [
+        "Curvature Analysis",
+        "Critical Point Theory",
+        "Spectral Analysis"
+      ]
+    },
+    "generalization_mechanism": {
+      "description": "泛化机制分析框架",
+      "key_questions": [
+        "PAC-Bayes bound紧不紧？",
+        "复杂度度量（Rademacher/VC维）是否匹配？",
+        "分布偏移的Wasserstein距离？"
+      ],
+      "mathematical_tools": [
+        "Statistical Learning Theory",
+        "PAC-Bayes Theory",
+        "Domain Adaptation Theory"
+      ]
+    },
+    "causal_structure": {
+      "description": "因果结构分析框架",
+      "key_questions": [
+        "学到的是因果还是伪相关？",
+        "混淆变量是否被控制？",
+        "干预分布下的不变性？"
+      ],
+      "mathematical_tools": [
+        "Causal Inference",
+        "Do-calculus",
+        "Invariant Risk Minimization"
+      ]
+    }
+  },
+  "cognitive_warmup_techniques": {
+    "assumption_dismantling": [
+      "当前方案隐含了哪些未经证明的假设？",
+      "如果这些假设不成立，世界会是什么样子？",
+      "哪个假设最脆弱？"
+    ],
+    "limit_probe": [
+      "把关键参数推到 0 或 ∞，系统表现如何？",
+      "边界行为暗示了什么内在结构？",
+      "是否存在相变点？"
+    ],
+    "duality_flip": [
+      "问题的对偶形式是什么？（最大化↔最小化，稀疏↔稠密）",
+      "从对偶视角，障碍变成了什么？",
+      "是否存在强对偶性可以利用？"
+    ],
+    "information_tracking": [
+      "信息在网络中如何流动、压缩、损失？",
+      "哪里发生了不可逆的信息破坏？",
+      "互信息 I(表示; 目标) 的瓶颈在哪里？"
+    ]
+  },
+  "mathematical_intuition_triggers": {
+    "algebraic": "存在什么群作用？对称性如何约束解空间？",
+    "geometric": "数据流形的曲率、测地线、切空间结构？",
+    "topological": "解空间的连通分支？Betti数暗示什么？",
+    "dynamical_systems": "相空间的吸引子？Lyapunov指数？稳定流形？",
+    "information_theory": "率失真函数？信道容量？互信息景观？",
+    "physical": "对应什么物理现象？能量、熵、耗散如何作用？"
+  },
+  "innovation_design_paths": {
+    "symmetry_exploitation": {
+      "description": "对称性利用路径",
+      "questions": [
+        "问题应满足什么不变性？（置换、平移、缩放...）",
+        "当前模型是否尊重这些对称性？",
+        "如何将对称性硬编码到架构/损失中？"
+      ],
+      "mathematical_concepts": [
+        "Group Theory",
+        "Invariant Theory",
+        "Equivariant Networks"
+      ]
+    },
+    "representation_space_reshaping": {
+      "description": "表示空间重塑路径",
+      "questions": [
+        "理想的表示应该在什么流形上？",
+        "是否需要曲面空间（双曲/球面）而非欧氏空间？",
+        "距离度量是否需要重新定义？"
+      ],
+      "mathematical_concepts": [
+        "Manifold Learning",
+        "Hyperbolic Geometry",
+        "Metric Learning"
+      ]
+    },
+    "objective_function_reconstruction": {
+      "description": "目标函数重构路径",
+      "questions": [
+        "当前损失与真正目标的gap是什么？",
+        "是否存在更紧的代理损失？",
+        "能否用对偶形式规避原始问题的困难？"
+      ],
+      "mathematical_concepts": [
+        "Surrogate Loss",
+        "Dual Formulation",
+        "Fenchel Conjugate"
+      ]
+    }
+  },
+  "failure_analysis_framework": {
+    "failure_structure_theorem": {
+      "description": "失败结构定理格式",
+      "template": "历史方案失败，因为它们都（隐式地）假设了X，而X在Y条件下不成立。",
+      "questions_to_ask": [
+        "所有失败方案是否在探索同一个局部最优的ε-邻域？",
+        "是否存在共同的盲点——被所有方案忽视的自由度？",
+        "失败模式是否暗示了问题的本质困难度下界？",
+        "能否从失败中反推问题的隐藏约束？"
+      ]
+    },
+    "root_cause_dimensions": {
+      "mathematical_level": "从优化景观、表征几何、泛化理论角度分析",
+      "algorithm_level": "具体哪个模块、哪个假设导致了失败",
+      "biological_level": "违背了什么生物学原理或忽视了什么生物学机制"
+    }
+  },
+  "scoring_system_principles": {
+    "theory_depth": {
+      "9-10": "有严格数学证明或理论保证",
+      "7-8": "推导完整，假设合理",
+      "5-6": "有理论支撑但存在跳跃",
+      "3-4": "理论薄弱，主要靠直觉",
+      "0-2": "无理论支撑"
+    },
+    "innovativeness": {
+      "9-10": "全新的问题形式化或架构范式",
+      "7-8": "对核心机制的实质性改进",
+      "5-6": "有意义的增量创新",
+      "3-4": "微调或组合已有方法",
+      "0-2": "与历史失败方案本质相同"
+    },
+    "feasibility": {
+      "9-10": "实现路径完全清晰，无技术障碍",
+      "7-8": "主要路径清晰，有小的技术挑战",
+      "5-6": "路径基本可行，存在不确定性",
+      "3-4": "实现困难，需要额外探索",
+      "0-2": "技术上不可行或路径不清"
+    },
+    "risk_controllability": {
+      "9-10": "风险已识别且有明确缓解策略",
+      "7-8": "主要风险可控",
+      "5-6": "存在中等风险",
+      "3-4": "高风险，可能导致模式坍缩",
+      "0-2": "极高风险，大概率失败"
+    },
+    "expected_benefit": {
+      "9-10": "预期AUPR提升 > 5%",
+      "7-8": "预期AUPR提升 3-5%",
+      "5-6": "预期AUPR提升 1-3%",
+      "3-4": "预期提升 < 1%",
+      "0-2": "可能导致性能下降"
+    }
+  },
+  "thinking_disciplines": {
+    "prohibited": [
+      "停留在现象层面的描述",
+      "无数学支撑的'直觉'方案",
+      "历史失败方案的表面变体",
+      "无法证伪的模糊陈述"
+    ],
+    "encouraged": [
+      "质疑最基础的假设",
+      "追求优雅和简洁",
+      "从失败中提取信息论价值",
+      "跨领域的结构类比",
+      "用具体反例检验一般命题"
+    ]
+  }
+}

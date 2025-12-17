@@ -1,0 +1,49 @@
+{
+  "name": "PRISM项目自动化工作流",
+  "version": "1.0.0",
+  "description": "EP互作预测自动化工作流配置 - 基于Kiro Agent系统迁移",
+  "project": {
+    "name": "PRISM",
+    "goal": "AUPR ≥ 0.75",
+    "current_status": "记录点16",
+    "target": "domain-kl/test及各细胞系 AUPR ≥ 0.75",
+    "constraints": [
+      "仅使用DNA序列信息",
+      "不同细胞系之间的特异性差异大"
+    ]
+  },
+  "agents": {
+    "analyst": {
+      "config": "./agents/agent-analyst.json",
+      "description": "算法分析师 - 拥有深邃数学直觉的算法分析师"
+    },
+    "executor": {
+      "config": "./agents/agent-executor.json",
+      "description": "方案执行者 - 高质量的代码实现和实验执行"
+    },
+    "inspector": {
+      "config": "./agents/agent-inspector.json",
+      "description": "质检者 - 方案评估和训练监控"
+    }
+  },
+  "hooks": {
+    "directory": "./hooks",
+    "enabled": true,
+    "auto_start": true
+  },
+  "workflows": {
+    "main": {
+      "config": "./workflows/ep-workflow.json",
+      "description": "EP互作预测整体工作流"
+    }
+  },
+  "context": {
+    "project": "./context/project-context.json",
+    "mathematical": "./context/mathematical-context.json"
+  },
+  "settings": {
+    "monitor_files": true,
+    "log_level": "info",
+    "auto_reload": true
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "project": {
+    "name": "PRISM",
+    "full_name": "预测基因组序列中增强子-启动子互作",
+    "goal": "AUPR ≥ 0.75",
+    "description": "仅使用DNA序列信息预测增强子-启动子(EP)互作",
+    "current_status": "记录点16",
+    "target": "domain-kl/test及各细胞系 AUPR ≥ 0.75",
+    "current_performance": "AUPR ~0.72",
+    "required_improvement": "~4% 相对提升"
+  },
+  "core_challenges": [
+    {
+      "challenge": "细胞系泛化",
+      "description": "不同细胞系之间的特异性差异巨大，需要解耦'跨细胞系共性表征(z_I)'和'细胞系特异模块(z_F)'",
+      "technical_approach": "域对抗训练处理不同细胞系"
+    },
+    {
+      "challenge": "S1-S2竞争失效",
+      "description": "学生(S1)与对手(S2)的竞争机制未能有效工作",
+      "technical_approach": "改进竞争损失和梯度控制"
+    },
+    {
+      "challenge": "上下文感知缺失",
+      "description": "模型缺乏对序列上下文的感知能力",
+      "technical_approach": "引入上下文感知机制"
+    }
+  ],
+  "technical_architecture": {
+    "dna_sequence_processing": "6-mer K-mer分词",
+    "multimodal_architecture": "CNN特征提取 + Transformer交叉注意力",
+    "energy_dissipation_framework": "内势(U_I) - 环境阻抗(R_E)的物理启发模型",
+    "cell_line_awareness": "域对抗训练处理不同细胞系",
+    "key_technologies": [
+      "CBAT(卷积块注意力模块)",
+      "FourierKAN",
+      "RoPE(旋转位置编码)"
+    ]
+  },
+  "data_structure": {
+    "input": "DNA序列",
+    "encoding": "6-mer K-mer编码",
+    "output": "EP互作概率",
+    "evaluation_metrics": [
+      "AUPR (Area Under Precision-Recall Curve)",
+      "AUC (Area Under ROC Curve)",
+      "Precision",
+      "Recall",
+      "F1 Score"
+    ]
+  },
+  "directory_structure": {
+    "models": "模型定义文件",
+    "models/layers": "自定义层实现",
+    "docx": "文档目录，包含方案、反思、结果等",
+    "save_model": "模型保存目录",
+    "log": "训练和预测日志",
+    "compete": "预测结果",
+    "hook": "自动化工作流钩子文件",
+    "workflow": "工作流定义文档",
+    ".kiro": "原始Kiro配置目录",
+    ".claude": "Claude Code配置目录"
+  },
+  "current_progress": {
+    "latest_checkpoint": 16,
+    "current_approach": "尝试'注入上帝视角的作弊者'和'赋予学生上下文感知'方案",
+    "recent_attempts": [
+      "记录点15：注入上帝视角的作弊者",
+      "记录点16：赋予学生上下文感知"
+    ],
+    "next_steps": "根据质检者评估结果决定下一步行动"
+  },
+  "agent_system": {
+    "tri_role_collaboration": {
+      "algorithm_analyst": "深度问题诊断 + 创新方案设计",
+      "solution_executor": "代码实现 + 实验执行",
+      "quality_inspector": "方案评估 + 训练监控 + 流程决策"
+    },
+    "automation_workflow": "基于文件事件的hook触发机制实现全自动协作",
+    "quality_assurance": "质检者在方案评估和训练评估两个关键节点进行质量控制"
+  },
+  "configuration_management": {
+    "central_config": "config.py集中管理所有参数",
+    "modular_design": "models/目录包含清晰的组件分离",
+    "data_flow": "从DNA序列输入到EP互作概率输出的完整流程",
+    "cache_system": "_cache/目录优化数据加载性能"
+  }
+}
