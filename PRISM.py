@@ -16,6 +16,8 @@ from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 import re
 import xml.etree.ElementTree as ET
+import numpy as np
+from sklearn.metrics import average_precision_score
 
 device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
 
@@ -290,8 +292,9 @@ def main():  # 主函数
         logger.info("Loss Weights: ep=1.0, orth=0.1, domain=0.1, sparse=0.01")  # 记录日志
         model.train()  # 设置为训练模式
         # env_model.train()
-        total_loss = 0.0; total_ep_acc = 0.0; n_batches = 0  # 初始化统计变量
-        total_tp = 0; total_fp = 0; total_fn = 0  # 初始化TP、FP、FN
+        total_loss = 0.0; total_main_loss = 0.0; total_domain_loss = 0.0; total_ep_acc = 0.0; total_aupr = 0.0; n_batches = 0  # 初始化统计变量
+        epoch_probs = []
+        epoch_labels = []
         pbar = tqdm(train_loader, desc=f"Epoch {epoch_idx+1}/{EPOCH} [Training]", leave=True, dynamic_ncols=True)  # 创建进度条
         for batch in pbar:  # 遍历批次
             enh_ids, pr_ids, cell_lines, labels = batch  # 获取批次数据
@@ -303,8 +306,6 @@ def main():  # 主函数
             
             # 将细胞系名称转换为ID
             cell_ids = torch.tensor([label_map.get(c, other_id if other_id is not None else 0) for c in cell_lines], device=device)
-            
-            precision = 0.0; recall = 0.0; f1 = 0.0  # 初始化精确率、召回率、F1
             
             # 1. 前向传播 Backbone (现在包含完整的能量耗散系统)
             # 自动处理 U_I, R_E, T 并计算 logits
@@ -328,39 +329,49 @@ def main():  # 主函数
             loss = main_loss + 0.1 * domain_loss
             
             with torch.no_grad():  # 不计算梯度
-                ep_preds = (ep_outputs >= 0.5).long()  # 预测结果
-                ep_acc = (ep_preds == labels.long()).float().mean().item()  # 准确率
-                tp = int(((ep_preds == 1) & (labels.long() == 1)).sum().item())  # 真正例
-                fp = int(((ep_preds == 1) & (labels.long() == 0)).sum().item())  # 假正例
-                fn = int(((ep_preds == 0) & (labels.long() == 1)).sum().item())  # 假负例
-                total_tp += tp; total_fp += fp; total_fn += fn  # 累加
-                precision = (tp / max(tp + fp, 1)) if (tp + fp) > 0 else 0.0  # 计算精确率
-                recall = (tp / max(tp + fn, 1)) if (tp + fn) > 0 else 0.0  # 计算召回率
-                f1 = (2 * precision * recall / max(precision + recall, 1e-6)) if (precision + recall) > 0 else 0.0  # 计算F1
+                ep_probs = ep_outputs.detach().float().view(-1)
+                ep_labels = labels.detach().float().view(-1)
+                ep_preds = (ep_probs >= 0.5).long()  # 预测结果
+                ep_acc = (ep_preds == ep_labels.long()).float().mean().item()  # 准确率
+                epoch_probs.append(ep_probs.cpu())
+                epoch_labels.append(ep_labels.cpu())
+                if float(ep_labels.max().item()) == float(ep_labels.min().item()):
+                    batch_aupr = 0.0
+                else:
+                    batch_aupr = float(average_precision_score(ep_labels.cpu().numpy(), ep_probs.cpu().numpy()))
             
             optimizer.zero_grad();  # 清空梯度
             loss.backward();  # 反向传播
             torch.nn.utils.clip_grad_norm_(list(model.parameters()), max_norm=GRAD_CLIP_MAX_NORM);  # 梯度裁剪
             optimizer.step();  # 更新参数
 
-            total_loss += loss.item(); total_ep_acc += ep_acc; n_batches += 1  # 累加统计
+            total_loss += loss.item(); total_main_loss += main_loss.item(); total_domain_loss += domain_loss.item(); total_ep_acc += ep_acc; total_aupr += batch_aupr; n_batches += 1  # 累加统计
             pbar.set_postfix({  # 设置进度条后缀
-                'loss': f'{loss.item():.4f}',  # 损失
-                'dom': f'{domain_loss.item():.4f}',
-                'ep_acc': f'{ep_acc:.4f}',  # 准确率
-                'prec': f'{precision:.4f}',  # 精确率
-                'rec': f'{recall:.4f}',  # 召回率
-                'f1': f'{f1:.4f}',  # F1
-                'T': f"{aux_outputs.get('T', torch.tensor(1.0)).item():.2f}" # 温度
+                'total': f'{loss.item():.4f}',
+                'main': f'{main_loss.item():.4f}',
+                'domain': f'{domain_loss.item():.4f}',
+                'acc': f'{ep_acc:.4f}',
+                'aupr': f'{batch_aupr:.4f}',
             })
 
 
-        avg_loss = total_loss / max(n_batches, 1)  # 平均损失
+        avg_total_loss = total_loss / max(n_batches, 1)  # 平均损失
+        avg_main_loss = total_main_loss / max(n_batches, 1)
+        avg_domain_loss = total_domain_loss / max(n_batches, 1)
         avg_ep_acc = total_ep_acc / max(n_batches, 1)  # 平均准确率
-        epoch_precision = (total_tp / max(total_tp + total_fp, 1)) if (total_tp + total_fp) > 0 else 0.0  # epoch精确率
-        epoch_recall = (total_tp / max(total_tp + total_fn, 1)) if (total_tp + total_fn) > 0 else 0.0  # epoch召回率
-        epoch_f1 = (2 * epoch_precision * epoch_recall / max(epoch_precision + epoch_recall, 1e-6)) if (epoch_precision + epoch_recall) > 0 else 0.0  # epoch F1
-        logger.info(f"Epoch {epoch_idx+1}/{EPOCH} - Train Loss: {avg_loss:.4f}, EP Acc: {avg_ep_acc:.4f}, Prec: {epoch_precision:.4f}, Rec: {epoch_recall:.4f}, F1: {epoch_f1:.4f}")  # 记录日志
+        avg_batch_aupr = total_aupr / max(n_batches, 1)
+        if epoch_labels:
+            epoch_labels_np = torch.cat(epoch_labels, dim=0).numpy()
+            epoch_probs_np = torch.cat(epoch_probs, dim=0).numpy()
+            if float(epoch_labels_np.max()) == float(epoch_labels_np.min()):
+                epoch_aupr = 0.0
+            else:
+                epoch_aupr = float(average_precision_score(epoch_labels_np, epoch_probs_np))
+        else:
+            epoch_aupr = 0.0
+        logger.info(
+            f"Epoch {epoch_idx+1}/{EPOCH} - Total Loss: {avg_total_loss:.4f}, Main Loss: {avg_main_loss:.4f}, Domain Loss: {avg_domain_loss:.4f}, ACC: {avg_ep_acc:.4f}, AUPR: {epoch_aupr:.4f} (batch avg {avg_batch_aupr:.4f})"
+        )  # 记录日志
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")  # 检查点路径

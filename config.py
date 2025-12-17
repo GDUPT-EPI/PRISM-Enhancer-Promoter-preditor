@@ -13,7 +13,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目录
 # MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
-SAVEMODEL_NAME = 'tss'
+SAVEMODEL_NAME = 'baseline'
 PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, f"{SAVEMODEL_NAME}")
 LOG_DIR = os.path.join(PROJECT_ROOT, "log")
 
