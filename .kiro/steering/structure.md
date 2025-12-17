@@ -88,7 +88,7 @@
 1. 在`config.py`中修改参数
 2. 运行训练: `python PRISM.py`
 3. 评估: `python predict.py`
-4. 检查`/log/`目录中的日志
+4. 检查`/log/`目录中的训练日志和`compete/tss`中的未知细胞系(OOD Cell-Type)预测结果
 5. 模型权重自动保存到配置目录
 
 ## 关键设计原则
