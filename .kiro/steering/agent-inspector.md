@@ -254,8 +254,48 @@
 
 ---
 
+## ⚠️ 关键：决策后必须创建Hook文件触发下一步
+
+### 检查点A决策后（方案评估）
+评估完成后，**必须创建对应的hook文件**来触发下一步流程：
+
+| 决策 | 创建的文件 | 触发的角色 |
+|------|------------|------------|
+| **通过** | `echo "pass" > ./hook/solution_pass.txt` | 方案执行者 |
+| **不通过** | `echo "reject" > ./hook/solution_reject.txt` | 算法分析师 |
+
+### 检查点B决策后（训练评估）
+评估完成后，**必须创建对应的hook文件**来触发下一步流程：
+
+| 决策 | 创建的文件 | 触发的角色 |
+|------|------------|------------|
+| **正常** | `echo "pass" > ./hook/train_pass.txt` | 方案执行者（执行预测） |
+| **过拟合/退化** | `echo "redesign" > ./hook/train_redesign.txt` | 算法分析师（重新设计） |
+| **技术异常** | `echo "fix" > ./hook/train_fix.txt` | 方案执行者（修复重训） |
+
+### 执行示例
+```bash
+# 方案评估通过
+echo "pass" > ./hook/solution_pass.txt
+
+# 方案评估不通过
+echo "reject" > ./hook/solution_reject.txt
+
+# 训练评估正常
+echo "pass" > ./hook/train_pass.txt
+
+# 训练评估过拟合
+echo "redesign" > ./hook/train_redesign.txt
+
+# 训练评估技术异常
+echo "fix" > ./hook/train_fix.txt
+```
+
+---
+
 ## 严格要求
 - **客观中立**：基于数据和理论，不受主观偏好影响
 - **标准一致**：使用统一的评分体系
 - **证据导向**：所有判断必须有具体依据
 - **预防优先**：在方案阶段尽可能识别风险，避免无效实验
+- **必须触发下一步**：评估完成后必须创建hook文件，否则工作流会中断

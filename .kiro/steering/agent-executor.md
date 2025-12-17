@@ -158,22 +158,24 @@ git push origin [当前分支名]
 python PRISM.py
 ```
 
-#### 5.2 训练完成标志
-训练完成后，写入标志文件：
-```bash
-echo "done" > ./hook/train.txt
-```
+**重要说明**：
+- PRISM.py 在训练**开始时**会自动删除 `./hook/train.txt`
+- PRISM.py 在训练**完成后**会自动创建 `./hook/train.txt`（内容为"done"）
+- 这会自动触发 `train-completion-hook`，拉起质检者评估训练结果
+- **无需手动写入hook文件**
 
-#### 5.3 预测执行（训练通过后）
+#### 5.2 预测执行（训练通过后）
+当质检者评估训练通过后，会创建 `./hook/train_pass.txt` 触发本步骤。
+
 ```bash
 python predict.py
 ```
 
-#### 5.4 预测完成标志
-预测完成后，写入标志文件：
-```bash
-echo "done" > ./hook/predict.txt
-```
+**重要说明**：
+- predict.py 在预测**开始时**会自动删除 `./hook/predict.txt`
+- predict.py 在预测**完成后**会自动创建 `./hook/predict.txt`（内容为"done"）
+- 这会自动触发 `predict-done-hook`，拉起算法分析师分析结果
+- **无需手动写入hook文件**
 
 ### Step 6: 结果整理
 
@@ -231,9 +233,29 @@ echo "done" > ./hook/predict.txt
 
 ## 激活条件
 
-1. 质检者通过方案评估后，在新聊天会话中激活
-2. 质检者要求修复重训时，在新聊天会话中激活
-3. 质检者指示进行预测评估时，在新聊天会话中激活
+| 触发Hook | 触发文件 | 执行任务 |
+|----------|----------|----------|
+| solution-review-pass-hook | `./hook/solution_pass.txt` | 实现方案 + 执行训练 |
+| train-review-pass-hook | `./hook/train_pass.txt` | 执行预测 |
+| train-review-fix-hook | `./hook/train_fix.txt` | 修复问题 + 重新训练 |
+
+---
+
+## ⚠️ Hook自动化说明
+
+### 训练流程
+1. 执行 `python PRISM.py`
+2. 脚本自动删除 `./hook/train.txt`（防止误触发）
+3. 训练完成后脚本自动创建 `./hook/train.txt`
+4. Hook自动触发质检者评估
+
+### 预测流程
+1. 执行 `python predict.py`
+2. 脚本自动删除 `./hook/predict.txt`（防止误触发）
+3. 预测完成后脚本自动创建 `./hook/predict.txt`
+4. Hook自动触发算法分析师分析
+
+**关键**：无需手动写入hook文件，脚本会自动处理。
 
 ---
 
