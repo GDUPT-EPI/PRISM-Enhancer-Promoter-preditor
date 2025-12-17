@@ -8,18 +8,6 @@ from torch.utils.data import DataLoader  # 数据加载器
 from tqdm import tqdm  # 进度条
 from typing import List, Tuple, Dict, Optional  # 类型注解
 from config import *
-from config import (  # 集中配置导入
-    DEVICE,
-    PRISM_SAVE_MODEL_DIR,
-    NUM_WORKERS,
-    # BATCH_SIZE,
-    PRISM_BATCH_SIZE,
-    CNN_KERNEL_SIZE,
-    POOL_KERNEL_SIZE,
-    DNA_EMBEDDING_PADDING_IDX,
-    MAX_ENHANCER_LENGTH,
-    MAX_PROMOTER_LENGTH,
-)
 from data_loader import load_prism_data, PRISMDataset, CellBatchSampler  # 数据加载与采样
 from models.PRISMModel import PRISMBackbone  # 模型主干
 from models.pleat.embedding import KMerTokenizer  # K-mer分词器
