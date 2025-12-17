@@ -15,7 +15,7 @@ DOMAIN_KL_DIR = os.path.join(PROJECT_ROOT, "domain-kl")  # PRISM特供数据目�
 CACHE_DIR = os.path.join(PROJECT_ROOT, "_cache")
 SAVEMODEL_NAME = 'baseline'
 PRISM_SAVE_MODEL_DIR = os.path.join(PROJECT_ROOT, 'save_model',f"{SAVEMODEL_NAME}")
-LOG_DIR = os.path.join(PROJECT_ROOT, "log")
+LOG_DIR = os.path.join(PRISM_SAVE_MODEL_DIR, "log")
 
 # 确保目录存在
 for dir_path in [DOMAIN_KL_DIR, CACHE_DIR, PRISM_SAVE_MODEL_DIR, LOG_DIR]:
