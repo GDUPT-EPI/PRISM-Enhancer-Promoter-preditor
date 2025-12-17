@@ -75,8 +75,12 @@ Kiro Agent Steering（EP互作预测）
   - `log/记录点(n+1)预测结果.txt`
 
 
-七、停止条件（Stop Conditions）
+七、协作与分支策略（Git Policy）
+------------------------------
+- 代码提交后、训练开始前：必须执行 `git push origin plan15-C`，保证长耗时训练可追溯。
+
+
+八、停止条件（Stop Conditions）
 -----------------------------
 - 达标停止：domain-kl/test 与各细胞系 AUPR ≥ 0.75。
 - 转入稳定性验证：达标后只允许进行复现实验与小修复，不再做结构性大改。
-

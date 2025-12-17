@@ -123,9 +123,20 @@ Hook 06：代码前置核对（Pre-Code Gate）
 - Exit Criteria：能把本轮改动映射到“哪一个文件/哪一条数据流/哪一个损失或推理公式”。
 
 
+Hook 06.5：推送分支（Git Push Before Training）
+---------------------------------------------
+- Trigger：代码已提交，准备开始训练前。
+- Inputs：
+  - 当前 Git 分支与提交状态（由本地仓库决定）
+- Actions：
+  - 执行 `git push origin plan15-C`。
+- Artifacts：无。
+- Exit Criteria：远端 `origin/plan15-C` 已包含本次提交。
+
+
 Hook 07：训练执行与日志落盘（Run Training）
 ----------------------------------------
-- Trigger：完成代码修改并准备训练。
+- Trigger：完成代码修改与 Hook 06.5，并准备训练。
 - Inputs：
   - `PRISM.py`
   - 本轮方案中的训练设置要点
@@ -177,4 +188,3 @@ Hook 10：循环控制（Iteration Controller）
   - 若 AUPR<0.75：将 n 设为 n+1，回到 Hook 01，开始下一轮闭环。
 - Artifacts：无。
 - Exit Criteria：明确下一步是“收敛验证”还是“继续迭代”。
-
