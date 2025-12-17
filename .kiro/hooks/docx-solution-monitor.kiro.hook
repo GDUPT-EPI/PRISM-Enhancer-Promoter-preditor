@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "DOCX Solution Monitor",
+  "description": "Monitors the ./docx/ directory for new solution proposals and automatically triggers agent-inspector when a new record point solution is created",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "./docx/记录点*/记录点*方案*"
+    ]
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "agent-inspector"
+  }
+}

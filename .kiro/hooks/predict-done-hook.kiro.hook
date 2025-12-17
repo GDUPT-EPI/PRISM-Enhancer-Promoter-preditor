@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Predict Done Trigger",
+  "description": "Monitors ./hook/predict.txt for \"done\" text and triggers agent-analyst when detected",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "./hook/predict.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "The file ./hook/predict.txt now contains \"done\". Please activate agent-analyst to analyze the prediction results and determine next steps for the PRISM project."
+  }
+}
