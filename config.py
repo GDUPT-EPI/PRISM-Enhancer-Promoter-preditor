@@ -66,7 +66,7 @@ PROMOTER_FEATURE_DIM = (5, 4)  # 5个特征，每个特征4维
 
 # 细胞系配置
 TRAIN_CELL_LINE = "ALL"  # 选择单一细胞系或全选
-TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"]
+# TEST_CELL_LINES = ["GM12878", "IMR90", "HeLa-S3", "HUVEC", "K562", "NHEK"] # 禁止细胞系硬编码，弃用
 
 # 可视化配置
 TSNE_PERPLEXITY = 10

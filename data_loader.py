@@ -12,13 +12,13 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 import os
-from config import DATA_DIR as CONFIG_DATA_DIR, TEST_CELL_LINES
+from config import DATA_DIR as CONFIG_DATA_DIR
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(CONFIG_DATA_DIR)
 
 # 细胞系列表来源于配置
-CELL_LINES = TEST_CELL_LINES
+CELL_LINES = [] # 禁止细胞系硬编码，弃用
 
 # 数据集类型
 DATA_TYPES = ["train", "val", "test"]
