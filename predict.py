@@ -15,17 +15,22 @@ from torch.nn.utils.rnn import pad_sequence  # 序列填充
  
 HOOK_DIR = os.path.join(PROJECT_ROOT, "hook")
 HOOK_PREDICT_FILE = os.path.join(HOOK_DIR, "predict.txt")
-def _hook_reset(path: str) -> None:
+
+def _hook_delete(path: str) -> None:
+    """删除hook文件（预测开始时调用，防止hook误触发）"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         os.remove(path)
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
+
+def _hook_create_done(path: str) -> None:
+    """创建包含done的hook文件（预测完成时调用，触发算法分析师hook）"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("")
-def _hook_append(path: str, msg: str) -> None:
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(str(msg).strip() + "\n")
+        f.write("done\n")
 
 def find_optimal_threshold(labels: np.ndarray, predictions: np.ndarray, 
                           metric: str = "f1", 
@@ -253,9 +258,9 @@ def evaluate() -> Optional[Dict[str, object]]:
         评估结果字典或 None（无预测）
     """
     device = EvalConfig.DEVICE  # 设备
-    _hook_append(HOOK_PREDICT_FILE, "start")
+    # 预测开始时删除hook文件，防止hook误触发
+    _hook_delete(HOOK_PREDICT_FILE)
     df, e_seq, p_seq = load_prism_data("test")  # 加载测试数据
-    _hook_append(HOOK_PREDICT_FILE, f"data={len(df)}")
     dataset = PRISMDataset(df, e_seq, p_seq)  # 构建数据集
     bs = EvalConfig.BATCH_SIZE  # 批量大小
     sampler = CellBatchSampler(dataset, batch_size=bs, shuffle=EvalConfig.SHUFFLE)  # 细胞系批采样器
@@ -266,10 +271,7 @@ def evaluate() -> Optional[Dict[str, object]]:
         pin_memory=EvalConfig.PIN_MEMORY,
         collate_fn=collate_fn,
     )
-    try:
-        _hook_append(HOOK_PREDICT_FILE, f"batches={len(loader)}")
-    except Exception:
-        _hook_append(HOOK_PREDICT_FILE, "batches=unknown")
+
     backbone = PRISMBackbone().to(device)  # 模型加载到设备
     _ = load_prism_checkpoint(backbone, EvalConfig.SAVE_DIR, device)  # 加载最近权重
     backbone.eval()  # 评估模式
@@ -277,12 +279,6 @@ def evaluate() -> Optional[Dict[str, object]]:
     all_labels: List[np.ndarray] = []  # 汇总标签
     per_cell: Dict[str, Dict[str, List[np.ndarray]]] = {}  # 分细胞系缓存
     with torch.no_grad():  # 关闭梯度
-        _hook_append(HOOK_PREDICT_FILE, "predict_start")
-        total_batches = None
-        try:
-            total_batches = len(loader)
-        except Exception:
-            pass
         for idx, batch in enumerate(tqdm(loader, desc="Predict domain-kl/test")):  # 迭代批次
             enh_ids, pr_ids, labels, cells = batch  # 取批
             enh_ids = enh_ids.to(device)  # 移动设备
@@ -298,10 +294,6 @@ def evaluate() -> Optional[Dict[str, object]]:
                 per_cell[cell] = {"preds": [], "labels": []}
             per_cell[cell]["preds"].append(preds)  # 添加预测
             per_cell[cell]["labels"].append(labs)  # 添加标签
-            # if total_batches is not None:
-            #     _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}/{total_batches}")
-            # else:
-            #     _hook_append(HOOK_PREDICT_FILE, f"batch {idx+1}")
     if len(all_preds) == 0:  # 无预测
         return None  # 返回空
     all_preds = np.concatenate(all_preds, axis=0)  # 拼接概率
@@ -322,7 +314,6 @@ def evaluate() -> Optional[Dict[str, object]]:
             threshold_range=EvalConfig.THRESHOLD_RANGE,
             num_steps=EvalConfig.THRESHOLD_STEPS
         )
-        _hook_append(HOOK_PREDICT_FILE, "threshold_search_done")
         print(f"Optimal threshold ({EvalConfig.OPTIMIZE_METRIC}): {optimal_threshold:.4f}")
         print(f"Optimal metrics - F1: {optimal_metrics['f1']:.4f}, "
               f"Precision: {optimal_metrics['precision']:.4f}, "
@@ -351,7 +342,6 @@ def evaluate() -> Optional[Dict[str, object]]:
             plt.tight_layout()
             plt.savefig(os.path.join(out_dir, "threshold_metrics.png"))
             plt.close()
-            _hook_append(HOOK_PREDICT_FILE, "threshold_plot_saved")
     else:
         threshold = EvalConfig.THRESHOLD
     
@@ -370,7 +360,6 @@ def evaluate() -> Optional[Dict[str, object]]:
         plt.tight_layout()  # 紧凑布局
         plt.savefig(os.path.join(out_dir, "pr_curve.png"))  # 保存
         plt.close()  # 关闭
-        _hook_append(HOOK_PREDICT_FILE, "pr_plot_saved")
     fpr, tpr, _ = roc_curve(all_labels, all_preds)  # ROC曲线数据
     if EvalConfig.PLOT_ROC:  # 绘制ROC
         plt.figure()  # 新图
@@ -382,7 +371,6 @@ def evaluate() -> Optional[Dict[str, object]]:
         plt.tight_layout()  # 紧凑布局
         plt.savefig(os.path.join(out_dir, "roc_curve.png"))  # 保存
         plt.close()  # 关闭
-        _hook_append(HOOK_PREDICT_FILE, "roc_plot_saved")
     per_cell_results: Dict[str, Dict[str, float]] = {}  # 细胞系指标
     for c, d in per_cell.items():  # 遍历细胞系
         cp = np.concatenate(d["preds"], axis=0)  # 概率
@@ -434,7 +422,6 @@ def evaluate() -> Optional[Dict[str, object]]:
 
 
 if __name__ == "__main__":
-    _hook_reset(HOOK_PREDICT_FILE)
     res = evaluate()  # 执行评估
     if res is not None:
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), EvalConfig.OUTPUT_DIR_NAME)  # 输出目录
@@ -472,4 +459,6 @@ if __name__ == "__main__":
                     f"Recall={m['recall']:.4f} Precision={m['precision']:.4f} "
                     f"Threshold={m['threshold']:.4f} N={m['n']}\n"
                 )
-        _hook_append(HOOK_PREDICT_FILE, "done")
+        # 预测完成后创建hook文件，触发算法分析师分析
+        _hook_create_done(HOOK_PREDICT_FILE)
+        print(f"已创建预测完成标志: {HOOK_PREDICT_FILE}")

@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "训练评审通过触发器",
+  "description": "当质检者评审训练结果正常后，自动拉起方案执行者执行预测",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "./hook/train_pass.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "训练评审已通过。请以方案执行者身份，执行预测流程：运行 python predict.py（预测完成后脚本会自动创建hook/predict.txt触发算法分析师）"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "方案评审通过触发器",
+  "description": "当质检者评审方案通过后，自动拉起方案执行者开始实现",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "./hook/solution_pass.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "方案评审已通过。请以方案执行者身份，按照agent-executor.md中的工作流程：1) 深度理解方案文档 2) 实现代码修改 3) 使用getDiagnostics验证代码 4) Git提交并推送 5) 执行训练 python PRISM.py（训练完成后脚本会自动创建hook/train.txt触发质检者）"
+  }
+}

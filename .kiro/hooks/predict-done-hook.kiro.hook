@@ -1,16 +1,16 @@
 {
   "enabled": true,
   "name": "Predict Done Trigger",
-  "description": "Monitors ./hook/predict.txt for \"done\" text and triggers agent-analyst when detected",
+  "description": "当预测完成后（predict.txt被创建），自动拉起算法分析师分析结果",
   "version": "1",
   "when": {
-    "type": "fileEdited",
+    "type": "fileCreated",
     "patterns": [
       "./hook/predict.txt"
     ]
   },
   "then": {
     "type": "askAgent",
-    "prompt": "The file ./hook/predict.txt now contains \"done\". Please activate agent-analyst to analyze the prediction results and determine next steps for the PRISM project."
+    "prompt": "预测已完成（./hook/predict.txt 已创建）。请以算法分析师身份，按照agent-analyst.md中的工作流程：1) 读取 compete/baseline/results.txt 预测结果 2) 誊抄结果到 docx/记录点(n)/记录点(n)结果.md 3) 判断是否达标(AUPR≥0.75)：达标→项目成功，不达标→撰写反思文档并设计新方案 4) 更新 docx/历史索引.md"
   }
 }

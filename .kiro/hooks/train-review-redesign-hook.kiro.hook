@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "训练评审-需重新设计触发器",
+  "description": "当质检者评审训练结果为过拟合或性能退化后，自动拉起算法分析师重新设计",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "./hook/train_redesign.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "训练评审显示存在过拟合或性能退化问题。请以算法分析师身份，阅读质检者的训练评审报告和训练日志，深度分析失败原因，撰写当前记录点的反思文档，然后设计新的方案。输出：1) docx/记录点(n)/记录点(n)反思.md 2) docx/记录点(n+1)/记录点(n+1)方案.md 3) 更新 docx/历史索引.md"
+  }
+}

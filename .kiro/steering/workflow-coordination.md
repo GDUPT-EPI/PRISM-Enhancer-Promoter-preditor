@@ -34,23 +34,29 @@
 
 ## Hook触发机制详解
 
-### Hook 1: docx-solution-monitor
-**触发条件**：算法分析师创建方案文件
-**监控路径**：`./docx/记录点*/记录点*方案*`
-**触发事件**：文件创建
-**执行动作**：新建聊天会话，激活质检者进行方案评估
+### 核心Hook（自动触发）
 
-### Hook 2: train-completion-hook
-**触发条件**：训练完成
-**监控路径**：`./hook/train.txt`
-**触发事件**：文件包含"done"
-**执行动作**：新建聊天会话，激活质检者进行训练结果评估
+| Hook名称 | 监控路径 | 触发事件 | 执行动作 |
+|----------|----------|----------|----------|
+| docx-solution-monitor | `./docx/记录点*/记录点*方案*` | fileCreated | 质检者评估方案 |
+| train-completion-hook | `./hook/train.txt` | fileCreated | 质检者评估训练 |
+| predict-done-hook | `./hook/predict.txt` | fileCreated | 算法分析师分析结果 |
 
-### Hook 3: predict-done-hook
-**触发条件**：预测完成
-**监控路径**：`./hook/predict.txt`
-**触发事件**：文件包含"done"
-**执行动作**：新建聊天会话，激活算法分析师进行结果分析
+### 决策分支Hook（质检者写入触发）
+
+| Hook名称 | 监控路径 | 触发事件 | 执行动作 |
+|----------|----------|----------|----------|
+| solution-review-pass-hook | `./hook/solution_pass.txt` | fileCreated | 方案执行者实现+训练 |
+| solution-review-reject-hook | `./hook/solution_reject.txt` | fileCreated | 算法分析师重新设计 |
+| train-review-pass-hook | `./hook/train_pass.txt` | fileCreated | 方案执行者执行预测 |
+| train-review-fix-hook | `./hook/train_fix.txt` | fileCreated | 方案执行者修复重训 |
+| train-review-redesign-hook | `./hook/train_redesign.txt` | fileCreated | 算法分析师重新设计 |
+
+### 重要说明
+- **所有Hook使用fileCreated事件**：脚本在开始时删除hook文件，完成时创建新文件
+- **PRISM.py**：训练开始时删除`hook/train.txt`，训练完成后创建（内容为"done"）
+- **predict.py**：预测开始时删除`hook/predict.txt`，预测完成后创建（内容为"done"）
+- **质检者决策**：通过创建对应的hook文件（如`hook/train_pass.txt`）触发下一步
 
 ## 路径配置（基于config.py）
 
@@ -158,14 +164,25 @@
 
 ## Hook文件状态监控
 
-### 训练状态文件：./hook/train.txt
-- **"start"**：训练开始
-- **"epoch N"**：训练进度
-- **"done"**：训练完成，触发质检者评估
+### 自动生成的Hook文件
+| 文件 | 生成时机 | 触发的Hook |
+|------|----------|------------|
+| `./hook/train.txt` | PRISM.py训练完成后创建 | train-completion-hook |
+| `./hook/predict.txt` | predict.py预测完成后创建 | predict-done-hook |
 
-### 预测状态文件：./hook/predict.txt
-- **"start"**：预测开始
-- **"done"**：预测完成，触发算法分析师分析
+### 质检者决策写入的Hook文件
+| 文件 | 写入时机 | 触发的Hook |
+|------|----------|------------|
+| `./hook/solution_pass.txt` | 方案评审通过 | solution-review-pass-hook |
+| `./hook/solution_reject.txt` | 方案评审不通过 | solution-review-reject-hook |
+| `./hook/train_pass.txt` | 训练评审正常 | train-review-pass-hook |
+| `./hook/train_fix.txt` | 训练评审需修复 | train-review-fix-hook |
+| `./hook/train_redesign.txt` | 训练评审需重设计 | train-review-redesign-hook |
+
+### 注意事项
+- 脚本在开始时会删除对应的hook文件，防止误触发
+- 只有任务完成后才会创建hook文件
+- 质检者需要通过创建对应文件来触发下一步流程
 
 ## 成功标准
 - **技术指标**：所有测试集AUPR≥0.75

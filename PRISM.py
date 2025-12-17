@@ -46,19 +46,22 @@ logger.info(f"预处理线程数: {PREPROCESS_NUM_THREADS}")  # 预处理线程�
 
 HOOK_DIR = os.path.join(PROJECT_ROOT, "hook")
 HOOK_TRAIN_FILE = os.path.join(HOOK_DIR, "train.txt")
-def _hook_reset(path: str) -> None:
-    """重置指定hook日志文件（删除并重新创建空文件）"""
+
+def _hook_delete(path: str) -> None:
+    """删除hook文件（训练开始时调用，防止hook误触发）"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         os.remove(path)
-    except Exception:
+    except FileNotFoundError:
         pass
+    except Exception as e:
+        logger.warning(f"删除hook文件失败: {path}, 错误: {e}")
+
+def _hook_create_done(path: str) -> None:
+    """创建包含done的hook文件（训练完成时调用，触发质检者hook）"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("")
-def _hook_append(path: str, msg: str) -> None:
-    """向指定hook日志文件追加一行进度信息"""
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(str(msg).strip() + "\n")
+        f.write("done\n")
 
 
 def prism_collate_fn(batch):
@@ -207,15 +210,14 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     logger.info("PRISM预训练开始 (Domain-KL数据)")  # 记录日志
     logger.info("=" * 80)  # 分隔线
-    _hook_reset(HOOK_TRAIN_FILE)
-    _hook_append(HOOK_TRAIN_FILE, "start")
+    # 训练开始时删除hook文件，防止hook误触发
+    _hook_delete(HOOK_TRAIN_FILE)
     
     # 加载PRISM特供数据
     logger.info("加载训练数据 (domain-kl)...")  # 记录日志
     train_pairs_df, train_e_seqs, train_p_seqs = load_prism_data("train")  # 加载训练数据
     logger.info(f"训练样本数: {len(train_pairs_df)}")  # 记录日志
     logger.info(f"训练细胞系: {', '.join(sorted(train_pairs_df['cell_line'].unique()))}")  # 记录日志
-    _hook_append(HOOK_TRAIN_FILE, f"data={len(train_pairs_df)}")
     
     unique_cells_train = sorted(train_pairs_df['cell_line'].unique())  # 获取唯一细胞系
     
@@ -235,10 +237,6 @@ def main():  # 主函数
     )
     
     val_loader = None  # 验证加载器为空
-    try:
-        _hook_append(HOOK_TRAIN_FILE, f"batches={len(train_loader)}")
-    except Exception:
-        _hook_append(HOOK_TRAIN_FILE, "batches=unknown")
     
     # 创建模型
     logger.info("创建PRISM模型...")  # 记录日志
@@ -300,7 +298,6 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     logger.info("开始训练")  # 记录日志
     logger.info("=" * 80)  # 分隔线
-    _hook_append(HOOK_TRAIN_FILE, "training_start")
     
     os.makedirs(PRISM_SAVE_MODEL_DIR, exist_ok=True)  # 创建模型保存目录
     # EnvModel 已经集成进 Model，无需单独加载
@@ -313,7 +310,6 @@ def main():  # 主函数
         logger.info("已达到或超过目标训练轮数，无需继续。若需追加训练，请增大EPOCH或删除旧检查点。")  # 记录日志
     for epoch_idx in range(start_epoch, EPOCH):  # 遍历epoch
         # 训练
-        _hook_append(HOOK_TRAIN_FILE, f"epoch {epoch_idx+1}/{EPOCH} start")
         logger.info("Loss Weights: ep=1.0, orth=0.1, domain=0.1, sparse=0.01")  # 记录日志
         model.train()  # 设置为训练模式
         # env_model.train()
@@ -397,7 +393,6 @@ def main():  # 主函数
         logger.info(
             f"Epoch {epoch_idx+1}/{EPOCH} - Total Loss: {avg_total_loss:.4f}, Main Loss: {avg_main_loss:.4f}, Domain Loss: {avg_domain_loss:.4f}, ACC: {avg_ep_acc:.4f}, AUPR: {epoch_aupr:.4f} (batch avg {avg_batch_aupr:.4f})"
         )  # 记录日志
-        _hook_append(HOOK_TRAIN_FILE, f"epoch {epoch_idx+1} summary total={avg_total_loss:.4f} aupr={epoch_aupr:.4f}")
         
         # 保存检查点
         checkpoint_path = os.path.join(PRISM_SAVE_MODEL_DIR, f"prism_epoch_{epoch_idx+1}.pth")  # 检查点路径
@@ -419,7 +414,9 @@ def main():  # 主函数
     logger.info("=" * 80)  # 分隔线
     logger.info("PRISM预训练完成")  # 记录日志
     logger.info("=" * 80)  # 分隔线
-    _hook_append(HOOK_TRAIN_FILE, "done")
+    # 训练完成后创建hook文件，触发质检者评估
+    _hook_create_done(HOOK_TRAIN_FILE)
+    logger.info(f"已创建训练完成标志: {HOOK_TRAIN_FILE}")
 
 
 if __name__ == "__main__":  # 如果是主程序

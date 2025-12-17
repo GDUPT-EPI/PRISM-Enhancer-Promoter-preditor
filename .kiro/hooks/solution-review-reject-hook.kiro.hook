@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "方案评审拒绝触发器",
+  "description": "当质检者评审方案不通过后，自动拉起算法分析师重新设计",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "./hook/solution_reject.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "方案评审未通过。请以算法分析师身份，阅读质检者的评审报告，理解方案被拒绝的原因，然后重新设计一个更优的方案。请确保新方案解决了质检者指出的问题，并输出到 docx/记录点(n+1)/记录点(n+1)方案.md"
+  }
+}
