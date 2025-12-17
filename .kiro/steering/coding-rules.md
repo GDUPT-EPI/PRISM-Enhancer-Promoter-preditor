@@ -65,10 +65,12 @@
 - **相对路径**: 禁止硬编码绝对路径，所有路径基于项目根目录
 - **目录约定**:
   - `/models/`: 模型架构和组件
-  - `/domain-kl/`: PRISM专用训练数据
-  - `/_cache/`: PyTorch张量缓存
-  - `/docx/记录点n/`: 实验记录和日志(替代./log)
-  - `/CBAT/`: 模型检查点保存
+  - `/domain-kl/`: PRISM专用训练数据（`DOMAIN_KL_DIR`）
+  - `/_cache/`: PyTorch张量缓存（`CACHE_DIR`）
+  - `/docx/记录点n/`: 实验方案和分析文档
+  - `{PRISM_SAVE_MODEL_DIR}/`: 模型检查点保存（`save_model/{SAVEMODEL_NAME}/`）
+  - `{PRISM_SAVE_MODEL_DIR}/log/`: 训练日志存储
+  - `compete/{SAVEMODEL_NAME}/`: 预测结果存储
 
 ### 命名规范
 - **文件**: snake_case (如`data_loader.py`, `PRISM.py`)
@@ -78,7 +80,9 @@
 - **变量**: snake_case，生物学术语保持原样 (如`enhancer_ids`, `z_I`, `U_I`)
 
 ### 日志管理
-- **统一路径**: 使用`./docx/记录点n/`管理实验记录，不使用`./log`
+- **训练日志路径**: 使用`{PRISM_SAVE_MODEL_DIR}/log/`存储训练日志
+- **预测结果路径**: 使用`compete/{SAVEMODEL_NAME}/`存储预测结果
+- **实验记录路径**: 使用`./docx/记录点n/`管理实验方案和分析
 - **记录点结构**: 每个记录点包含三个文件：
   - 实验配置和参数
   - 训练日志和指标
@@ -150,11 +154,13 @@
 ## 📊 实验管理规范
 
 ### 记录点管理
-- **目录结构**：`./docx/记录点n/`
+- **方案目录结构**：`./docx/记录点n/`
+- **训练日志路径**：`{PRISM_SAVE_MODEL_DIR}/log/`
+- **预测结果路径**：`compete/{SAVEMODEL_NAME}/`
 - **必需文件**：
-  - `config.md`: 实验配置和超参数
-  - `training.log`: 训练过程和指标
-  - `analysis.md`: 结果分析和总结
+  - `docx/记录点n/记录点n方案.md`: 实验方案和理论
+  - `{PRISM_SAVE_MODEL_DIR}/log/记录点n训练日志.log`: 训练过程和指标
+  - `compete/{SAVEMODEL_NAME}/记录点n预测结果.txt`: 预测结果和分析
 - **版本控制**：每个记录点对应一个完整的实验版本
 
 ### 指标监控

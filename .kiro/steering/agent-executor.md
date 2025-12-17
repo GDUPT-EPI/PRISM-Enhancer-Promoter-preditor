@@ -39,14 +39,14 @@
 - 记录变更：在记录点目录中记录代码变更摘要
 
 ### Step 5: 实验执行
-- 训练：运行`python PRISM.py`
+- 训练：运行`python PRISM.py`，写入`./hook/train.txt "done"`标志训练完成
 - 监控：观察训练过程，记录异常情况
-- 预测：训练完成后运行`python predict.py`
-- 日志：确保所有输出正确保存到log目录
+- 预测：训练完成后运行`python predict.py`，写入`./hook/predict.txt "done"`标志预测完成
+- 日志：确保所有输出正确保存到`{PRISM_SAVE_MODEL_DIR}/log/`目录
 
 ### Step 6: 结果整理
-- 训练日志：整理并保存到`log/记录点(n+1)训练日志.log`
-- 预测结果：保存到`log/记录点(n+1)预测结果.txt`
+- 训练日志：整理并保存到`{PRISM_SAVE_MODEL_DIR}/log/记录点(n+1)训练日志.log`
+- 预测结果：保存到`compete/{SAVEMODEL_NAME}/记录点(n+1)预测结果.txt`
 - 异常记录：如有训练异常，详细记录问题现象
 
 ## 实现标准
