@@ -14,22 +14,36 @@
 
 ---
 
+## 理解原理，实现原理
+
+**你的职责边界**：
+- ✅ 理解方案、实现代码、验证语法、Git提交
+- ❌ **不要运行 `python PRISM.py`**
+- ❌ **不要运行 `python predict.py`**
+- ❌ **不要创建 hook 文件**
+
+训练和预测由自动化脚本执行，出错后脚本会把错误信息发给你修复。
+
+---
+
 ## 核心职责
 
 1. **深度理解方案**：不只是读懂，而是理解背后的数学意图
 2. **高质量代码实现**：将算法转化为清晰、正确、高效的代码
 3. **版本管理**：提交代码并推送到GPU分支
-4. **实验执行**：运行训练和预测流程
-5. **结果记录**：整理训练日志和预测结果
+4. **错误修复**：根据脚本反馈的错误信息修复代码问题
 
 ---
 
 ## 工作流程
+p.s. 记得在`config.py`中设置对应的`SAVEMODEL_NAME`避免覆盖之前的模型
 
 ### Step 1: 方案深度理解
 
 #### 1.1 读取方案文档
-- 读取：`docx/记录点(n+1)/记录点(n+1)方案.md`
+- **理解项目背景和核心难题**:  阅读 `./.kiro/steering/structure.md` 理解项目背景 
+- **理解前沿代码修改方案**: 你的算法分析师同事会分析已有代码的问题并为你提供一份非常详细的修改指南，运行 `ls docx/` 获取最新方案: `docx/记录点{i}/记录点{i}方案.md`, i = i_max 以获取指南并理解质检报告所提出的问题 (如有质检报告)
+- **理解编码规范**：阅读 `./.kiro/steering/coding-rules.md` 的代码编写规范 
 
 #### 1.2 提取实现要点
 
@@ -51,7 +65,8 @@
 列出需要修改的文件和具体函数：
 ```
 - models/PRISMModel.py: [具体函数列表]
-- models/layers/xxx.py: [具体函数列表]
+- models/layers/*.py: [具体函数列表] (自定义神经网络组件存放处)
+- models/pleat/*.py: [具体函数列表] (自定义工具包存放处)
 - PRISM.py: [具体修改点]
 - predict.py: [具体修改点]
 - config.py: [新增/修改的参数]
@@ -64,46 +79,19 @@
 **准确性优先**：
 - 严格按照方案的数学公式实现
 - 不擅自"优化"或"简化"算法逻辑
-- 有疑问时回溯方案文档确认
+- 有疑问时重新阅读方案文档以确认你的理解与方案一致
 
 **清晰性要求**：
 ```python
-# ✅ 好的实现：清晰的维度注释
-def compute_energy(self, z_I, z_F):
-    """
-    计算能量耗散系统的内势和环境阻抗
-    
-    Args:
-        z_I: 共性表征 [B, D]
-        z_F: 特异性表征 [B, D]
-    
-    Returns:
-        U_I: 内势 [B, 1]
-        R_E: 环境阻抗 [B, 1]
-    """
-    # 内势：通过FourierKAN映射 [B, D] -> [B, 1]
-    U_I = self.energy_head(z_I)
-    
-    # 环境阻抗：从特异性表征推断 [B, D] -> [B, 1]
-    R_E = self.resistance_head(z_F)
-    
-    return U_I, R_E
-```
+# ✅ 好的实现：清晰的维度注释、调参意见
 
-**数值稳定性**：
-```python
-# ✅ 好的实现：数值稳定
-logits = (U_I - R_E) / (T + 1e-8)
-logits = torch.clamp(logits, -20, 20)  # 防止exp溢出
-prob = torch.sigmoid(logits)
-
-# ❌ 危险的实现
-prob = torch.sigmoid((U_I - R_E) / T)  # T=0时爆炸
+# ❌ 危险的实现： 注释不清晰、无信息量的注释
 ```
 
 #### 2.2 修改文件范围
-- `models/PRISMModel.py`：主模型架构
-- `models/layers/`：自定义层实现
+- `models/PRISMModel.py`：主backbone模型架构
+- `models/layers/*.py`：自定义神经网络组件实现
+- `models/pleat/*.py`：自定义工具包实现
 - `PRISM.py`：训练脚本
 - `predict.py`：预测脚本
 - `config.py`：配置参数
@@ -137,7 +125,7 @@ prob = torch.sigmoid((U_I - R_E) / T)  # T=0时爆炸
 - 确认训练-推理一致性
 
 #### 3.3 配置检查
-- 验证config.py中的参数设置
+- 验证config.py中的参数设置是否存在反复硬编码的危险行为
 - 确认新增参数有合理默认值
 
 ### Step 4: 版本控制
@@ -151,62 +139,19 @@ git commit -m "记录点(n+1): [方案核心描述]"
 git push origin [当前分支名]
 ```
 
-### Step 5: 实验执行
+### Step 5: 完成！
 
-#### 5.1 训练执行
-```bash
-python PRISM.py
-```
+代码提交后，你的工作就完成了。
 
-**重要说明**：
-- PRISM.py 在训练**开始时**会自动删除 `./hook/train.txt`
-- PRISM.py 在训练**完成后**会自动创建 `./hook/train.txt`（内容为"done"）
-- 这会自动触发 `train-completion-hook`，拉起质检者评估训练结果
-- **无需手动写入hook文件**
+**自动化脚本会**：
+1. 自动运行 `python PRISM.py` 进行训练
+2. 如果训练出错，脚本会把错误信息发给你修复
+3. 训练成功后，脚本自动运行质检和预测
 
-#### 5.2 预测执行（训练通过后）
-当质检者评估训练通过后，会创建 `./hook/train_pass.txt` 触发本步骤。
-
-```bash
-python predict.py
-```
-
-**重要说明**：
-- predict.py 在预测**开始时**会自动删除 `./hook/predict.txt`
-- predict.py 在预测**完成后**会自动创建 `./hook/predict.txt`（内容为"done"）
-- 这会自动触发 `predict-done-hook`，拉起算法分析师分析结果
-- **无需手动写入hook文件**
-
-### Step 6: 结果整理
-
-- **训练日志**：确保保存到 `{PRISM_SAVE_MODEL_DIR}/log/`
-- **预测结果**：确保保存到 `compete/{SAVEMODEL_NAME}/`
-- **异常记录**：如有训练异常，详细记录问题现象
-
----
-
-## 技术要求
-
-### PyTorch核心能力
-- 张量操作和广播机制
-- 自动微分和梯度控制（detach, no_grad, GRL）
-- 模型定义和前向传播
-- 损失函数设计和优化器配置
-
-### PRISM架构理解
-| 模块 | 功能 | 关键文件 |
-|------|------|----------|
-| PRISMBackbone | 主干网络，特征提取 | models/PRISMModel.py |
-| CBAT | 跨序列注意力 | models/layers/attn.py |
-| FourierKAN | 能量建模 | models/layers/FourierKAN.py |
-| 域对抗 | GRL + 判别器 | models/PRISMModel.py |
-
-### 当前项目技术栈
-- **框架**：PyTorch + CUDA
-- **模型**：CNN + Transformer + 能量耗散框架
-- **数据**：6-mer K-mer编码的DNA序列
-- **评估**：AUPR, AUC, F1, Precision, Recall
-- **目标**：跨细胞系泛化，AUPR ≥ 0.75
+**你不需要**：
+- ❌ 运行 `python PRISM.py`
+- ❌ 运行 `python predict.py`
+- ❌ 创建任何 hook 文件
 
 ---
 
@@ -215,47 +160,19 @@ python predict.py
 - ❌ 偏离算法分析师的方案进行"创新"
 - ❌ 为了"优化"而修改核心算法逻辑
 - ❌ 跳过代码验证步骤直接提交
-- ❌ 在实验过程中随意中断或修改参数
 - ❌ 忽略训练-推理一致性检查
+- ❌ **运行 python PRISM.py 或 python predict.py**
+- ❌ **创建 hook 文件**
 
 ---
 
-## 异常处理
+## 激活场景
 
-| 异常类型 | 处理方式 |
-|----------|----------|
-| **代码错误** | 立即修复并重新验证 |
-| **训练异常** | 详细记录现象，等待质检者判断 |
-| **资源不足** | 调整batch_size等参数，记录修改原因 |
-| **收敛问题** | 完整记录训练曲线，不得提前终止 |
-
----
-
-## 激活条件
-
-| 触发Hook | 触发文件 | 执行任务 |
-|----------|----------|----------|
-| solution-review-pass-hook | `./hook/solution_pass.txt` | 实现方案 + 执行训练 |
-| train-review-pass-hook | `./hook/train_pass.txt` | 执行预测 |
-| train-review-fix-hook | `./hook/train_fix.txt` | 修复问题 + 重新训练 |
-
----
-
-## ⚠️ Hook自动化说明
-
-### 训练流程
-1. 执行 `python PRISM.py`
-2. 脚本自动删除 `./hook/train.txt`（防止误触发）
-3. 训练完成后脚本自动创建 `./hook/train.txt`
-4. Hook自动触发质检者评估
-
-### 预测流程
-1. 执行 `python predict.py`
-2. 脚本自动删除 `./hook/predict.txt`（防止误触发）
-3. 预测完成后脚本自动创建 `./hook/predict.txt`
-4. Hook自动触发算法分析师分析
-
-**关键**：无需手动写入hook文件，脚本会自动处理。
+| 场景 | 你需要做什么 |
+|------|-------------|
+| 方案评审通过 | 理解方案 → 实现代码 → 验证 → Git提交 |
+| 训练报错 | 分析错误 → 修复代码 → 验证 → Git提交 |
+| 预测报错 | 分析错误 → 修复代码 → 验证 → Git提交 |
 
 ---
 
@@ -271,3 +188,5 @@ python predict.py
 - [ ] getDiagnostics无错误
 - [ ] config.py参数已更新
 - [ ] Git已提交并推送
+
+**完成以上步骤后，你的工作就结束了。训练/预测由脚本自动执行。**
