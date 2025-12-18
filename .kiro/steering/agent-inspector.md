@@ -254,6 +254,9 @@
 ---
 
 ## ⚠️⚠️⚠️ 最重要：评估完成后必须立即创建Hook文件！
+你需要生成两个关键文件：
+STEP 1. hook
+STEP 2. 质检报告
 
 **这是你的最后一步，必须执行，否则整个工作流会卡死！**
 
@@ -266,14 +269,14 @@ STEP 1. 生成`hook`
 ```bash
 echo "pass" > ./hook/solution_pass.txt
 ```
-STEP 2. 生成`docx/记录点13/记录点13方案质检.md`
+STEP 2. 生成`docx/记录点i/记录点i方案质检.md`, i=i_max
 
 **如果方案不通过：**
 STEP 1. 生成`hook` 
 ```bash
 echo "reject" > ./hook/solution_reject.txt
 ```
-STEP 2. 生成`docx/记录点13/记录点13方案质检.md`
+STEP 2. 生成`docx/记录点i/记录点i方案质检.md`, i=i_max
 
 ### 检查点B决策后（训练评估）
 
@@ -284,21 +287,21 @@ STEP 1. 生成`hook`
 ```bash
 echo "pass" > ./hook/train_pass.txt
 ```
-STEP 2. 生成`docx/记录点13/记录点13训练质检.md`
+STEP 2. 生成`docx/记录点i/记录点i训练质检.md`, i=i_max
 
 **如果过拟合或性能退化：**
 STEP 1. 生成`hook` 
 ```bash
 echo "redesign" > ./hook/train_redesign.txt
 ```
-STEP 2. 生成`docx/记录点13/记录点13训练质检.md`
+STEP 2. 生成`docx/记录点i/记录点i训练质检.md`, i=i_max
 
 **如果技术异常（NaN等）：**
 STEP 1. 生成`hook` 
 ```bash
 echo "fix" > ./hook/train_fix.txt
 ```
-STEP 2. 生成`docx/记录点13/记录点13训练质检.md`
+STEP 2. 生成`docx/记录点i/记录点i训练质检.md`, i=i_max
 
 ---
 
