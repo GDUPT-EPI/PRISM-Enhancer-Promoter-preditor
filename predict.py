@@ -13,7 +13,7 @@ from models.PRISMModel import PRISMBackbone  # 模型主干
 from models.pleat.embedding import KMerTokenizer  # K-mer分词器
 from torch.nn.utils.rnn import pad_sequence  # 序列填充
  
-HOOK_DIR = os.path.join(PROJECT_ROOT, "hook")
+HOOK_DIR = os.path.join(PROJECT_ROOT, "hook-test")
 HOOK_PREDICT_FILE = os.path.join(HOOK_DIR, "predict.txt")
 
 def _hook_delete(path: str) -> None:

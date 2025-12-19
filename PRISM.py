@@ -44,7 +44,7 @@ logger.info("PRISM预训练日志系统已初始化")  # 输出初始化信息
 logger.info(f"日志文件: {LOG_DIR}")  # 日志目录
 logger.info(f"预处理线程数: {PREPROCESS_NUM_THREADS}")  # 预处理线程数
 
-HOOK_DIR = os.path.join(PROJECT_ROOT, "hook")
+HOOK_DIR = os.path.join(PROJECT_ROOT, "hook-test")
 HOOK_TRAIN_FILE = os.path.join(HOOK_DIR, "train.txt")
 
 def _hook_delete(path: str) -> None:
