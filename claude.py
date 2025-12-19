@@ -597,10 +597,11 @@ def workflow_result_analysis(known_solution_files: set) -> Tuple[bool, set]:
         return False, known_solution_files
     
     # 检查是否有新方案（说明不达标，需要继续迭代）
-    new_solutions, known_solution_files = check_new_solution_files(known_solution_files)
+    new_solutions, current_files = check_new_solution_files(known_solution_files)
     
     if new_solutions:
         print(f"[{ts()}] 📄 检测到新方案，AUPR未达标，继续迭代")
+        # 注意：不更新 known_solution_files，让下一轮 workflow_design_phase 能检测到这个新方案
         return False, known_solution_files
     else:
         print(f"[{ts()}] 🎉 未检测到新方案，可能已达标或分析师未完成")
