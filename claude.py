@@ -29,6 +29,8 @@ os.chdir(SCRIPT_DIR)
 # ============================================================
 # 常量配置
 # ============================================================
+MAX_ATTEMPTS = 10         # 最大尝试次数
+ERROR_LINE_LIMIT = 15     # 错误信息显示的行数限制
 AGENT_TIMEOUT_SECONDS = 15 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
 STEERING_DIR = Path("./.kiro/steering")
@@ -541,7 +543,7 @@ def workflow_prediction() -> Tuple[bool, str]:
     Returns:
         (success, error_info): 是否成功，错误信息
     """
-    max_retries = 3
+    max_retries = MAX_ATTEMPTS
     error_info = None
     
     for attempt in range(max_retries):
@@ -563,7 +565,7 @@ def workflow_prediction() -> Tuple[bool, str]:
             return True, ""
         else:
             print(f"[{ts()}] ❌ 预测失败，返修给编码Agent")
-            error_lines = output.split('\n')[-50:]
+            error_lines = output.split('\n')[-ERROR_LINE_LIMIT:]
             error_info = "\n".join(error_lines)
     
     print(f"[{ts()}] ❌ 预测阶段失败，超过最大重试次数")
