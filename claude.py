@@ -30,6 +30,7 @@ os.chdir(SCRIPT_DIR)
 # 常量配置
 # ============================================================
 MAX_ATTEMPTS = 10         # 最大尝试次数
+MAX_ITERATIONS = 20       # 最大迭代轮数
 ERROR_LINE_LIMIT = 15     # 错误信息显示的行数限制
 AGENT_TIMEOUT_SECONDS = 15 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
@@ -431,7 +432,7 @@ def workflow_design_phase(known_solution_files: set) -> Tuple[bool, set]:
     Returns:
         (passed, updated_known_files): 方案是否通过，更新后的已知方案文件集合
     """
-    max_retries = 3
+    max_retries = MAX_ATTEMPTS
     
     for attempt in range(max_retries):
         # 检查是否有新方案
@@ -477,7 +478,7 @@ def workflow_coding_and_training() -> Tuple[bool, str]:
     Returns:
         (success, error_info): 是否成功，错误信息
     """
-    max_code_retries = 3
+    max_code_retries = MAX_ATTEMPTS
     error_info = None
     
     for attempt in range(max_code_retries):
@@ -503,8 +504,7 @@ def workflow_coding_and_training() -> Tuple[bool, str]:
             return True, ""
         else:
             print(f"[{ts()}] ❌ 训练失败，返修给编码Agent")
-            # 提取最后 50 行作为错误信息
-            error_lines = output.split('\n')[-50:]
+            error_lines = output.split('\n')[-ERROR_LINE_LIMIT:]
             error_info = "\n".join(error_lines)
     
     print(f"[{ts()}] ❌ 编码+训练阶段失败，超过最大重试次数")
@@ -518,7 +518,7 @@ def workflow_train_review() -> str:
     Returns:
         decision: "pass" / "fix" / "redesign" / "timeout"
     """
-    max_retries = 3
+    max_retries = MAX_ATTEMPTS
     
     for attempt in range(max_retries):
         result, decision = run_train_inspector()
@@ -631,7 +631,7 @@ def main():
 """)
     
     known_solution_files = set(glob.glob(SOLUTION_PATTERN))
-    max_iterations = 20  # 最大迭代轮数
+    max_iterations = MAX_ITERATIONS  # 最大迭代轮数
     
     # Step 1: 初始分析师设计方案
     print(f"\n[{ts()}] 🚀 Step 1: 启动算法分析师...")
