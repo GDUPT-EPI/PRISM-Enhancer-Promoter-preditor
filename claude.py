@@ -36,7 +36,7 @@ AGENT_TIMEOUT_SECONDS = 60 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
 STEERING_DIR = Path("./.kiro/steering")
 SOLUTION_PATTERN = "./docx/记录点*/记录点*方案*"
-ANA_INIT_BOOL = False  # 分析师是否进行初始化
+ANA_INIT_BOOL = True  # 分析师是否进行初始化
 
 # 确保 hook 目录存在
 HOOK_DIR.mkdir(exist_ok=True)
