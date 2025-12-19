@@ -29,9 +29,9 @@ os.chdir(SCRIPT_DIR)
 # ============================================================
 # 常量配置
 # ============================================================
-MAX_ATTEMPTS = 10         # 最大尝试次数
+MAX_ATTEMPTS = 50         # 最大尝试次数
 MAX_ITERATIONS = 20       # 最大迭代轮数
-ERROR_LINE_LIMIT = 15     # 错误信息显示的行数限制
+ERROR_LINE_LIMIT = 20     # 错误信息显示的行数限制
 AGENT_TIMEOUT_SECONDS = 60 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
 STEERING_DIR = Path("./.kiro/steering")
