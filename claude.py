@@ -471,18 +471,18 @@ def run_train_inspector() -> Tuple[AgentResult, str]:
     """
     运行训练质检
     Returns:
-        (AgentResult, decision): Agent结果 和 决策(pass/fix/redesign)
+        (AgentResult, decision): Agent结果 和 决策(pass/fail)
     """
     prompt = """训练已完成。请以质检者身份评估训练结果：
 
 1) 读取 save_model/baseline/log/ 最新日志
 2) 分析收敛性、过拟合、数值稳定性
 3) 做出决策并写入对应hook文件：
-   - 正常 → echo "pass" > ./hook/train_pass.txt
-   - 技术异常(NaN等) → echo "fix" > ./hook/train_fix.txt
-   - 过拟合/退化 → echo "redesign" > ./hook/train_redesign.txt
+   - 正常（可以继续预测）→ echo "pass" > ./hook/train_pass.txt
+   - 异常（NaN/过拟合/退化等任何问题）→ echo "fail" > ./hook/train_fail.txt
 
-⚠️ 必须创建hook文件，否则工作流无法继续！"""
+⚠️ 必须创建hook文件，否则工作流无法继续！
+⚠️ 只要有任何问题就判定为fail，不要尝试修复！"""
     
     result, _ = invoke_claude(prompt, "agent-inspector.md", "inspector")
     
@@ -490,12 +490,9 @@ def run_train_inspector() -> Tuple[AgentResult, str]:
         if check_hook_exists("train_pass.txt"):
             clear_hook("train_pass.txt")
             return result, "pass"
-        elif check_hook_exists("train_fix.txt"):
-            clear_hook("train_fix.txt")
-            return result, "fix"
-        elif check_hook_exists("train_redesign.txt"):
-            clear_hook("train_redesign.txt")
-            return result, "redesign"
+        elif check_hook_exists("train_fail.txt"):
+            clear_hook("train_fail.txt")
+            return result, "fail"
         else:
             print(f"[{ts()}] ⚠️ 质检者未创建hook文件，视为超时")
             return AgentResult.TIMEOUT, ""
@@ -641,7 +638,7 @@ def workflow_train_review() -> str:
     训练质检阶段
     
     Returns:
-        decision: "pass" / "fix" / "redesign" / "timeout"
+        decision: "pass" / "fail" / "timeout"
     """
     max_retries = MAX_ATTEMPTS
     
@@ -857,26 +854,18 @@ def main():
         
         # Step 4: 训练质检
         print(f"\n[{ts()}] 🔍 Step 4: 训练质检...")
-        decision = workflow_train_review()
+        train_decision = workflow_train_review()
         
-        if decision == "pass":
+        if train_decision == "pass":
             print(f"[{ts()}] ✅ 训练质检通过，进入预测阶段")
-        elif decision == "fix":
-            print(f"[{ts()}] 🔧 需要修复技术问题，重新训练")
-            # 回到编码+训练阶段
-            success, _ = workflow_coding_and_training()
-            if not success:
-                print(f"[{ts()}] ❌ 修复后训练仍失败，终止")
-                break
-            # 重新质检
-            decision = workflow_train_review()
-            if decision != "pass":
-                print(f"[{ts()}] ❌ 修复后质检仍未通过，终止")
-                break
-        elif decision == "redesign":
-            print(f"[{ts()}] 🔄 需要重新设计方案")
-            # 拉起分析师重新设计
-            run_analyst("训练评审显示过拟合或性能退化。请分析原因并重新设计方案。")
+        elif train_decision == "fail":
+            print(f"[{ts()}] ❌ 训练质检不通过，回退代码重新实现")
+            # 直接回退到chat0，让执行者在干净基线上重新实现
+            next_branch = get_next_chat_branch_name()
+            create_branch_from_chat0(next_branch)
+            print(f"[{ts()}] 🔄 已回退到chat0基线，分支: {next_branch}")
+            # 拉起分析师重新设计（因为当前方案实现有问题）
+            run_analyst("训练质检不通过，代码已回退。请分析问题并重新设计方案。")
             continue  # 回到设计阶段
         else:
             print(f"[{ts()}] ❌ 训练质检异常，终止")
