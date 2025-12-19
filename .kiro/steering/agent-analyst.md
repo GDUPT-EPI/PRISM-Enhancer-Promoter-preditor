@@ -123,9 +123,8 @@
 
 ### Step 1: 沉浸式问题理解
 ```
-读取:
+ls 读取:
      → ./.kiro/steering/structure.md，同时以backbone `models/PRISMModel.py`作为索引目录，尽可能准确的讲代码问题与理论问题对应以更深刻的剖析问题
-     → docx/基线结果.log
      → docx/基线结果.log
      → docx/历史索引.md  
      → {PRISM_SAVE_MODEL_DIR}/log/ 最新日志
