@@ -32,7 +32,7 @@ os.chdir(SCRIPT_DIR)
 MAX_ATTEMPTS = 10         # 最大尝试次数
 MAX_ITERATIONS = 20       # 最大迭代轮数
 ERROR_LINE_LIMIT = 15     # 错误信息显示的行数限制
-AGENT_TIMEOUT_SECONDS = 15 * 60  # Agent 超时时间：15分钟
+AGENT_TIMEOUT_SECONDS = 60 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
 STEERING_DIR = Path("./.kiro/steering")
 SOLUTION_PATTERN = "./docx/记录点*/记录点*方案*"
@@ -50,7 +50,7 @@ def init_environment():
         "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
         "DEEPSEEK_API_KEY": "sk-1fb9049001b14e7cb42a92c18c5cb329",
         "ANTHROPIC_AUTH_TOKEN": "sk-1fb9049001b14e7cb42a92c18c5cb329",
-        "API_TIMEOUT_MS": "1200000",
+        "API_TIMEOUT_MS": "6000000",
         "ANTHROPIC_MODEL": "deepseek-reasoner",
         "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-chat",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
