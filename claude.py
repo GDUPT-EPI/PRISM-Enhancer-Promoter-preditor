@@ -73,6 +73,7 @@ AGENT_MODE_MAP = {
     "inspector": ModelMode.CHAT,
     "analyst": ModelMode.REASONER,
     "executor": ModelMode.CHAT,
+    "rollback": ModelMode.CHAT,  # 回退决策者
 }
 
 def set_model_mode(mode: ModelMode):
@@ -120,6 +121,87 @@ def check_new_solution_files(known_files: set) -> Tuple[list, set]:
     current_files = set(glob.glob(SOLUTION_PATTERN))
     new_files = current_files - known_files
     return list(new_files), current_files
+
+
+# ============================================================
+# Git 分支管理
+# ============================================================
+def get_current_branch() -> str:
+    """获取当前分支名"""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+    except Exception as e:
+        print(f"[GIT] 获取当前分支失败: {e}")
+        return "unknown"
+
+def get_next_chat_branch_name() -> str:
+    """获取下一个chat分支名（chat0, chat1, chat2...）"""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--list", "chat*"],
+            capture_output=True, text=True, check=True
+        )
+        branches = result.stdout.strip().split('\n')
+        branches = [b.strip().lstrip('* ') for b in branches if b.strip()]
+        
+        # 提取chat后的数字
+        max_num = -1
+        for branch in branches:
+            if branch.startswith('chat'):
+                try:
+                    num = int(branch[4:])
+                    max_num = max(max_num, num)
+                except ValueError:
+                    continue
+        
+        return f"chat{max_num + 1}"
+    except Exception as e:
+        print(f"[GIT] 获取分支列表失败: {e}")
+        return "chat1"
+
+def create_branch_from_current(new_branch: str) -> bool:
+    """从当前分支创建新分支并切换"""
+    try:
+        # 先提交所有更改
+        subprocess.run(["git", "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"Auto commit before branch {new_branch}"],
+            capture_output=True
+        )
+        
+        # 创建并切换到新分支
+        subprocess.run(["git", "checkout", "-b", new_branch], check=True)
+        print(f"[GIT] ✅ 从当前分支创建并切换到: {new_branch}")
+        return True
+    except Exception as e:
+        print(f"[GIT] ❌ 创建分支失败: {e}")
+        return False
+
+def create_branch_from_chat0(new_branch: str) -> bool:
+    """从chat0分支创建新分支（回退操作）"""
+    try:
+        # 先提交当前更改（避免丢失）
+        subprocess.run(["git", "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"Auto commit before rollback to {new_branch}"],
+            capture_output=True
+        )
+        
+        # 切换到chat0
+        subprocess.run(["git", "checkout", "chat0"], check=True)
+        print(f"[GIT] 已切换到 chat0")
+        
+        # 从chat0创建新分支
+        subprocess.run(["git", "checkout", "-b", new_branch], check=True)
+        print(f"[GIT] ✅ 从chat0创建并切换到: {new_branch}")
+        return True
+    except Exception as e:
+        print(f"[GIT] ❌ 回退分支失败: {e}")
+        return False
 
 
 # ============================================================
@@ -421,6 +503,49 @@ def run_train_inspector() -> Tuple[AgentResult, str]:
     return result, ""
 
 
+def run_rollback_decision() -> Tuple[AgentResult, str]:
+    """
+    运行回退决策者
+    Returns:
+        (AgentResult, decision): Agent结果 和 决策(keep/rollback)
+    """
+    current_branch = get_current_branch()
+    
+    prompt = f"""预测已完成。请以代码回退决策者身份评估本轮修改的价值：
+
+【当前分支】: {current_branch}
+
+请执行以下步骤：
+1) 读取 compete/ 目录下的预测结果（查看config.py获取SAVEMODEL_NAME）
+2) 读取 docx/基线结果.log 获取基线AUPR
+3) 对比当前AUPR与基线AUPR
+4) 做出决策并写入对应hook文件：
+   - 保留代码（有提升）→ echo "keep" > ./hook/rollback_keep.txt
+   - 回退代码（无效/下降）→ echo "rollback" > ./hook/rollback_reset.txt
+
+评估标准：
+- AUPR有任何提升（即使0.001）→ 保留
+- AUPR持平但其他指标提升 → 保留
+- AUPR下降或持平无提升 → 回退
+
+⚠️ 必须创建hook文件，否则工作流无法继续！"""
+    
+    result, _ = invoke_claude(prompt, "agent-rollback.md", "rollback")
+    
+    if result == AgentResult.SUCCESS:
+        if check_hook_exists("rollback_keep.txt"):
+            clear_hook("rollback_keep.txt")
+            return result, "keep"
+        elif check_hook_exists("rollback_reset.txt"):
+            clear_hook("rollback_reset.txt")
+            return result, "rollback"
+        else:
+            print(f"[{ts()}] ⚠️ 回退决策者未创建hook文件，视为超时")
+            return AgentResult.TIMEOUT, ""
+    
+    return result, ""
+
+
 # ============================================================
 # 主工作流
 # ============================================================
@@ -609,6 +734,62 @@ def workflow_result_analysis(known_solution_files: set) -> Tuple[bool, set]:
         return True, known_solution_files
 
 
+def workflow_rollback_decision() -> str:
+    """
+    回退决策阶段：决定是否回退代码
+    
+    Returns:
+        decision: "keep" / "rollback" / "timeout"
+    """
+    max_retries = MAX_ATTEMPTS
+    
+    for attempt in range(max_retries):
+        result, decision = run_rollback_decision()
+        
+        if result == AgentResult.TIMEOUT:
+            print(f"[{ts()}] ⚠️ 回退决策超时，重新拉起 (尝试 {attempt + 1}/{max_retries})")
+            continue
+        
+        if result == AgentResult.ERROR:
+            print(f"[{ts()}] ❌ 回退决策出错，重新拉起 (尝试 {attempt + 1}/{max_retries})")
+            continue
+        
+        return decision
+    
+    return "timeout"
+
+
+def execute_branch_operation(decision: str) -> bool:
+    """
+    执行分支操作
+    
+    Args:
+        decision: "keep" 或 "rollback"
+    
+    Returns:
+        success: 是否成功
+    """
+    current_branch = get_current_branch()
+    next_branch = get_next_chat_branch_name()
+    
+    print(f"\n[{ts()}] 🌿 分支操作")
+    print(f"    当前分支: {current_branch}")
+    print(f"    决策: {decision}")
+    print(f"    目标分支: {next_branch}")
+    
+    if decision == "keep":
+        # 保留代码：从当前分支创建新分支
+        print(f"[{ts()}] ✅ 保留代码修改，从 {current_branch} 创建 {next_branch}")
+        return create_branch_from_current(next_branch)
+    elif decision == "rollback":
+        # 回退代码：从chat0创建新分支
+        print(f"[{ts()}] 🔄 回退代码，从 chat0 创建 {next_branch}")
+        return create_branch_from_chat0(next_branch)
+    else:
+        print(f"[{ts()}] ❌ 未知决策: {decision}")
+        return False
+
+
 # ============================================================
 # 主循环
 # ============================================================
@@ -616,20 +797,29 @@ def workflow_result_analysis(known_solution_files: set) -> Tuple[bool, set]:
 def main():
     """主入口 - 完整工作流"""
     print("\n" + "="*60)
-    print("PRISM 三角色协作工作流")
+    print("PRISM 四角色协作工作流")
     print("="*60)
     print(f"""
 工作流设计：
   1. 分析师设计方案 → 2. 质检评审 → 3. 编码Agent改代码
   → 4. 脚本运行训练 → 5. 质检评审训练 → 6. 脚本运行预测
-  → 7. 分析师分析结果 → (不达标则循环)
+  → 7. 回退决策者评估 → 8. 分支操作 → 9. 分析师分析结果
+  → (不达标则循环)
 
 关键改进：
   - 编码Agent只写代码，不运行训练/预测
   - 训练/预测由脚本自动执行
-  - Agent超时检测（15分钟）
+  - Agent超时检测（60分钟）
   - 出错自动返修给编码Agent
+  - 回退决策者评估修改价值，无效修改从chat0回退
+
+分支管理：
+  - 保留代码：从当前分支(chatN)创建新分支(chatN+1)
+  - 回退代码：从chat0创建新分支(chatN+1)
 """)
+    
+    current_branch = get_current_branch()
+    print(f"[{ts()}] 🌿 当前分支: {current_branch}")
     
     known_solution_files = set(glob.glob(SOLUTION_PATTERN))
     max_iterations = MAX_ITERATIONS  # 最大迭代轮数
@@ -646,6 +836,7 @@ def main():
     for iteration in range(1, max_iterations + 1):
         print(f"\n{'='*60}")
         print(f"[{ts()}] 🔄 迭代轮次: {iteration}/{max_iterations}")
+        print(f"[{ts()}] 🌿 当前分支: {get_current_branch()}")
         print(f"{'='*60}")
         
         # Step 2: 设计阶段（方案质检）
@@ -699,22 +890,41 @@ def main():
             print(f"[{ts()}] ❌ 预测阶段失败，终止")
             break
         
-        # Step 6: 结果分析
-        print(f"\n[{ts()}] 📊 Step 6: 结果分析...")
+        # Step 6: 回退决策
+        print(f"\n[{ts()}] 🔀 Step 6: 回退决策...")
+        rollback_decision = workflow_rollback_decision()
+        
+        if rollback_decision == "timeout":
+            print(f"[{ts()}] ⚠️ 回退决策超时，默认保留代码")
+            rollback_decision = "keep"
+        
+        # Step 7: 执行分支操作
+        print(f"\n[{ts()}] 🌿 Step 7: 分支操作...")
+        branch_success = execute_branch_operation(rollback_decision)
+        
+        if not branch_success:
+            print(f"[{ts()}] ⚠️ 分支操作失败，继续在当前分支")
+        
+        # Step 8: 结果分析
+        print(f"\n[{ts()}] 📊 Step 8: 结果分析...")
         target_reached, known_solution_files = workflow_result_analysis(known_solution_files)
         
         if target_reached:
             print(f"\n{'='*60}")
             print(f"[{ts()}] 🎉 项目成功！AUPR ≥ 0.75 目标达成！")
+            print(f"[{ts()}] 🌿 最终分支: {get_current_branch()}")
             print(f"{'='*60}")
             break
         else:
             print(f"[{ts()}] 📈 AUPR未达标，继续下一轮迭代...")
+            if rollback_decision == "rollback":
+                print(f"[{ts()}] 🔄 代码已回退到chat0基线，重新开始")
     
     else:
         print(f"\n[{ts()}] ⚠️ 达到最大迭代次数 ({max_iterations})，工作流结束")
     
-    print(f"\n[{ts()}] 工作流结束")
+    print(f"\n[{ts()}] 🌿 最终分支: {get_current_branch()}")
+    print(f"[{ts()}] 工作流结束")
 
 
 if __name__ == "__main__":
