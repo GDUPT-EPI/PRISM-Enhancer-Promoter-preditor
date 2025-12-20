@@ -36,7 +36,7 @@ AGENT_TIMEOUT_SECONDS = 60 * 60  # Agent 超时时间：15分钟
 HOOK_DIR = Path("./hook")
 STEERING_DIR = Path("./.kiro/steering")
 SOLUTION_PATTERN = "./docx/记录点*/记录点*方案*"
-ANA_INIT_BOOL = True  # 分析师是否进行初始化
+ANA_INIT_BOOL = False  # 分析师是否进行初始化
 
 # 确保 hook 目录存在
 HOOK_DIR.mkdir(exist_ok=True)
@@ -555,15 +555,29 @@ def workflow_design_phase(known_solution_files: set) -> Tuple[bool, set]:
         (passed, updated_known_files): 方案是否通过，更新后的已知方案文件集合
     """
     max_retries = MAX_ATTEMPTS
+    wait_count = 0
+    max_wait_count = 60  # 最多等待 60 * 5秒 = 5分钟
     
     for attempt in range(max_retries):
         # 检查是否有新方案
-        new_solutions, known_solution_files = check_new_solution_files(known_solution_files)
+        new_solutions, current_files = check_new_solution_files(known_solution_files)
         
         if not new_solutions:
-            print(f"[{ts()}] 等待分析师创建方案...")
+            wait_count += 1
+            if wait_count > max_wait_count:
+                print(f"[{ts()}] ⚠️ 等待新方案超时（{max_wait_count * 5}秒），尝试拉起分析师")
+                # 主动拉起分析师
+                analyst_result = run_analyst("请设计新方案并输出到 docx/记录点(n+1)/记录点(n+1)方案.md")
+                if analyst_result == AgentResult.SUCCESS:
+                    wait_count = 0  # 重置等待计数
+                continue
+            print(f"[{ts()}] 等待分析师创建方案... ({wait_count}/{max_wait_count})")
             time.sleep(5)
             continue
+        
+        # 有新方案，更新已知文件集合
+        known_solution_files = current_files
+        wait_count = 0  # 重置等待计数
         
         print(f"[{ts()}] 检测到新方案: {new_solutions}")
         
@@ -586,7 +600,9 @@ def workflow_design_phase(known_solution_files: set) -> Tuple[bool, set]:
             # 拉起分析师重新设计
             analyst_result = run_analyst("方案评审未通过。请阅读质检报告，重新设计方案。")
             if analyst_result == AgentResult.TIMEOUT:
-                print(f"[{ts()}] ⚠️ 分析师超时")
+                print(f"[{ts()}] ⚠️ 分析师超时，继续等待新方案")
+            elif analyst_result == AgentResult.ERROR:
+                print(f"[{ts()}] ❌ 分析师出错，继续等待新方案")
             # 继续循环检查新方案
     
     print(f"[{ts()}] ❌ 设计阶段失败，超过最大重试次数")
@@ -849,8 +865,34 @@ def main():
         success, error_info = workflow_coding_and_training()
         
         if not success:
-            print(f"[{ts()}] ❌ 编码+训练阶段失败，终止")
-            break
+            print(f"[{ts()}] ❌ 编码+训练阶段失败，回退代码并返回分析师")
+            # 编码/训练执行失败，回退到chat0
+            next_branch = get_next_chat_branch_name()
+            create_branch_from_chat0(next_branch)
+            print(f"[{ts()}] 🔄 已回退到chat0基线，分支: {next_branch}")
+            # 拉起分析师重新设计
+            analyst_prompt = f"""编码+训练阶段失败，代码已回退到chat0基线。
+
+【错误信息】
+{error_info}
+
+请以算法分析师身份：
+1) 分析失败原因（可能是方案设计问题或实现复杂度过高）
+2) 撰写反思文档
+3) 设计更简洁可行的新方案
+4) 输出新方案到 docx/记录点(n+1)/记录点(n+1)方案.md"""
+            for analyst_attempt in range(3):
+                analyst_result = run_analyst(analyst_prompt)
+                if analyst_result == AgentResult.SUCCESS:
+                    new_solutions, _ = check_new_solution_files(known_solution_files)
+                    if new_solutions:
+                        print(f"[{ts()}] ✅ 分析师已创建新方案")
+                        break
+                print(f"[{ts()}] ⚠️ 分析师重试 ({analyst_attempt + 1}/3)")
+            else:
+                print(f"[{ts()}] ❌ 分析师多次重试失败，终止工作流")
+                break
+            continue  # 回到设计阶段
         
         # Step 4: 训练质检
         print(f"\n[{ts()}] 🔍 Step 4: 训练质检...")
@@ -859,14 +901,43 @@ def main():
         if train_decision == "pass":
             print(f"[{ts()}] ✅ 训练质检通过，进入预测阶段")
         elif train_decision == "fail":
-            print(f"[{ts()}] ❌ 训练质检不通过，回退代码重新实现")
-            # 直接回退到chat0，让执行者在干净基线上重新实现
+            print(f"[{ts()}] ❌ 训练质检不通过（过拟合/NaN/退化等），回退代码并返回分析师")
+            # 回退到chat0基线
             next_branch = get_next_chat_branch_name()
             create_branch_from_chat0(next_branch)
             print(f"[{ts()}] 🔄 已回退到chat0基线，分支: {next_branch}")
-            # 拉起分析师重新设计（因为当前方案实现有问题）
-            run_analyst("训练质检不通过，代码已回退。请分析问题并重新设计方案。")
+            # 拉起分析师重新设计方案（带重试机制）
+            analyst_prompt = """训练质检不通过，代码已回退到chat0基线。
+
+请以算法分析师身份：
+1) 阅读最新的训练质检报告 (docx/记录点*/记录点*训练质检.md)
+2) 分析训练失败的根本原因（过拟合？数值不稳定？模式坍缩？）
+3) 撰写反思文档 (docx/记录点n/记录点n反思.md)
+4) 设计新方案，避免重蹈覆辙
+5) 输出新方案到 docx/记录点(n+1)/记录点(n+1)方案.md
+6) 更新历史索引
+
+⚠️ 注意：问题可能出在方案设计层面，而非代码实现层面。请深入分析。"""
+            # 重试机制：确保分析师成功创建新方案
+            for analyst_attempt in range(3):
+                analyst_result = run_analyst(analyst_prompt)
+                if analyst_result == AgentResult.SUCCESS:
+                    # 检查是否创建了新方案
+                    new_solutions, _ = check_new_solution_files(known_solution_files)
+                    if new_solutions:
+                        print(f"[{ts()}] ✅ 分析师已创建新方案")
+                        break
+                    else:
+                        print(f"[{ts()}] ⚠️ 分析师未创建新方案，重试 ({analyst_attempt + 1}/3)")
+                else:
+                    print(f"[{ts()}] ⚠️ 分析师调用异常，重试 ({analyst_attempt + 1}/3)")
+            else:
+                print(f"[{ts()}] ❌ 分析师多次重试失败，终止工作流")
+                break
             continue  # 回到设计阶段
+        elif train_decision == "timeout":
+            print(f"[{ts()}] ⚠️ 训练质检超时，默认视为通过，继续预测")
+            # 超时时默认继续，避免工作流卡死
         else:
             print(f"[{ts()}] ❌ 训练质检异常，终止")
             break
@@ -876,8 +947,34 @@ def main():
         success, error_info = workflow_prediction()
         
         if not success:
-            print(f"[{ts()}] ❌ 预测阶段失败，终止")
-            break
+            print(f"[{ts()}] ❌ 预测阶段失败，回退代码并返回分析师")
+            # 预测失败也回退到chat0，让分析师重新设计
+            next_branch = get_next_chat_branch_name()
+            create_branch_from_chat0(next_branch)
+            print(f"[{ts()}] 🔄 已回退到chat0基线，分支: {next_branch}")
+            # 拉起分析师
+            analyst_prompt = f"""预测阶段失败，代码已回退到chat0基线。
+
+【错误信息】
+{error_info}
+
+请以算法分析师身份：
+1) 分析预测失败的原因
+2) 撰写反思文档
+3) 设计新方案
+4) 输出新方案到 docx/记录点(n+1)/记录点(n+1)方案.md"""
+            for analyst_attempt in range(3):
+                analyst_result = run_analyst(analyst_prompt)
+                if analyst_result == AgentResult.SUCCESS:
+                    new_solutions, _ = check_new_solution_files(known_solution_files)
+                    if new_solutions:
+                        print(f"[{ts()}] ✅ 分析师已创建新方案")
+                        break
+                print(f"[{ts()}] ⚠️ 分析师重试 ({analyst_attempt + 1}/3)")
+            else:
+                print(f"[{ts()}] ❌ 分析师多次重试失败，终止工作流")
+                break
+            continue  # 回到设计阶段
         
         # Step 6: 回退决策
         print(f"\n[{ts()}] 🔀 Step 6: 回退决策...")
