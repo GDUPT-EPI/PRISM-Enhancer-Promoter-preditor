@@ -965,10 +965,11 @@ def main():
             print(f"[{ts()}] ⚠️ 设计阶段失败，回退并重新拉起分析师")
             next_branch = get_next_chat_branch_name()
             create_branch_from_chat0(next_branch)
-            success, known_solution_files = ensure_analyst_creates_solution(
+            success, _ = ensure_analyst_creates_solution(
                 "设计阶段失败。请重新设计方案并输出到 docx/记录点(n+1)/记录点(n+1)方案.md",
                 known_solution_files
             )
+            # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
             continue  # 回到循环开头
         
         # Step 3: 编码+训练阶段
@@ -990,7 +991,8 @@ def main():
 2) 撰写反思文档
 3) 设计更简洁可行的新方案
 4) 输出新方案到 docx/记录点(n+1)/记录点(n+1)方案.md"""
-            success, known_solution_files = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            success, _ = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
             continue  # 回到设计阶段
         
         # Step 4: 训练质检
@@ -1015,7 +1017,8 @@ def main():
 6) 更新历史索引
 
 ⚠️ 注意：问题可能出在方案设计层面，而非代码实现层面。请深入分析。"""
-            success, known_solution_files = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            success, _ = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
             continue  # 回到设计阶段
         elif train_decision == "timeout":
             print(f"[{ts()}] ⚠️ 训练质检超时，默认视为通过，继续预测")
@@ -1024,10 +1027,11 @@ def main():
             print(f"[{ts()}] ⚠️ 训练质检异常，回退并重新拉起分析师")
             next_branch = get_next_chat_branch_name()
             create_branch_from_chat0(next_branch)
-            success, known_solution_files = ensure_analyst_creates_solution(
+            success, _ = ensure_analyst_creates_solution(
                 "训练质检异常。请重新设计方案并输出到 docx/记录点(n+1)/记录点(n+1)方案.md",
                 known_solution_files
             )
+            # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
             continue
         
         # Step 5: 预测阶段
@@ -1049,7 +1053,8 @@ def main():
 2) 撰写反思文档
 3) 设计新方案
 4) 输出新方案到 docx/记录点(n+1)/记录点(n+1)方案.md"""
-            success, known_solution_files = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            success, _ = ensure_analyst_creates_solution(analyst_prompt, known_solution_files)
+            # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
             continue  # 回到设计阶段
         
         # Step 6: 回退决策
@@ -1085,10 +1090,11 @@ def main():
             new_solutions, _ = check_new_solution_files(known_solution_files)
             if not new_solutions:
                 print(f"[{ts()}] ⚠️ 分析师未创建新方案，主动拉起")
-                success, known_solution_files = ensure_analyst_creates_solution(
+                success, _ = ensure_analyst_creates_solution(
                     "AUPR未达标，请设计新方案并输出到 docx/记录点(n+1)/记录点(n+1)方案.md",
                     known_solution_files
                 )
+                # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
     
     else:
         print(f"\n[{ts()}] ⚠️ 达到最大迭代次数 ({max_iterations})，工作流结束")
