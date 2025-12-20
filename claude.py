@@ -945,7 +945,8 @@ def main():
 
 ⚠️ 必须创建方案文件！"""
     
-    success, known_solution_files = ensure_analyst_creates_solution(initial_prompt, known_solution_files)
+    success, _ = ensure_analyst_creates_solution(initial_prompt, known_solution_files)
+    # 注意：不更新 known_solution_files，让 workflow_design_phase 能检测到新方案
     # 即使初始分析师失败，也继续进入主循环（主循环会处理）
     
     # 主迭代循环
