@@ -182,25 +182,78 @@ def create_branch_from_current(new_branch: str) -> bool:
         return False
 
 def create_branch_from_chat0(new_branch: str) -> bool:
-    """从chat0分支创建新分支（回退操作）"""
+    """从chat0分支创建新分支（回退操作），但保留docx目录"""
     try:
-        # 先提交当前更改（避免丢失）
+        # 1. 先保存当前docx目录内容到临时位置
+        import shutil
+        docx_backup = Path("./docx_backup_temp")
+        docx_path = Path("./docx")
+        
+        if docx_path.exists():
+            if docx_backup.exists():
+                shutil.rmtree(docx_backup)
+            shutil.copytree(docx_path, docx_backup)
+            print(f"[GIT] 📁 已备份 docx 目录")
+        
+        # 2. 提交当前更改（避免丢失）
         subprocess.run(["git", "add", "-A"], check=True)
         subprocess.run(
             ["git", "commit", "-m", f"Auto commit before rollback to {new_branch}"],
             capture_output=True
         )
         
-        # 切换到chat0
+        # 3. 切换到chat0
         subprocess.run(["git", "checkout", "chat0"], check=True)
         print(f"[GIT] 已切换到 chat0")
         
-        # 从chat0创建新分支
+        # 4. 从chat0创建新分支
         subprocess.run(["git", "checkout", "-b", new_branch], check=True)
         print(f"[GIT] ✅ 从chat0创建并切换到: {new_branch}")
+        
+        # 5. 恢复docx目录（合并历史记录）
+        if docx_backup.exists():
+            # 如果新分支的docx存在，合并内容
+            if docx_path.exists():
+                # 遍历备份中的所有文件和目录，复制到当前docx
+                for item in docx_backup.iterdir():
+                    dest = docx_path / item.name
+                    if item.is_dir():
+                        if dest.exists():
+                            # 目录存在，合并内容
+                            for sub_item in item.iterdir():
+                                sub_dest = dest / sub_item.name
+                                if not sub_dest.exists():
+                                    if sub_item.is_dir():
+                                        shutil.copytree(sub_item, sub_dest)
+                                    else:
+                                        shutil.copy2(sub_item, sub_dest)
+                        else:
+                            shutil.copytree(item, dest)
+                    else:
+                        # 文件：如果不存在则复制，存在则保留备份版本（更新）
+                        shutil.copy2(item, dest)
+            else:
+                shutil.copytree(docx_backup, docx_path)
+            
+            # 清理临时备份
+            shutil.rmtree(docx_backup)
+            print(f"[GIT] 📁 已恢复 docx 目录（保留历史记录）")
+            
+            # 提交恢复的docx
+            subprocess.run(["git", "add", "docx/"], check=True)
+            subprocess.run(
+                ["git", "commit", "-m", f"Restore docx history from previous branch"],
+                capture_output=True
+            )
+        
         return True
     except Exception as e:
         print(f"[GIT] ❌ 回退分支失败: {e}")
+        # 尝试清理临时备份
+        docx_backup = Path("./docx_backup_temp")
+        if docx_backup.exists():
+            import shutil
+            shutil.rmtree(docx_backup)
         return False
 
 
