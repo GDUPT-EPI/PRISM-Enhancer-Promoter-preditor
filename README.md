@@ -14,7 +14,6 @@ PRISM 采用了多项先进技术构建其模型架构 `PRISMBackbone`：
 
 ```mermaid
 graph TD
-
     subgraph "PRISM Architecture: EP Interaction Probability Prediction"
         direction TB
         
@@ -27,28 +26,28 @@ graph TD
         subgraph B["DNA Sequence Encoding"]
             B1[Embedding Layer]
             B2[CNN Encoder]
-            B3["Pre-Attention<br/>RoPEAttention"]
+            B3[Pre-Attention<br/>RoPEAttention]
         end
         
         subgraph C["Cross-Attention Mechanism"]
             C1[Anchor Generation]
-            C2["E←P Cross-Attention<br/>CBAT Module"]
-            C3["P←E Cross-Attention<br/>CBAT Module"]
+            C2[E←P Cross-Attention<br/>CBAT Module]
+            C3[P←E Cross-Attention<br/>CBAT Module]
             C4[Feature Fusion]
         end
         
         subgraph D["Orthogonal Decoupling"]
-            D1["Intrinsic Feature z_I"]
-            D2["Environmental Feature z_F"]
+            D1[Intrinsic Feature z_I]
+            D2[Environmental Feature z_F]
             D3[Gradient Reversal Layer]
             D4[Domain Discriminator]
         end
         
         subgraph E["Energy Dissipation System"]
-            E1["Intrinsic Potential U_I<br/>FourierEnergyKAN"]
-            E2["Environmental Resistance R_E<br/>FourierEnergyKAN"]
+            E1[Intrinsic Potential U_I<br/>FourierEnergyKAN]
+            E2[Environmental Resistance R_E<br/>FourierEnergyKAN]
             E3[Temperature Coefficient T]
-            E4["P = σ((U_I - R_E) / T)"]
+            E4[P = σ((U_I - R_E) / T)]
         end
         
         subgraph F["Output Layer"]
@@ -147,6 +146,7 @@ graph TD
     linkStyle 11 stroke:#3498db
     linkStyle 12 stroke:#3498db
 ```
+
 
 ### **1. 旋转位置编码 (RoPE - Rotary Positional Embedding)**
 RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传统绝对位置编码无法良好处理长序列和相对位置的问题。
