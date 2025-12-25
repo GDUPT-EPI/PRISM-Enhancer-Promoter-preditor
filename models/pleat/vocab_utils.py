@@ -11,7 +11,7 @@ import itertools
 from typing import Dict, Tuple, Optional
 
 # 导入配置
-from config import KMER_SIZE, PROJECT_ROOT
+from config import KMER_SIZE, PROJECT_ROOT, SPECIAL_TOKENS_ORDER
 
 
 class VocabManager:
@@ -38,26 +38,31 @@ class VocabManager:
     
     def _generate_vocab(self) -> Tuple[Dict[str, int], Dict[int, str]]:
         """
-        生成确定性的DNA k-mer词表
-        
+        生成确定性的DNA k-mer词表，并在 4^K + 1(null) 基础上追加特殊token
+        保持固定顺序和索引，以确保哈希验证稳定可靠。
+
         Returns:
             token_to_idx: token到索引的映射字典
             idx_to_token: 索引到token的映射字典
         """
-        # 使用固定的碱基顺序确保确定性
+        # 基础核苷酸集合，固定顺序保证确定性
         bases = ['A', 'C', 'G', 'T']
-        
-        # 生成所有可能的k-mer组合
+
+        # 生成所有k-mer，按字典序排列（itertools.product 已保证固定迭代顺序）
         products = itertools.product(bases, repeat=KMER_SIZE)
-        tokens = [''.join(p) for p in products]
-        
-        # 添加null token到固定位置（索引0）
-        tokens.insert(0, 'null')
-        
-        # 创建映射字典
+        core_tokens = [''.join(p) for p in products]
+
+        # 将 null token 固定插入索引0
+        tokens = ['null'] + core_tokens
+
+        # 追加特殊token，采用集中配置的顺序 SPECIAL_TOKENS_ORDER
+        for name in SPECIAL_TOKENS_ORDER:
+            tokens.append(f'<{name}>')
+
+        # 创建映射
         token_to_idx = {token: idx for idx, token in enumerate(tokens)}
         idx_to_token = {idx: token for token, idx in token_to_idx.items()}
-        
+
         return token_to_idx, idx_to_token
     
     def _calculate_vocab_hash(self, token_to_idx: Dict[str, int]) -> str:
@@ -70,9 +75,9 @@ class VocabManager:
         Returns:
             词表的MD5哈希值
         """
-        # 按token排序确保确定性
+        # 哈希内容包含：按token排序的映射 + k值 + 特殊token顺序
         sorted_items = sorted(token_to_idx.items())
-        vocab_str = str(sorted_items)
+        vocab_str = str({'items': sorted_items, 'k': KMER_SIZE, 'specials': SPECIAL_TOKENS_ORDER})
         
         # 计算MD5哈希
         return hashlib.md5(vocab_str.encode()).hexdigest()
@@ -85,11 +90,12 @@ class VocabManager:
             token_to_idx: token到索引的映射字典
             idx_to_token: 索引到token的映射字典
         """
-        # 保存词表
+        # 保存词表（包含特殊token顺序以便校验）
         vocab_data = {
             'token_to_idx': token_to_idx,
             'idx_to_token': idx_to_token,
-            'kmer_size': KMER_SIZE
+            'kmer_size': KMER_SIZE,
+            'special_tokens_order': SPECIAL_TOKENS_ORDER,
         }
         
         with open(self.tokenizer_path, 'wb') as f:

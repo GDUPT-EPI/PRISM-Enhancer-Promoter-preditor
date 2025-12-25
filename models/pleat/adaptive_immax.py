@@ -39,13 +39,12 @@ class AdaptiveIMMAXLoss(nn.Module):
             loss: 标量损失值
             如果return_alpha=True，则返回 (loss, alpha)
         """
-        # 确保维度一致
+        if pred.dim() > 2:
+            pred = pred.view(pred.size(0), -1)
         if pred.dim() == 2:
-            pred = pred.squeeze(1)  # (batch, 1) -> (batch,)
-        
-        # 确保target也是一维的
-        if target.dim() == 2:
-            target = target.squeeze(1)  # (batch, 1) -> (batch,)
+            pred = pred.squeeze(1)
+        if target.dim() > 1:
+            target = target.view(target.size(0))
         
         target = target.float()
         batch_size = pred.size(0)
@@ -53,7 +52,7 @@ class AdaptiveIMMAXLoss(nn.Module):
         # 将sigmoid输出转换为logits（为了计算margin）
         # pred = sigmoid(h(x))，则 h(x) = logit(pred) = log(pred / (1 - pred))
         pred_clipped = torch.clamp(pred, self.eps, 1 - self.eps)
-        logits = torch.log(pred_clipped / (1 - pred_clipped))
+        logits = torch.logit(pred_clipped, eps=self.eps)
         
         # 计算margin: z_i = y_i * h(x_i)
         # 对于二分类：y_i ∈ {-1, +1}，所以需要将{0,1}转换为{-1,+1}
@@ -124,9 +123,12 @@ class AdaptiveIMMAXLoss(nn.Module):
         loss_pos = torch.log1p(torch.exp(-margin_pos_final)).mean()
         loss_neg = torch.log1p(torch.exp(-margin_neg_final)).mean()
         
-        # 总损失是正负样本损失的平均
-        # 注意：这里不需要按样本数量加权，因为α已经包含了这个信息
         loss = (loss_pos + loss_neg) / 2.0
+        if not torch.isfinite(loss):
+            bce_loss = F.binary_cross_entropy(pred_clipped, target, reduction='mean')
+            if return_alpha:
+                return bce_loss, self.alpha.item()
+            return bce_loss
         
         if return_alpha:
             return loss, self.alpha.item()

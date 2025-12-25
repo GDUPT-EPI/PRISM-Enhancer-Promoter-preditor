@@ -1,203 +1,117 @@
-# EPIPDLF项目完整分析报告
-EPIPDLF: a pre-trained deep learning framework for predicting enhancer-promoter interactions
+# PRISM: Predictive RNA-seq-independent Interaction System for genomic Modifiers
 
-## 项目概述
+PRISM 是一个用于预测基因组序列中增强子-启动子 (Enhancer-Promoter, EP) 互作的深度学习系统。该项目旨在仅利用 DNA 序列信息，通过复杂的神经网络架构挖掘 EP 互作关系，并特别关注跨细胞系的泛化性能和鲁棒性。
 
-EPIPDLF（Enhancer-Promoter Interaction Prediction Deep Learning Framework）是一个用于预测增强子-启动子相互作用的预训练深度学习框架。该项目使用深度学习技术，结合DNA序列信息，预测增强子与启动子之间的相互作用，这对于理解基因调控机制具有重要意义。
+## **核心任务**
+- **目标**: 仅使用 DNA 序列信息预测增强子与启动子之间的相互作用。
+- **挑战**: 不同细胞系间的特异性差异巨大。PRISM 通过引入能量耗散框架和域对抗训练，致力于解决单一模型在未见细胞系上失效的问题。
 
-## 项目结构图
+---
 
-```mermaid
-graph TD
-    A[EPIPDLF项目] --> B[核心模型]
-    A --> C[数据处理]
-    A --> D[训练与评估]
-    A --> E[工具与配置]
-    A --> F[数据预处理]
-    
-    B --> B1[EPIModel.py]
-    B1 --> B11[嵌入层 Embedding]
-    B1 --> B12[卷积层 Conv1D]
-    B1 --> B13[循环神经网络 GRU]
-    B1 --> B14[多头注意力 MultiheadAttention]
-    B1 --> B15[全连接层 FC]
-    
-    C --> C1[data_loader.py]
-    C1 --> C11[加载序列数据]
-    C1 --> C12[加载配对数据]
-    C1 --> C13[多细胞系数据管理]
-    
-    C --> C2[dataset_embedding.py]
-    C2 --> C21[MyDataset类]
-    C2 --> C22[IDSDataset类]
-    C2 --> C23[MaskDataSet类]
-    C2 --> C24[序列编码与嵌入]
-    
-    D --> D1[main_GM128_Genes_prePgd_train.py]
-    D1 --> D11[训练循环]
-    D1 --> D12[对抗训练 PGD/FGM]
-    D1 --> D13[验证与评估]
-    D1 --> D14[多细胞系测试]
-    
-    E --> E1[config.py]
-    E1 --> E11[路径配置]
-    E1 --> E12[模型参数]
-    E1 --> E13[训练参数]
-    E1 --> E14[对抗训练参数]
-    
-    F --> F1[optimized_data_preprocessing.py]
-    F1 --> F11[OptimizedSequenceDataset]
-    F1 --> F12[缓存机制]
-    F1 --> F13[序列标记化]
-    F1 --> F14[并行处理]
-    
-    A --> G[其他工具]
-    G --> G1[bin2npy.py]
-    G --> G2[bin2pt.py]
-    G --> G3[gen2bed.py]
-    G --> G4[hg19tohg38.py]
-    G --> G5[misu_utils.py]
-    G --> G6[process_filter.py]
-    G --> G7[process_pairs.py]
-    G --> G8[process_seq.py]
-    G --> G9[process_spilt.py]
-    
-    A --> H[空目录]
-    H --> H1[layers/]
+## **核心架构**
+
+PRISM 采用了多项先进技术构建其模型架构 `PRISMBackbone`：
+
+![全流程](png/全流程.png)
+
+### **1. 旋转位置编码 (RoPE - Rotary Positional Embedding)**
+RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传统绝对位置编码无法良好处理长序列和相对位置的问题。
+
+**数学原理：**
+- **变换公式**: 对于 $d$ 维向量中的第 $i$ 对维度 $(x_{2i}, x_{2i+1})$，在位置 $m$ 处的旋转变换为：
+  $$ \begin{pmatrix} f(x, m)_{2i} \\ f(x, m)_{2i+1} \end{pmatrix} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix} \begin{pmatrix} x_{2i} \\ x_{2i+1} \end{pmatrix} $$
+  其中频率 $\theta_i = 10000^{-2i/d}$。
+- **相对位置不变性**: RoPE 的核心优势在于两个向量 $q$ 和 $k$ 的内积仅取决于它们的相对距离 $m-n$：
+  $$ \langle f(q, m), f(k, n) \rangle = g(q, k, m-n) $$
+- **长序列扩展**: 针对 DNA 序列的超长特性，引入了线性缩放因子 $\lambda$，当序列长度 $L > L_{train}$ 时，频率调整为 $\theta_i' = \theta_i / (L/L_{train})$。
+
+### **2. 注意力机制与 CBAT 模块**
+![注意力机制](png/注意力机制.png)
+- **跨序列注意力**: 结合增强子和启动子的特征，进行深度特征融合。
+- **CBAT (Cross-Boundary Attention Transformer)**: 自定义的交叉边界注意力机制，专门用于建模增强子与启动子之间的长距离交互。
+  ![CBAT模块](png/CBAT模块.png)
+
+### **3. 傅里叶 KAN (FourierKAN)**
+基于 Kolmogorov-Arnold 表示定理，FourierKAN 放弃了传统 MLP 的线性权重，转而学习边上的非线性基函数。
+
+**数学原理：**
+- **KAN 表示定理**: 任意多元连续函数可表示为一元函数的叠加：
+  $$ f(x_1, \dots, x_n) = \sum_{q=1}^{2n+1} \Phi_q \left( \sum_{p=1}^n \phi_{q,p}(x_p) \right) $$
+- **傅里叶级数参数化**: 在 `FourierKAN` 中，$\phi_{q,p}$ 被参数化为：
+  $$ \phi_{i,j}(x_j) = \sum_{k=0}^{G} \left[ a_{ijk} \cos(k\tilde{x}_j) + b_{ijk} \sin(k\tilde{x}_j) \right] $$
+  其中 $G$ 为网格大小，$a, b$ 为可学习参数。
+- **输入域映射**: 通过 $\tilde{x}_j = \tanh(x_j) \cdot \pi$ 将输入映射到 $[-\pi, \pi]$ 空间，确保级数在有效频率内振荡。
+
+### **4. 能量耗散系统 (Energy Dissipation)**
+![耗散系统](png/耗散系统.png)
+- **物理建模**: 模拟能量在环境中的耗散过程，增强模型的可解释性：
+  $$ P(y=1) = \text{sigmoid}\left( \frac{U_I - R_E}{T} \right) $$
+  - **内势 $U_I$ (Internal Potential)**: 代表序列本身的固有属性。
+  - **环境阻抗 $R_E$ (Environmental Resistance)**: 代表细胞系特有的环境影响，模型强制其非负。
+  - **温度系数 $T$**: 可学习的缩放参数，控制预测的灵敏度。
+
+---
+
+## **训练与优化策略**
+
+### **1. 域对抗训练 (Domain Adaptation)**
+引入 **GRL (Gradient Reversal Layer)** 梯度反转层，配合域判别器，强迫模型从序列中提取与细胞系无关的通用特征 $z_I$，提升在未见细胞系上的泛化能力。
+
+### **2. 自适应 IMMAX 损失 (AdaptiveIMMAXLoss)**
+针对 EP 互作正负样本极度不平衡的特性，通过对偶优化理论动态寻找最优的类别权重。
+
+**数学原理：**
+- **损失目标**:
+  $$ \mathcal{L} = \frac{1}{2} \left( \frac{1}{n_+} \sum_{i \in \text{pos}} \Psi\left(\frac{z_i}{\alpha}\right) + \frac{1}{n_-} \sum_{i \in \text{neg}} \Psi\left(\frac{z_i}{1-\alpha}\right) \right) $$
+  其中 $z_i$ 为有符号 Margin，$\Psi(u) = \log(1 + e^{-u})$。
+- **权重自适应更新**: 权重 $\alpha$ 通过样本困难度 $S$ 动态计算并配合 EMA 平滑：
+  $$ \alpha^* = \frac{\sqrt{S_+}}{\sqrt{S_+} + \sqrt{S_-}}, \quad S = \sum |z_i \cdot \Psi'(z_i/\alpha)| $$
+
+---
+
+## **项目结构**
+
+```text
+PRISM/
+├── PRISM.py              # 主训练脚本
+├── predict.py            # 模型评估和推理脚本
+├── config.py             # 集中参数配置管理
+├── data_loader.py        # 数据加载工具
+├── models/               # 模型定义目录
+│   ├── PRISMModel.py     # 主模型架构
+│   ├── layers/           # 自定义网络层 (CBAT, RoPE, FourierKAN 等)
+│   └── pleat/            # 工具包 (Embedding, Loss 函数等)
+├── domain-kl/            # 数据集目录
+├── save_model/           # 模型检查点保存路径
+├── log/                  # 训练和评估日志
+└── vocab/                # 词表和细胞类型配置文件
 ```
 
-## 核心组件分析
+---
 
-### 1. 核心模型 (EPIModel.py)
+## **快速开始**
 
-EPIModel是项目的核心深度学习模型，采用了多种神经网络结构的组合：
+### **环境要求**
+- Python 3.10+
+- PyTorch, NumPy, Pandas, Scikit-learn, Matplotlib, tqdm
 
-- **嵌入层 (Embedding)**: 使用预训练的DNA嵌入矩阵，将DNA序列转换为高维向量表示
-- **卷积层 (Conv1D)**: 提取序列中的局部特征模式
-- **循环神经网络 (GRU)**: 捕获序列中的长距离依赖关系
-- **多头注意力机制 (MultiheadAttention)**: 增强模型对序列重要部分的关注能力
-- **全连接层 (FC)**: 将提取的特征映射到最终的预测结果
+### **1. 配置参数**
+在 `config.py` 中调整 `PRISM_BATCH_SIZE`、`LEARNING_RATE`、`EPOCH` 等超参数。
 
-模型的主要特点：
-- 支持双向GRU，增强序列上下文理解能力
-- 使用多头自注意力机制，提高特征表示能力
-- 包含批标准化和Dropout，防止过拟合
-- 使用预训练的DNA嵌入矩阵，增强模型对DNA序列的理解
+### **2. 模型训练**
+```bash
+python PRISM.py
+```
 
-### 2. 数据处理模块
+### **3. 模型评估**
+```bash
+python predict.py
+```
 
-#### data_loader.py
-负责从数据目录中加载增强子-启动子配对数据：
-- 支持多细胞系数据管理
-- 提供序列数据和配对数据的加载功能
-- 统一的数据接口，便于训练和测试
+---
 
-#### dataset_embedding.py
-提供多种数据集类，用于数据预处理和嵌入：
-- **MyDataset**: 基础数据集类，处理原始序列和标签
-- **IDSDataset**: 将DNA序列转换为token IDs，使用6-mer编码
-- **MaskDataSet**: 支持基于PWM的序列掩码处理
+## **主要指标**
+PRISM 致力于攻克跨细胞系预测瓶颈，目标实现测试细胞系 AUPR 稳定在 **0.75** 以上。
 
-### 3. 优化的数据预处理 (optimized_data_preprocessing.py)
-
-为了提高数据处理效率，项目实现了优化的预处理模块：
-- **缓存机制**: 避免重复计算，提高数据加载速度
-- **并行处理**: 支持多进程数据预处理
-- **序列标记化**: 高效的6-mer token转换
-- **延迟加载**: 按需处理数据，减少内存占用
-
-### 4. 训练与评估 (main_GM128_Genes_prePgd_train.py)
-
-主训练脚本实现了完整的训练流程：
-- **对抗训练**: 实现了PGD和FGM两种对抗训练方法，提高模型鲁棒性
-- **多细胞系评估**: 在多个细胞系上评估模型性能
-- **学习率调度**: 使用MultiStepLR调整学习率
-- **日志系统**: 详细的训练日志和性能指标记录
-
-### 5. 配置管理 (config.py)
-
-采用集中式配置管理，符合项目规范：
-- 统一的路径管理
-- 模型参数配置
-- 训练超参数设置
-- 对抗训练参数配置
-
-## 技术特点
-
-### 1. 深度学习架构
-- 结合了CNN、RNN和Transformer的优势
-- 使用预训练的DNA嵌入，增强序列理解能力
-- 多头注意力机制提高特征表示能力
-
-### 2. 对抗训练
-- 实现了PGD和FGM两种对抗训练方法
-- 在嵌入层添加对抗扰动，提高模型鲁棒性
-- 可配置的对抗训练参数
-
-### 3. 数据处理优化
-- 高效的序列标记化处理
-- 缓存机制减少重复计算
-- 支持多进程并行处理
-
-### 4. 多细胞系支持
-- 支持多种细胞系数据的训练和测试
-- 跨细胞系泛化能力评估
-
-## 应用场景
-
-1. **基因调控研究**: 预测增强子-启动子相互作用，帮助理解基因表达调控机制
-2. **疾病机制研究**: 识别与疾病相关的异常增强子-启动子相互作用
-3. **药物靶点发现**: 基于增强子-启动子相互作用网络，发现潜在药物靶点
-
-## 项目优势
-
-1. **模型先进性**: 结合多种深度学习技术，提高预测准确性
-2. **鲁棒性强**: 通过对抗训练提高模型泛化能力
-3. **高效处理**: 优化的数据处理流程，提高训练效率
-4. **可扩展性**: 模块化设计，便于扩展和修改
-5. **多细胞系支持**: 适用于多种细胞类型的数据
-
-## 潜在改进方向
-
-1. **模型架构优化**: 探索更先进的网络结构，如Transformer-XL
-2. **特征工程**: 整合更多生物学特征，如染色质可及性、组蛋白修饰等
-3. **数据增强**: 开发生物学合理的数据增强方法
-4. **可解释性**: 增加模型可解释性分析，帮助理解预测结果
-5. **跨物种应用**: 扩展模型到其他物种的增强子-启动子相互作用预测
-
-## 总结
-
-EPIPDLF项目是一个设计精良的深度学习框架，专注于预测增强子-启动子相互作用。项目采用了先进的深度学习技术，结合了CNN、RNN和Transformer的优势，并通过对抗训练提高了模型鲁棒性。优化的数据处理流程和多细胞系支持使其成为一个强大而灵活的研究工具。该项目在基因调控研究和疾病机制研究方面具有广泛的应用前景。
-
-        
-            
-toolName: todo_write
-            
-status: success
-          
-Todos updated: 7 items
-          
-
-我已经完成了对EPIPDLF项目的完整分析，并生成了详细的报告。报告包括：
-
-1. **项目概述**：介绍了EPIPDLF是一个用于预测增强子-启动子相互作用的深度学习框架。
-
-2. **项目结构图**：使用Mermaid格式绘制了项目的整体结构，清晰展示了各个模块之间的关系。
-
-3. **核心组件分析**：
-   - 核心模型(EPIModel.py)：结合了嵌入层、卷积层、GRU、多头注意力和全连接层
-   - 数据处理模块：包括数据加载器和数据集嵌入处理
-   - 优化的数据预处理：实现了缓存机制和并行处理
-   - 训练与评估：包含对抗训练和多细胞系评估
-   - 配置管理：集中式参数配置
-
-4. **技术特点**：详细介绍了项目的深度学习架构、对抗训练、数据处理优化和多细胞系支持等特点。
-
-5. **应用场景**：说明了项目在基因调控研究、疾病机制研究和药物靶点发现方面的应用价值。
-
-6. **项目优势**：总结了模型先进性、鲁棒性、高效处理、可扩展性和多细胞系支持等优势。
-
-7. **潜在改进方向**：提出了模型架构优化、特征工程、数据增强、可解释性和跨物种应用等改进建议。
-
-这个项目是一个设计精良的深度学习框架，专注于预测增强子-启动子相互作用，采用了先进的深度学习技术和优化的数据处理流程，在基因调控研究方面具有广泛的应用前景。
-        
+## **联系与反馈**
+如有任何问题或建议，请联系开发团队。

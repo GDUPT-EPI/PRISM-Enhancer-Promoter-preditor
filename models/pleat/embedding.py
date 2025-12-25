@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 # 导入配置参数
-from config import EMBEDDING_DIM
+from config import EMBEDDING_DIM, DNA_EMBEDDING_VOCAB_SIZE
 
 # 导入词表管理模块
 from models.pleat.vocab_utils import get_vocab, get_token_to_idx, get_idx_to_token
@@ -35,7 +35,7 @@ class KMerTokenizer:
         """
         # 从词表管理模块获取词表
         self.token_to_idx, self.idx_to_token = get_vocab()
-        self.vocab_size = len(self.token_to_idx)
+        self.vocab_size = DNA_EMBEDDING_VOCAB_SIZE
         
         print(f"使用统一词表管理模块加载词表，大小: {self.vocab_size}")
     
@@ -130,7 +130,7 @@ class DNAEmbedding(nn.Module):
         
         # 如果未指定词汇表大小，使用分词器的词汇表大小
         if vocab_size is None:
-            vocab_size = self.tokenizer.vocab_size
+            vocab_size = DNA_EMBEDDING_VOCAB_SIZE
         
         # 创建嵌入层
         self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=padding_idx)  # null token作为padding
