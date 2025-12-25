@@ -19,11 +19,19 @@ RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传
 
 **数学原理：**
 - **变换公式**: 对于 $d$ 维向量中的第 $i$ 对维度 $(x_{2i}, x_{2i+1})$，在位置 $m$ 处的旋转变换为：
-  $$ \begin{pmatrix} f(x, m)_{2i} \\ f(x, m)_{2i+1} \end{pmatrix} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix} \begin{pmatrix} x_{2i} \\ x_{2i+1} \end{pmatrix} $$
+
+  $$
+  \begin{pmatrix} f(x, m)_{2i} \\ f(x, m)_{2i+1} \end{pmatrix} = \begin{pmatrix} \cos(m\theta_i) & -\sin(m\theta_i) \\ \sin(m\theta_i) & \cos(m\theta_i) \end{pmatrix} \begin{pmatrix} x_{2i} \\ x_{2i+1} \end{pmatrix}
+  $$
+
   其中频率 $\theta_i = 10000^{-2i/d}$。
 - **相对位置不变性**: RoPE 的核心优势在于两个向量 $q$ 和 $k$ 的内积仅取决于它们的相对距离 $m-n$：
-  $$ \langle f(q, m), f(k, n) \rangle = g(q, k, m-n) $$
-- **长序列扩展**: 针对 DNA 序列的超长特性，引入了线性缩放因子 $\lambda$，当序列长度 $L > L_{train}$ 时，频率调整为 $\theta_i' = \theta_i / (L/L_{train})$。
+
+  $$
+  \langle f(q, m), f(k, n) \rangle = g(q, k, m-n)
+  $$
+
+- **长序列扩展**: 针对 DNA 序列的超长特性，引入了线性缩放因子 $\lambda$，当序列长度 $L > L_{train}$ 时，频率调整为 $\theta_i^\prime = \theta_i / (L/L_{train})$。
 
 ### **2. 注意力机制与 CBAT 模块**
 ![注意力机制](png/注意力机制.png)
@@ -36,16 +44,29 @@ RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传
 
 **数学原理：**
 - **KAN 表示定理**: 任意多元连续函数可表示为一元函数的叠加：
-  $$ f(x_1, \dots, x_n) = \sum_{q=1}^{2n+1} \Phi_q \left( \sum_{p=1}^n \phi_{q,p}(x_p) \right) $$
+
+  $$
+  f(x_1, \dots, x_n) = \sum_{q=1}^{2n+1} \Phi_q \left( \sum_{p=1}^n \phi_{q,p}(x_p) \right)
+  $$
+
 - **傅里叶级数参数化**: 在 `FourierKAN` 中，$\phi_{q,p}$ 被参数化为：
-  $$ \phi_{i,j}(x_j) = \sum_{k=0}^{G} \left[ a_{ijk} \cos(k\tilde{x}_j) + b_{ijk} \sin(k\tilde{x}_j) \right] $$
+
+  $$
+  \phi_{i,j}(x_j) = \sum_{k=0}^{G} \left[ a_{ijk} \cos(k\tilde{x}_j) + b_{ijk} \sin(k\tilde{x}_j) \right]
+  $$
+
   其中 $G$ 为网格大小，$a, b$ 为可学习参数。
 - **输入域映射**: 通过 $\tilde{x}_j = \tanh(x_j) \cdot \pi$ 将输入映射到 $[-\pi, \pi]$ 空间，确保级数在有效频率内振荡。
 
 ### **4. 能量耗散系统 (Energy Dissipation)**
 ![耗散系统](png/耗散系统.png)
+**数学原理：**
 - **物理建模**: 模拟能量在环境中的耗散过程，增强模型的可解释性：
-  $$ P(y=1) = \text{sigmoid}\left( \frac{U_I - R_E}{T} \right) $$
+
+  $$
+  P(y=1) = \text{sigmoid}\left( \frac{U_I - R_E}{T} \right)
+  $$
+
   - **内势 $U_I$ (Internal Potential)**: 代表序列本身的固有属性。
   - **环境阻抗 $R_E$ (Environmental Resistance)**: 代表细胞系特有的环境影响，模型强制其非负。
   - **温度系数 $T$**: 可学习的缩放参数，控制预测的灵敏度。
@@ -62,10 +83,17 @@ RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传
 
 **数学原理：**
 - **损失目标**:
-  $$ \mathcal{L} = \frac{1}{2} \left( \frac{1}{n_+} \sum_{i \in \text{pos}} \Psi\left(\frac{z_i}{\alpha}\right) + \frac{1}{n_-} \sum_{i \in \text{neg}} \Psi\left(\frac{z_i}{1-\alpha}\right) \right) $$
+
+  $$
+  \mathcal{L} = \frac{1}{2} \left( \frac{1}{n_+} \sum_{i \in \text{pos}} \Psi\left(\frac{z_i}{\alpha}\right) + \frac{1}{n_-} \sum_{i \in \text{neg}} \Psi\left(\frac{z_i}{1-\alpha}\right) \right)
+  $$
+
   其中 $z_i$ 为有符号 Margin，$\Psi(u) = \log(1 + e^{-u})$。
 - **权重自适应更新**: 权重 $\alpha$ 通过样本困难度 $S$ 动态计算并配合 EMA 平滑：
-  $$ \alpha^* = \frac{\sqrt{S_+}}{\sqrt{S_+} + \sqrt{S_-}}, \quad S = \sum |z_i \cdot \Psi'(z_i/\alpha)| $$
+
+  $$
+  \alpha^* = \frac{\sqrt{S_+}}{\sqrt{S_+} + \sqrt{S_-}}, \quad S = \sum |z_i \cdot \Psi^\prime(z_i/\alpha)|
+  $$
 
 ---
 
