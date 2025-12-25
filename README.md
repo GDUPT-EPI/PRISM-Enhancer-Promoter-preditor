@@ -12,7 +12,141 @@ PRISM 是一个用于预测基因组序列中增强子-启动子 (Enhancer-Promo
 
 PRISM 采用了多项先进技术构建其模型架构 `PRISMBackbone`：
 
-![全流程](png/全流程.png)
+```mermaid
+graph TD
+
+    subgraph "PRISM Architecture: EP Interaction Probability Prediction"
+        direction TB
+        
+        subgraph A["Input Layer"]
+            A1[Enhancer Sequence]
+            A2[Promoter Sequence]
+            A3[Cell Line Label]
+        end
+        
+        subgraph B["DNA Sequence Encoding"]
+            B1[Embedding Layer]
+            B2[CNN Encoder]
+            B3[Pre-Attention<br/>RoPEAttention]
+        end
+        
+        subgraph C["Cross-Attention Mechanism"]
+            C1[Anchor Generation]
+            C2[E←P Cross-Attention<br/>CBAT Module]
+            C3[P←E Cross-Attention<br/>CBAT Module]
+            C4[Feature Fusion]
+        end
+        
+        subgraph D["Orthogonal Decoupling"]
+            D1[Intrinsic Feature z_I]
+            D2[Environmental Feature z_F]
+            D3[Gradient Reversal Layer]
+            D4[Domain Discriminator]
+        end
+        
+        subgraph E["Energy Dissipation System"]
+            E1[Intrinsic Potential U_I<br/>FourierEnergyKAN]
+            E2[Environmental Resistance R_E<br/>FourierEnergyKAN]
+            E3[Temperature Coefficient T]
+            E4[P = σ((U_I - R_E) / T)]
+        end
+        
+        subgraph F["Output Layer"]
+            F1[Prediction Probability]
+            F2[Adaptive Loss]
+            F3[Auxiliary Outputs]
+        end
+        
+        subgraph G["Loss Functions"]
+            G1[Base Loss<br/>AdaptiveIMMAX]
+            G2[Speculation Penalty]
+            G3[Sparsity Regularization]
+            G4[Orthogonal Constraint]
+            G5[Total Loss]
+        end
+        
+        %% Data Flow
+        A1 -->|Batch×L_en| B1
+        A2 -->|Batch×L_pr| B2
+        A3 -->|Batch| D2
+        
+        B1 --> B2 --> B3 --> C2
+        B1 --> B2 --> B3 --> C3
+        
+        B3 --> C1 --> C2
+        B3 --> C1 --> C3
+        
+        C2 --> C4
+        C3 --> C4
+        C4 --> D1
+        
+        D1 --> D3 --> D4
+        D1 --> E1
+        D2 --> E2
+        
+        E1 --> E4
+        E2 --> E4
+        E3 --> E4
+        E4 --> F1
+        
+        C2 --> F2
+        C3 --> F2
+        
+        D1 --> F3
+        D2 --> F3
+        E1 --> F3
+        E2 --> F3
+        E3 --> F3
+        
+        F1 --> G1
+        F1 --> G2
+        E2 --> G3
+        D1 --> G4
+        D2 --> G4
+        
+        G1 --> G5
+        G2 --> G5
+        F2 --> G5
+        G3 --> G5
+        G4 --> G5
+    end
+    
+    %% Style Definitions
+    classDef input fill:#e8f4f8,stroke:#2c7bb6,color:#1a3c5e,stroke-width:1.5px
+    classDef embedding fill:#f0f7fa,stroke:#4a90e2,color:#1a3c5e,stroke-width:1.5px
+    classDef attention fill:#fff5e6,stroke:#e67e22,color:#7d3c0d,stroke-width:1.5px
+    classDef feature fill:#e8f5e9,stroke:#27ae60,color:#145a32,stroke-width:1.5px
+    classDef energy fill:#fef5e7,stroke:#f39c12,color:#784212,stroke-width:1.5px
+    classDef output fill:#eaf2f8,stroke:#3498db,color:#1a5276,stroke-width:1.5px
+    classDef loss fill:#fdedec,stroke:#e74c3c,color:#78281f,stroke-width:1.5px
+    
+    %% Apply Styles
+    class A1,A2,A3 input
+    class B1,B2,B3 embedding
+    class C1,C2,C3,C4 attention
+    class D1,D2,D3,D4 feature
+    class E1,E2,E3,E4 energy
+    class F1,F2,F3 output
+    class G1,G2,G3,G4,G5 loss
+    
+    %% Link Styling
+    linkStyle default stroke-width:1.5px,stroke-dasharray:0
+    
+    %% Special Links
+    linkStyle 0 stroke:#2c7bb6
+    linkStyle 1 stroke:#2c7bb6
+    linkStyle 2 stroke:#2c7bb6
+    linkStyle 3 stroke:#4a90e2
+    linkStyle 4 stroke:#4a90e2
+    linkStyle 5 stroke:#e67e22
+    linkStyle 6 stroke:#e67e22
+    linkStyle 7 stroke:#27ae60
+    linkStyle 8 stroke:#27ae60
+    linkStyle 9 stroke:#f39c12
+    linkStyle 10 stroke:#f39c12
+    linkStyle 11 stroke:#3498db
+    linkStyle 12 stroke:#3498db
+```
 
 ### **1. 旋转位置编码 (RoPE - Rotary Positional Embedding)**
 RoPE 通过在复数空间旋转特征向量来注入位置信息，解决了传统绝对位置编码无法良好处理长序列和相对位置的问题。
